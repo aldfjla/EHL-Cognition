@@ -87,7 +87,7 @@ export default function MissionControlPage({
         <div>
           <div className="flex items-baseline gap-2">
             <Link
-              href="/"
+              href="/runs"
               className="font-mono text-xs text-slate-500 hover:text-sky-400"
             >
               ← runs
