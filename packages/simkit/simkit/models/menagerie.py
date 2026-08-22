@@ -357,9 +357,10 @@ def _unwrap_scene(mjcf: Path, depth: int = 0) -> Path | None:
 def count_joints(mjcf: Path) -> int | None:
     """Count actuated joints in an MJCF without compiling it.
 
-    Follows ``<include>`` directives, skips ``<default>`` blocks (those declare
-    classes, not joints) and ignores free joints, which are not DOF a controller
-    commands.
+    Only counts joints declared inside ``<worldbody>``: ``<default>`` blocks
+    declare classes, and ``<tendon>``/``<equality>`` blocks *reference* joints
+    that are already counted. Free joints are skipped, being world placement
+    rather than DOF a controller commands.
     """
     try:
         root = ET.parse(mjcf).getroot()
@@ -368,15 +369,12 @@ def count_joints(mjcf: Path) -> int | None:
 
     total = 0
     for element in root.iter():
-        tag = element.tag
-        if tag == "default":
-            continue
-        if tag == "include":
+        if element.tag == "include":
             child = mjcf.parent / element.get("file", "")
             if child.is_file():
-                nested = count_joints(child)
-                total += nested or 0
-    total += _count_joints_outside_defaults(root)
+                total += count_joints(child) or 0
+    for worldbody in root.iter("worldbody"):
+        total += _count_joints_outside_defaults(worldbody)
     return total
 
 

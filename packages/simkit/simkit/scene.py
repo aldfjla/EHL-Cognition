@@ -239,9 +239,17 @@ def apply_params(scene: Scene, params: dict[str, Any]) -> None:
                     model.geom_friction[geom, 0] = float(value)
         elif key == "gravity_z":
             model.opt.gravity[2] = float(value)
-        elif key.startswith(("object_position.", "bin_position.")):
-            # Positions belong to the reset pose, not the compiled model, so
-            # reset() reads them back out of the spec.
+        elif key.startswith("bin_position."):
+            # The bin is static geometry, so its offset is a model edit.
+            body = scene.handles.get("bin")
+            axis = {"x": 0, "y": 1}.get(key.rsplit(".", 1)[-1])
+            if body is None or axis is None:
+                unknown.append(key)
+                continue
+            model.body_pos[body, axis] = BIN_NOMINAL_POS[axis] + float(value)
+        elif key.startswith("object_position."):
+            # The object is free: its offset belongs to the reset pose, which
+            # reset() reads back out of the spec.
             continue
         elif key == "table_height_m":
             body = scene.handles.get("table")
@@ -296,15 +304,6 @@ def reset(scene: Scene, seed: int) -> None:
             table_h + OBJECT_HALF + float(params.get("object_position.z", 0.0))
         )
         data.qpos[adr + 3 : adr + 7] = (1.0, 0.0, 0.0, 0.0)
-
-    bin_body = scene.handles.get("bin")
-    if bin_body is not None:
-        model.body_pos[bin_body, 0] = BIN_NOMINAL_POS[0] + float(
-            params.get("bin_position.x", 0.0)
-        )
-        model.body_pos[bin_body, 1] = BIN_NOMINAL_POS[1] + float(
-            params.get("bin_position.y", 0.0)
-        )
 
     if model.nu:
         # Hold whatever the reset pose is: a harness that never writes ctrl

@@ -245,13 +245,13 @@ def from_kinematics(spec: dict, out_dir: Path) -> GeneratedModel:
 
 def add_gripper(model_path: Path, kind: str = "parallel_jaw") -> None:
     """Attach a generic gripper to the end effector."""
+    if kind != "parallel_jaw":
+        raise ValueError(f"unsupported gripper kind: {kind!r}")
     model_path = Path(model_path)
     tree = ET.parse(model_path)
     root = tree.getroot()
     if root.find(".//body[@name='gripper_base']") is not None:
         return
-    if kind != "parallel_jaw":
-        raise ValueError(f"unsupported gripper kind: {kind!r}")
 
     worldbody = root.find("worldbody")
     if worldbody is None:

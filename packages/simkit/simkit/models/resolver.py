@@ -318,10 +318,17 @@ def scan_joint_limits(repo_dir: Path) -> dict[str, tuple[float, float]]:
     Matches the shapes teams actually write — ``JOINT_LIMITS = [(-2.9, 2.9), ...]``
     or ``Q_MIN = [...]`` / ``Q_MAX = [...]`` — and returns one entry per joint.
     """
-    pair_re = re.compile(r"\(\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*\)")
+    number = r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
+    pair_re = re.compile(rf"[(\[]\s*({number})\s*,\s*({number})\s*[)\]]")
+    # Non-greedy to the first closing bracket: the elements are tuples, so the
+    # first ``]`` or ``}`` really is the end of the table.
     table_re = re.compile(
-        r"(?:JOINT_LIMITS|joint_limits|Q_LIMITS|LIMITS)\s*=\s*[\[(](.*?)[\])]",
+        r"(?:JOINT_LIMITS|joint_limits|Q_LIMITS|LIMITS)\s*=\s*[\[{](.*?)[\]}]",
         re.DOTALL,
+    )
+    vector_re = re.compile(
+        rf"\b(Q_MIN|Q_MAX|q_min|q_max|LOWER_LIMITS|UPPER_LIMITS)\s*=\s*[\[(]"
+        rf"((?:\s*{number}\s*,?)+)[\])]"
     )
     for path in _walk(repo_dir):
         if path.suffix != ".py":
@@ -337,6 +344,19 @@ def scan_joint_limits(repo_dir: Path) -> dict[str, tuple[float, float]]:
                     f"joint{i}": (float(low), float(high))
                     for i, (low, high) in enumerate(pairs)
                 }
+        vectors = {
+            match.group(1).lower(): [
+                float(v) for v in re.findall(number, match.group(2))
+            ]
+            for match in vector_re.finditer(text)
+        }
+        lows = vectors.get("q_min") or vectors.get("lower_limits") or []
+        highs = vectors.get("q_max") or vectors.get("upper_limits") or []
+        if len(lows) >= 4 and len(lows) == len(highs):
+            return {
+                f"joint{i}": (low, high)
+                for i, (low, high) in enumerate(zip(lows, highs, strict=True))
+            }
     return {}
 
 
