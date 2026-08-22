@@ -11,8 +11,9 @@ Deeper tests belong next to what they test: pipeline transition tests in
 
 from __future__ import annotations
 
-from app.main import create_app
 from fastapi.testclient import TestClient
+
+from app.main import create_app
 
 
 def test_app_constructs() -> None:
@@ -60,7 +61,3 @@ def test_stage_machine_is_wired() -> None:
     for stage in TERMINAL_STAGES:
         assert TRANSITIONS[stage] == (), f"{stage} is terminal but has exits"
         assert stage.is_terminal
-
-
-# TODO(build): add a test that POSTs a recorded GitHub push payload to
-# /webhooks/github with a valid signature and asserts a run is created.

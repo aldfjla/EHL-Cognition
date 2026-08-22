@@ -79,22 +79,23 @@ async def _drive_pipeline(run_id: str, bus: EventBus, settings: Settings) -> Non
         log.error("pipeline asked to drive unknown run %s", run_id)
         return
 
-    workspace = Workspace(
-        run_id=run.id,
-        repo=run.repo,
-        commit_sha=run.commit_sha,
-        root=Path("workspaces") / run.id,
-    )
-    ctx = PipelineContext(
-        run=run,
-        workspace=workspace,
-        bus=bus,
-        blackboard=Blackboard(run.id),
-        devin=_devin_or_none(),
-        max_fix_iterations=settings.max_agent_iterations,
-    )
-
+    # Construction is inside the try: a Workspace that cannot clone, or a
+    # missing Devin key, is the same class of failure as a stage that throws.
     try:
+        workspace = Workspace(
+            run_id=run.id,
+            repo=run.repo,
+            commit_sha=run.commit_sha,
+            root=Path("workspaces") / run.id,
+        )
+        ctx = PipelineContext(
+            run=run,
+            workspace=workspace,
+            bus=bus,
+            blackboard=Blackboard(run.id),
+            devin=_devin_or_none(),
+            max_fix_iterations=settings.max_agent_iterations,
+        )
         await Pipeline(ctx).run()
     except Exception as exc:
         log.exception("run %s failed", run.id)
@@ -102,7 +103,7 @@ async def _drive_pipeline(run_id: str, bus: EventBus, settings: Settings) -> Non
             bus,
             run.id,
             EventType.ERROR,
-            {"stage": ctx.run.stage.value, "message": str(exc), "fatal": True},
+            {"stage": run.stage.value, "message": str(exc), "fatal": True},
         )
         with session_scope() as db:
             current = repo.get_run(db, run.id)
