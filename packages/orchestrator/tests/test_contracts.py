@@ -25,6 +25,7 @@ ROOT_MODELS: dict[str, type[BaseModel]] = {
     "Finding": schemas.Finding,
     "Message": schemas.Message,
     "Report": schemas.Report,
+    "Repo": schemas.Repo,
     "Run": schemas.Run,
     "Scenario": schemas.Scenario,
 }

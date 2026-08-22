@@ -154,6 +154,8 @@ class PipelineContext:
     blackboard: Blackboard
     devin: DevinClient
     config: dict = field(default_factory=dict)
+    suite_size: int | None = None
+    default_suite_size: int = 50
     scenarios: list[Scenario] = field(default_factory=list)
     clusters: list[Cluster] = field(default_factory=list)
     report: Report | None = None
@@ -417,8 +419,15 @@ class Pipeline:
 
         ctx = self.ctx
         task = ctx.config.get("task", {})
+        configured_size = ctx.config.get("scenarios", {}).get("count")
         suite_size = int(
-            ctx.config.get("scenarios", {}).get("count", os.getenv("SUITE_SIZE", "24"))
+            ctx.suite_size
+            if ctx.suite_size is not None
+            else (
+                configured_size
+                if configured_size is not None
+                else ctx.default_suite_size
+            )
         )
         agent = await ScenarioDesignerAgent(ctx).dispatch(
             task_description=task.get("description", task.get("name", "")),
@@ -1274,6 +1283,7 @@ async def run_headless(repo: str, sha: str, branch: str = "main") -> Run:
             api_base=os.getenv("DEVIN_API_BASE", "https://api.devin.ai/v1"),
             max_parallel=int(os.getenv("MAX_PARALLEL_AGENTS", "6")),
         ),
+        default_suite_size=int(os.getenv("SUITE_SIZE", "50")),
     )
     return await Pipeline(ctx).run()
 

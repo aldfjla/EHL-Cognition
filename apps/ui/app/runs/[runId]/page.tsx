@@ -7,14 +7,17 @@
  * engineering team of agents exists, what each member is doing right now, and
  * what the simulations are doing *right now*.
  *
- * Layout intent (top to bottom, projector-first):
- *   1. counters — the run's vital signs: running/queued/passed/failed,
- *      agents working, worker pool saturation, current stage;
- *   2. the live simulation wall — one tile per running scenario with its
- *      feed, progress and worker; failures land loud and stay visible;
- *   3. the working row — PipelineTimeline | AgentGrid + AgentOpsPanel +
- *      ScenarioMatrix | TeamChat + AgentGraph;
- *   4. evidence — VideoCompare, DiffViewer, ReportView once they exist.
+ * Layout intent: the vital signs (counters, pipeline rail) stay above the fold
+ * on every view; everything else is split across four tabs so no single screen
+ * has to carry the whole run:
+ *   1 Overview   — the live simulation wall plus the team chat;
+ *   2 Agents     — roster, chain of command, agent ops, communication graph;
+ *   3 Scenarios  — the full randomized-world matrix;
+ *   4 Evidence   — videos, diff and report once the run produces them.
+ *
+ * Cross-references (a chat chip naming a scenario, a graph node naming an
+ * agent) switch to the right tab and focus the target — the tabs organize the
+ * screen, they never hide a lead.
  *
  * All state comes from one stream (`useLiveRun` wraps `useEventStream`) — no
  * child fetches anything.
@@ -22,10 +25,11 @@
 
 import clsx from "clsx";
 import Link from "next/link";
-import { use, useState } from "react";
+import { use, useEffect, useState } from "react";
 
 import AgentGraph from "@/components/AgentGraph";
 import AgentGrid from "@/components/AgentGrid";
+import AgentTree from "@/components/AgentTree";
 import AgentOpsPanel from "@/components/agents/AgentOpsPanel";
 import DiffViewer from "@/components/DiffViewer";
 import LiveCounters from "@/components/live/LiveCounters";
@@ -47,6 +51,23 @@ const CONNECTION_TONE: Record<ConnectionState, string> = {
   closed: "text-slate-500",
 };
 
+type Tab = "overview" | "agents" | "scenarios" | "evidence";
+
+const TABS: Array<{ id: Tab; label: string; key: string }> = [
+  { id: "overview", label: "Overview", key: "1" },
+  { id: "agents", label: "Agents", key: "2" },
+  { id: "scenarios", label: "Scenarios", key: "3" },
+  { id: "evidence", label: "Evidence", key: "4" },
+];
+
+function isEditable(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target.isContentEditable ||
+    ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)
+  );
+}
+
 export default function MissionControlPage({
   params,
 }: {
@@ -54,6 +75,7 @@ export default function MissionControlPage({
 }) {
   const { runId } = use(params);
   const state = useLiveRun(runId);
+  const [tab, setTab] = useState<Tab>("overview");
   const [focusedAgent, setFocusedAgent] = useState<string | null>(null);
   const [hoveredCluster, setHoveredCluster] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
@@ -61,10 +83,32 @@ export default function MissionControlPage({
   const replay = state.replay || isMockRun(runId);
   const stale = state.connection === "reconnecting" || state.connection === "closed";
 
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (isEditable(event.target)) return;
+      const target = TABS.find(({ key }) => key === event.key);
+      if (target !== undefined) setTab(target.id);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const onSelectRef = (ref: Ref): void => {
-    if (ref.type === "scenario") setSelectedScenario(ref.id);
+    if (ref.type === "scenario") {
+      setSelectedScenario(ref.id);
+      setTab("scenarios");
+    }
     if (ref.type === "cluster") setHoveredCluster(ref.id);
-    if (ref.type === "agent") setFocusedAgent(ref.id);
+    if (ref.type === "agent") {
+      setFocusedAgent(ref.id);
+      setTab("agents");
+    }
+  };
+
+  const focusAgent = (agentId: string | null): void => {
+    setFocusedAgent(agentId);
+    if (agentId !== null) setTab("agents");
   };
 
   return (
@@ -128,7 +172,7 @@ export default function MissionControlPage({
         </div>
       </header>
 
-      {/* 1. Vital signs — always above the fold. */}
+      {/* Vital signs — always above the fold, on every tab. */}
       <LiveCounters
         stage={state.run?.stage ?? null}
         scenarios={state.scenarios}
@@ -136,37 +180,91 @@ export default function MissionControlPage({
         pool={state.live.pool}
       />
 
-      {/* 2. The live simulation wall. */}
-      <div className="mt-4">
-        <LiveWall
-          runId={runId}
-          scenarios={state.scenarios}
-          live={state.live}
-          synthetic={replay}
-        />
-      </div>
+      <nav className="mt-4 flex items-center gap-1 border-b border-surface-border">
+        {TABS.map(({ id, label, key }) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setTab(id)}
+            className={clsx(
+              "-mb-px flex items-center gap-2 rounded-t border-b-2 px-3 py-2 font-mono text-xs",
+              tab === id
+                ? "border-sky-500 text-sky-300"
+                : "border-transparent text-slate-500 hover:text-slate-300",
+            )}
+          >
+            {label}
+            <kbd className="rounded bg-surface-raised px-1 text-[10px] text-slate-600">
+              {key}
+            </kbd>
+          </button>
+        ))}
+      </nav>
 
-      {/* 3. The working row. */}
-      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[220px_1fr_380px]">
-        <aside>
-          <PipelineTimeline
-            stage={state.run?.stage ?? null}
-            run={state.run}
-            agents={state.agents}
-          />
-        </aside>
+      {tab === "overview" && (
+        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[220px_1fr_380px]">
+          <aside>
+            <PipelineTimeline
+              stage={state.run?.stage ?? null}
+              run={state.run}
+              agents={state.agents}
+            />
+          </aside>
+          <section>
+            <LiveWall
+              runId={runId}
+              scenarios={state.scenarios}
+              live={state.live}
+              synthetic={replay}
+            />
+          </section>
+          <aside>
+            <TeamChat
+              messages={state.messages}
+              agents={state.agents}
+              onSelectRef={onSelectRef}
+            />
+          </aside>
+        </div>
+      )}
 
-        <section className="space-y-4">
-          <AgentGrid
-            agents={state.agents}
-            activeClusterId={hoveredCluster}
-            focusedAgentId={focusedAgent}
-          />
-          <AgentOpsPanel
-            runId={runId}
-            agents={state.agents}
-            onFocusAgent={setFocusedAgent}
-          />
+      {tab === "agents" && (
+        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1fr_380px]">
+          <section className="space-y-4">
+            <AgentTree
+              agents={state.agents}
+              messages={state.messages}
+              focusedAgentId={focusedAgent}
+              onFocusAgent={setFocusedAgent}
+            />
+            <AgentGrid
+              agents={state.agents}
+              activeClusterId={hoveredCluster}
+              focusedAgentId={focusedAgent}
+            />
+            <AgentOpsPanel
+              runId={runId}
+              agents={state.agents}
+              onFocusAgent={focusAgent}
+            />
+          </section>
+          <aside className="space-y-4">
+            <AgentGraph
+              agents={state.agents}
+              messages={state.messages}
+              onSelectAgent={focusAgent}
+            />
+            <TeamChat
+              messages={state.messages}
+              agents={state.agents}
+              onSelectRef={onSelectRef}
+            />
+          </aside>
+        </div>
+      )}
+
+      {tab === "scenarios" && (
+        <div className="mt-4 space-y-4">
           <ScenarioMatrix
             scenarios={state.scenarios}
             clusters={state.clusters}
@@ -174,28 +272,22 @@ export default function MissionControlPage({
             onSelectScenario={setSelectedScenario}
             onHoverCluster={setHoveredCluster}
           />
+          <LiveWall
+            runId={runId}
+            scenarios={state.scenarios}
+            live={state.live}
+            synthetic={replay}
+          />
+        </div>
+      )}
+
+      {tab === "evidence" && (
+        <section className="mt-4 space-y-4">
+          <VideoCompare incidents={state.report?.incidents ?? []} />
+          <DiffViewer diff={state.report?.diff ?? null} />
+          <ReportView report={state.report} />
         </section>
-
-        <aside className="space-y-4">
-          <TeamChat
-            messages={state.messages}
-            agents={state.agents}
-            onSelectRef={onSelectRef}
-          />
-          <AgentGraph
-            agents={state.agents}
-            messages={state.messages}
-            onSelectAgent={setFocusedAgent}
-          />
-        </aside>
-      </div>
-
-      {/* 4. Evidence, once the run produces it. */}
-      <section className="mt-4 space-y-4">
-        <VideoCompare incidents={state.report?.incidents ?? []} />
-        <DiffViewer diff={state.report?.diff ?? null} />
-        <ReportView report={state.report} />
-      </section>
+      )}
     </main>
   );
 }
