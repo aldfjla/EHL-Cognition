@@ -5,16 +5,19 @@
  *
  * This is the screen the whole project is pointed at: it shows that an
  * engineering team of agents exists, what each member is doing right now, and
- * how they are talking to each other.
+ * what the simulations are doing *right now*.
  *
- * Layout intent (three columns on a wide projector):
- *   left    - PipelineTimeline: where the run is, top to bottom
- *   centre  - AgentGrid over ScenarioMatrix: the team and the evidence
- *   right   - TeamChat over AgentGraph: the conversation and its shape
- * with DiffViewer, VideoCompare and ReportView appearing below once the run
- * reaches VERIFY and REPORT.
+ * Layout intent (top to bottom, projector-first):
+ *   1. counters — the run's vital signs: running/queued/passed/failed,
+ *      agents working, worker pool saturation, current stage;
+ *   2. the live simulation wall — one tile per running scenario with its
+ *      feed, progress and worker; failures land loud and stay visible;
+ *   3. the working row — PipelineTimeline | AgentGrid + AgentOpsPanel +
+ *      ScenarioMatrix | TeamChat + AgentGraph;
+ *   4. evidence — VideoCompare, DiffViewer, ReportView once they exist.
  *
- * All state comes from `useEventStream` — no child fetches anything.
+ * All state comes from one stream (`useLiveRun` wraps `useEventStream`) — no
+ * child fetches anything.
  */
 
 import clsx from "clsx";
@@ -23,15 +26,19 @@ import { use, useState } from "react";
 
 import AgentGraph from "@/components/AgentGraph";
 import AgentGrid from "@/components/AgentGrid";
+import AgentOpsPanel from "@/components/agents/AgentOpsPanel";
 import DiffViewer from "@/components/DiffViewer";
+import LiveCounters from "@/components/live/LiveCounters";
+import LiveWall from "@/components/live/LiveWall";
+import { useLiveRun } from "@/components/live/useLiveRun";
 import PipelineTimeline from "@/components/PipelineTimeline";
 import ReportView from "@/components/ReportView";
 import ScenarioMatrix from "@/components/ScenarioMatrix";
 import TeamChat from "@/components/TeamChat";
 import VideoCompare from "@/components/VideoCompare";
-import type { ConnectionState } from "@/lib/useEventStream";
-import { isMockRun, useEventStream } from "@/lib/useEventStream";
 import type { Ref } from "@/lib/types";
+import type { ConnectionState } from "@/lib/useEventStream";
+import { isMockRun } from "@/lib/useEventStream";
 
 const CONNECTION_TONE: Record<ConnectionState, string> = {
   connecting: "text-slate-400",
@@ -46,12 +53,12 @@ export default function MissionControlPage({
   params: Promise<{ runId: string }>;
 }) {
   const { runId } = use(params);
-  const state = useEventStream(runId);
+  const state = useLiveRun(runId);
   const [focusedAgent, setFocusedAgent] = useState<string | null>(null);
   const [hoveredCluster, setHoveredCluster] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
 
-  const replay = isMockRun(runId);
+  const replay = state.replay || isMockRun(runId);
   const stale = state.connection === "reconnecting" || state.connection === "closed";
 
   const onSelectRef = (ref: Ref): void => {
@@ -63,7 +70,7 @@ export default function MissionControlPage({
   return (
     <main className="p-6">
       {/* A silently stale dashboard is worse than a loud one. */}
-      {stale && (
+      {stale && !replay && (
         <div className="mb-4 rounded border border-status-blocked/60 bg-amber-950/30 px-3 py-2 text-xs text-status-blocked">
           {state.connection === "reconnecting"
             ? "Stream dropped — reconnecting and replaying from the last event seen. Numbers below may be behind."
@@ -76,7 +83,7 @@ export default function MissionControlPage({
         </div>
       )}
 
-      <header className="mb-6 flex flex-wrap items-baseline justify-between gap-3">
+      <header className="mb-4 flex flex-wrap items-baseline justify-between gap-3">
         <div>
           <div className="flex items-baseline gap-2">
             <Link
@@ -121,7 +128,26 @@ export default function MissionControlPage({
         </div>
       </header>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[220px_1fr_380px]">
+      {/* 1. Vital signs — always above the fold. */}
+      <LiveCounters
+        stage={state.run?.stage ?? null}
+        scenarios={state.scenarios}
+        agents={state.agents}
+        pool={state.live.pool}
+      />
+
+      {/* 2. The live simulation wall. */}
+      <div className="mt-4">
+        <LiveWall
+          runId={runId}
+          scenarios={state.scenarios}
+          live={state.live}
+          synthetic={replay}
+        />
+      </div>
+
+      {/* 3. The working row. */}
+      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[220px_1fr_380px]">
         <aside>
           <PipelineTimeline
             stage={state.run?.stage ?? null}
@@ -135,6 +161,11 @@ export default function MissionControlPage({
             agents={state.agents}
             activeClusterId={hoveredCluster}
             focusedAgentId={focusedAgent}
+          />
+          <AgentOpsPanel
+            runId={runId}
+            agents={state.agents}
+            onFocusAgent={setFocusedAgent}
           />
           <ScenarioMatrix
             scenarios={state.scenarios}
@@ -159,6 +190,7 @@ export default function MissionControlPage({
         </aside>
       </div>
 
+      {/* 4. Evidence, once the run produces it. */}
       <section className="mt-4 space-y-4">
         <VideoCompare incidents={state.report?.incidents ?? []} />
         <DiffViewer diff={state.report?.diff ?? null} />

@@ -417,6 +417,26 @@ def build_event_script(run: Run) -> tuple[Script, dict[str, Any]]:
                 status="fixed",
             ),
         ],
+        diff="""diff --git a/controller/pick.py b/controller/pick.py
+index 7d3e4f1..c2a8b91 100644
+--- a/controller/pick.py
++++ b/controller/pick.py
+@@ -42,8 +42,10 @@ def pick(robot, target):
+     robot.arm.approach(target)
+-    time.sleep(1.4)
++    while robot.arm.distance_to(target) > 0.01:
++        robot.arm.step()
+     robot.gripper.close()
+
+diff --git a/controller/motion.py b/controller/motion.py
+index 93c2e1a..f1840bc 100644
+--- a/controller/motion.py
++++ b/controller/motion.py
+@@ -18,6 +18,8 @@ def retreat(robot, qdot):
+     limits = robot.model.joint_velocity_limits
++    qdot = np.clip(qdot, -limits, limits)
+     robot.arm.set_velocity(qdot)
+""",
         before=baseline,
         after=after,
         pull_request_url=f"https://github.com/{run.repo}/pull/128",

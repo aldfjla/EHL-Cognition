@@ -40,6 +40,11 @@ const SCENARIO_COUNT = 24;
 /** Seeds that fail, split across two root causes. */
 const GRIP_FAILURES = [3, 9, 14];
 const LATENCY_FAILURES = [17, 21];
+const WORKER_POOL = ["worker_01", "worker_02", "worker_03"];
+const GRIP_DIAGNOSIS =
+  "Gripper closed 41mm before reaching the cube; object never left the table.";
+const LATENCY_DIAGNOSIS =
+  "Actuator latency pushed the approach 180ms late; wrist clipped the bin lip at 0.019m penetration.";
 
 let clockMs = Date.now();
 
@@ -77,6 +82,9 @@ function makeScenario(runId: string, index: number): Scenario {
     diagnosis: null,
     cluster_id: failsGrip ? "cl_grip" : failsLatency ? "cl_latency" : null,
     video_path: null,
+    live_frame_path: null,
+    worker_id: null,
+    progress: null,
     trace_path: null,
     error: null,
   };
@@ -105,11 +113,7 @@ function finishScenario(scenario: Scenario): Scenario {
         threshold: 0.005,
       },
     ],
-    diagnosis: failsGrip
-      ? "Gripper closed 41mm before reaching the cube; object never left the table."
-      : failsLatency
-        ? "Actuator latency pushed the approach 180ms late; wrist clipped the bin lip at 0.019m penetration."
-        : null,
+    diagnosis: failsGrip ? GRIP_DIAGNOSIS : failsLatency ? LATENCY_DIAGNOSIS : null,
     video_path: passed ? null : `${scenario.run_id}/${scenario.id}_before.mp4`,
     trace_path: `${scenario.run_id}/${scenario.id}.trace.json`,
   };
@@ -140,6 +144,9 @@ function makeAgent(
     parent_agent_id: null,
     finding_ids: [],
     last_activity: null,
+    desktop_url: null,
+    issue: null,
+    step: null,
     created_at: now,
     updated_at: now,
     finished_at: null,
@@ -233,6 +240,12 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     status: "working",
     previous_status: "starting",
   });
+  push(100, "agent.updated", {
+    agent_id: harness.id,
+    session_id: "sess_harness",
+    session_url: "https://app.devin.ai/sessions/a11ce001",
+    step: "binding MuJoCo actuators",
+  });
   push(700, "agent.activity", {
     agent_id: harness.id,
     text: "Faking driver.set_joint_positions() onto mjData.ctrl; units are radians.",
@@ -281,6 +294,12 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     agent_id: designer.id,
     status: "working",
     previous_status: "starting",
+  });
+  push(100, "agent.updated", {
+    agent_id: designer.id,
+    session_id: "sess_qa",
+    session_url: "https://app.devin.ai/sessions/a11ce002",
+    step: "choosing randomized axes",
   });
   push(600, "message.sent", {
     id: "msg_0002",
@@ -336,9 +355,48 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
   let passed = 0;
   let failed = 0;
   for (const scenario of scenarios) {
-    push(120, "scenario.started", { scenario_id: scenario.id });
-    const finished = finishScenario(scenario);
+    const workerId = WORKER_POOL[scenario.index % WORKER_POOL.length];
+    const liveFramePath = `live/${scenario.id}.jpg`;
+    const queued = scenarios.length - scenario.index - 1;
+    push(40, "worker.pool_changed", {
+      workers: WORKER_POOL.length,
+      busy: 1,
+      queued,
+      reason: `${workerId} picked up ${scenario.id}`,
+    });
+    push(120, "scenario.started", {
+      scenario_id: scenario.id,
+      worker_id: workerId,
+    });
+    const inProgress = {
+      ...scenario,
+      status: "running" as const,
+      worker_id: workerId,
+      progress: 0,
+      sim_time_s: 0,
+      live_frame_path: liveFramePath,
+    };
+    const horizon = finishScenario(inProgress).sim_time_s ?? 6.2;
+    for (const progress of [0.25, 0.5, 0.75]) {
+      push(80, "scenario.progress", {
+        scenario_id: scenario.id,
+        progress,
+        sim_time_s: Number((horizon * progress).toFixed(2)),
+        live_frame_path: liveFramePath,
+      });
+    }
+    const finished = {
+      ...finishScenario(inProgress),
+      live_frame_path: null,
+      progress: 1,
+    } satisfies Scenario;
     push(260, "scenario.finished", finished);
+    push(40, "worker.pool_changed", {
+      workers: WORKER_POOL.length,
+      busy: 0,
+      queued,
+      reason: `${workerId} finished ${scenario.id}`,
+    });
     completed += 1;
     if (finished.status === "passed") passed += 1;
     else failed += 1;
@@ -374,11 +432,13 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     to_role: "broadcast",
     kind: "finding",
     body:
-      "5 failures grouped into 2 clusters by diagnosis and parameter " +
-      "correlation: grasp timeout (3) and late approach collision (2).",
+      "5 failures grouped into 2 failure clusters by diagnosis and parameter " +
+      "correlation: grasp timeout (3) and late approach collision (2), plus " +
+      "one observation-only trace cluster.",
     refs: [
       { type: "cluster", id: "cl_grip", label: "grasp timeout ×3" },
       { type: "cluster", id: "cl_latency", label: "late approach ×2" },
+      { type: "cluster", id: "cl_observation", label: "trace observations" },
     ],
     ts: new Date(clockMs).toISOString(),
   } satisfies Message);
@@ -406,12 +466,23 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
       scenario_ids: LATENCY_FAILURES.map((i) => `scn_${String(i).padStart(2, "0")}`),
     },
   );
+  const inv3 = makeAgent(
+    runId,
+    "agt_inv_trace",
+    "investigator",
+    "Debug Eng #3 — trace observations",
+    "Collect an observation-only trace for future diagnostics without changing the verdict.",
+    {
+      cluster_id: "cl_observation",
+    },
+  );
   push(600, "run.stage_changed", {
     stage: "INVESTIGATE",
     previous_stage: "CLUSTER_FAILURES",
   });
   push(150, "agent.created", inv1);
   push(150, "agent.created", inv2);
+  push(150, "agent.created", inv3);
   push(400, "agent.status_changed", {
     agent_id: inv1.id,
     status: "working",
@@ -421,6 +492,50 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     agent_id: inv2.id,
     status: "working",
     previous_status: "starting",
+  });
+  push(120, "agent.status_changed", {
+    agent_id: inv3.id,
+    status: "working",
+    previous_status: "starting",
+  });
+  push(100, "agent.updated", {
+    agent_id: inv1.id,
+    session_id: "sess_inv_grip",
+    session_url: "https://app.devin.ai/sessions/a11ce101",
+    desktop_url: "/mock/desktop/index.html?agent=agt_inv_grip",
+    issue: GRIP_DIAGNOSIS,
+    step: "reading controller.py",
+  });
+  push(100, "agent.updated", {
+    agent_id: inv2.id,
+    session_id: "sess_inv_latency",
+    session_url: "https://app.devin.ai/sessions/a11ce102",
+    desktop_url: "/mock/desktop/index.html?agent=agt_inv_latency",
+    issue: LATENCY_DIAGNOSIS,
+    step: "reading controller.py",
+  });
+  push(100, "agent.updated", {
+    agent_id: inv3.id,
+    session_id: "sess_inv_trace",
+    session_url: "https://app.devin.ai/sessions/a11ce103",
+    step: "collecting trace metadata",
+  });
+  push(400, "agent.updated", {
+    agent_id: inv1.id,
+    step: "reproducing seed 4421",
+  });
+  push(300, "agent.updated", {
+    agent_id: inv2.id,
+    step: "reproducing seed 4519",
+  });
+  push(300, "agent.updated", {
+    agent_id: inv3.id,
+    step: "waiting on missing trace artifact",
+  });
+  push(100, "agent.status_changed", {
+    agent_id: inv3.id,
+    status: "blocked",
+    previous_status: "working",
   });
   push(800, "agent.activity", {
     agent_id: inv1.id,
@@ -447,6 +562,14 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     refs: [{ type: "scenario", id: "scn_03", label: "seed 4421" }],
     ts: new Date(clockMs).toISOString(),
   } satisfies Message);
+  push(200, "agent.updated", {
+    agent_id: inv1.id,
+    step: "writing patch",
+  });
+  push(200, "agent.updated", {
+    agent_id: inv2.id,
+    step: "writing patch",
+  });
   push(500, "finding.created", {
     id: "fnd_rc_grip",
     run_id: runId,
@@ -521,6 +644,14 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     "Replace the fixed grasp timer with a contact-conditioned wait.",
     { cluster_id: "cl_grip", parent_agent_id: inv1.id, iteration: 1 },
   );
+  const fix1Attempt = makeAgent(
+    runId,
+    "agt_fix_grip_attempt1",
+    "fixer",
+    "Fix Eng #1 — grasp timeout (attempt 1)",
+    "Try a contact-conditioned grasp patch within the iteration budget.",
+    { cluster_id: "cl_grip", parent_agent_id: inv1.id },
+  );
   const fix2 = makeAgent(
     runId,
     "agt_fix_latency",
@@ -531,6 +662,7 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
   );
   push(600, "run.stage_changed", { stage: "FIX", previous_stage: "INVESTIGATE" });
   push(150, "agent.created", fix1);
+  push(150, "agent.created", fix1Attempt);
   push(150, "agent.created", fix2);
   push(300, "message.sent", {
     id: "msg_0006",
@@ -549,8 +681,15 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     ],
     ts: new Date(clockMs).toISOString(),
   } satisfies Message);
-  push(200, "agent.status_changed", {
-    agent_id: fix1.id,
+  push(100, "agent.updated", {
+    agent_id: fix1Attempt.id,
+    session_id: "sess_fix_grip_attempt1",
+    session_url: "https://app.devin.ai/sessions/a11ce201",
+    issue: GRIP_DIAGNOSIS,
+    step: "reading controller.py",
+  });
+  push(100, "agent.status_changed", {
+    agent_id: fix1Attempt.id,
     status: "working",
     previous_status: "starting",
   });
@@ -558,6 +697,45 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     agent_id: fix2.id,
     status: "working",
     previous_status: "starting",
+  });
+  push(100, "agent.updated", {
+    agent_id: fix1.id,
+    session_id: "sess_fix_grip",
+    session_url: "https://app.devin.ai/sessions/a11ce202",
+    desktop_url: "/mock/desktop/index.html?agent=agt_fix_grip",
+    issue: GRIP_DIAGNOSIS,
+    step: "reading controller.py",
+  });
+  push(100, "agent.updated", {
+    agent_id: fix2.id,
+    session_id: "sess_fix_latency",
+    session_url: "https://app.devin.ai/sessions/a11ce203",
+    desktop_url: "/mock/desktop/index.html?agent=agt_fix_latency",
+    issue: LATENCY_DIAGNOSIS,
+    step: "reading controller.py",
+  });
+  push(250, "agent.updated", {
+    agent_id: fix1Attempt.id,
+    iteration: 3,
+    step: "iteration cap reached",
+  });
+  push(100, "agent.status_changed", {
+    agent_id: fix1Attempt.id,
+    status: "failed",
+    previous_status: "working",
+  });
+  push(200, "agent.status_changed", {
+    agent_id: fix1.id,
+    status: "working",
+    previous_status: "starting",
+  });
+  push(150, "agent.updated", {
+    agent_id: fix1.id,
+    step: "reproducing seed 4421",
+  });
+  push(150, "agent.updated", {
+    agent_id: fix2.id,
+    step: "reproducing seed 4519",
   });
   push(700, "agent.activity", {
     agent_id: fix1.id,
@@ -597,6 +775,14 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     refs: [{ type: "commit", id: "b41f0aa", label: "path.py" }],
     ts: new Date(clockMs).toISOString(),
   } satisfies Message);
+  push(200, "agent.updated", {
+    agent_id: fix1.id,
+    step: "writing patch",
+  });
+  push(200, "agent.updated", {
+    agent_id: fix2.id,
+    step: "writing patch",
+  });
   push(300, "agent.status_changed", {
     agent_id: fix1.id,
     status: "succeeded",
@@ -622,6 +808,12 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     agent_id: reviewer.id,
     status: "working",
     previous_status: "starting",
+  });
+  push(100, "agent.updated", {
+    agent_id: reviewer.id,
+    session_id: "sess_reviewer",
+    session_url: "https://app.devin.ai/sessions/a11ce301",
+    step: "running merged verification",
   });
   for (const index of [...GRIP_FAILURES, ...LATENCY_FAILURES]) {
     const scenario = scenarios[index];
@@ -691,6 +883,12 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     agent_id: reporter.id,
     status: "working",
     previous_status: "starting",
+  });
+  push(100, "agent.updated", {
+    agent_id: reporter.id,
+    session_id: "sess_reporter",
+    session_url: "https://app.devin.ai/sessions/a11ce302",
+    step: "writing incident report",
   });
 
   const report: Report = {
@@ -812,6 +1010,59 @@ index 7c02e11..d9b3f45 100644
   return script;
 }
 
+/**
+ * Fold the scripted agent events into the roster shown after a completed
+ * replay. Keeping this projection event-driven prevents the static demo from
+ * drifting away from the replay's final state.
+ */
+export function mockAgents(runId: string = MOCK_RUN_ID): Agent[] {
+  const agents = new Map<string, Agent>();
+
+  for (const frame of mockRunScript(runId)) {
+    const { event } = frame;
+    switch (event.type) {
+      case "agent.created":
+        agents.set(event.data.id, event.data);
+        break;
+      case "agent.updated": {
+        const { agent_id: agentId, ...changed } = event.data;
+        const current = agents.get(agentId);
+        if (!current) break;
+        agents.set(agentId, {
+          ...current,
+          ...changed,
+          updated_at: event.ts,
+        });
+        break;
+      }
+      case "agent.status_changed": {
+        const current = agents.get(event.data.agent_id);
+        if (!current) break;
+        agents.set(event.data.agent_id, {
+          ...current,
+          status: event.data.status,
+          updated_at: event.ts,
+        });
+        break;
+      }
+      case "agent.activity": {
+        const current = agents.get(event.data.agent_id);
+        if (!current) break;
+        agents.set(event.data.agent_id, {
+          ...current,
+          last_activity: event.data.text,
+          updated_at: event.ts,
+        });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return [...agents.values()];
+}
+
 /** Clusters the replay would have received from `GET /runs/{id}`. */
 export function mockClusters(runId: string = MOCK_RUN_ID): Cluster[] {
   return [
@@ -830,6 +1081,14 @@ export function mockClusters(runId: string = MOCK_RUN_ID): Cluster[] {
       scenario_ids: LATENCY_FAILURES.map((i) => `scn_${String(i).padStart(2, "0")}`),
       signature: "no_collision:failed|latency",
       size: LATENCY_FAILURES.length,
+    },
+    {
+      id: "cl_observation",
+      run_id: runId,
+      label: "trace observations",
+      scenario_ids: [],
+      signature: "observation-only|missing-trace",
+      size: 0,
     },
   ];
 }

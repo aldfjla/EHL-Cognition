@@ -68,6 +68,10 @@ export const EMPTY_RUN_STATE: RunState = {
 
 /** Backoff schedule for reconnects, in milliseconds. Capped, not unbounded. */
 const BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 15000];
+const RESYNC_WINDOW_MS = 10_000;
+const MAX_RESYNCS_PER_WINDOW = 3;
+export const RESYNC_STORM_ERROR =
+  "Live stream resync storm detected; event updates have been paused.";
 
 /**
  * True when this run id should be served by the local scripted replay instead
@@ -75,6 +79,76 @@ const BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 15000];
  */
 export function isMockRun(runId: string): boolean {
   return runId === MOCK_RUN_ID || runId.startsWith("mock");
+}
+
+export type SequenceDecision = "apply" | "duplicate" | "gap";
+
+export interface EventCursor {
+  appliedSeq: number;
+  resyncInFlight: boolean;
+}
+
+export interface ResyncTracker {
+  history: number[];
+  stormed: boolean;
+}
+
+/**
+ * Advance the stream cursor synchronously with dispatch.
+ *
+ * React state is intentionally not involved here: several WebSocket frames
+ * can arrive before a render commits the previous reducer action.
+ */
+export function acceptEventSeq(
+  cursor: EventCursor,
+  incoming: unknown,
+): SequenceDecision {
+  if (typeof incoming !== "number") return "apply";
+  if (incoming <= cursor.appliedSeq) return "duplicate";
+  if (cursor.appliedSeq > 0 && incoming > cursor.appliedSeq + 1) {
+    return "gap";
+  }
+  cursor.appliedSeq = incoming;
+  return "apply";
+}
+
+export function beginResync(cursor: EventCursor): boolean {
+  if (cursor.resyncInFlight) return false;
+  cursor.resyncInFlight = true;
+  return true;
+}
+
+export function completeResync(
+  cursor: EventCursor,
+  replayedEvents: readonly Pick<RunEvent, "seq">[],
+): number {
+  const highestReplayedSeq = replayedEvents.reduce(
+    (highest, event) => Math.max(highest, event.seq),
+    cursor.appliedSeq,
+  );
+  cursor.appliedSeq = highestReplayedSeq;
+  return cursor.appliedSeq;
+}
+
+export function recordResyncStart(
+  tracker: ResyncTracker,
+  now: number,
+): boolean {
+  if (tracker.stormed) return false;
+  tracker.history = tracker.history.filter(
+    (startedAt) => now - startedAt < RESYNC_WINDOW_MS,
+  );
+  if (tracker.history.length >= MAX_RESYNCS_PER_WINDOW) {
+    tracker.stormed = true;
+    return false;
+  }
+  tracker.history.push(now);
+  return true;
+}
+
+export function resetResyncTracker(tracker: ResyncTracker): void {
+  tracker.history = [];
+  tracker.stormed = false;
 }
 
 type Action =
@@ -256,36 +330,57 @@ function reducer(state: RunState, action: Action): RunState {
  */
 export function useEventStream(runId: string | null): RunState {
   const [state, dispatch] = useReducer(reducer, EMPTY_RUN_STATE);
-  const seqRef = useRef(0);
-
-  seqRef.current = state.seq;
+  const cursorRef = useRef<EventCursor>({
+    appliedSeq: 0,
+    resyncInFlight: false,
+  });
+  const resyncTrackerRef = useRef<ResyncTracker>({
+    history: [],
+    stormed: false,
+  });
 
   /** First paint from REST, so the page is never blank while the socket opens. */
   const resync = useCallback(
     async (id: string): Promise<void> => {
-      const detail = await api.getRun(id);
-      const [agents, messages, findings] = await Promise.all([
-        api.getAgents(id).catch(() => [] as Agent[]),
-        api.getMessages(id).catch(() => [] as Message[]),
-        api.getFindings(id).catch(() => [] as Finding[]),
-      ]);
-      const report = detail.report_id
-        ? await api.getReport(id).catch(() => null)
-        : null;
-      const { scenarios, clusters, ...run } = detail;
-      dispatch({
-        kind: "snapshot",
-        state: {
-          run: run as Run,
-          scenarios,
-          clusters,
-          agents,
-          messages,
-          findings,
-          report,
-          error: null,
-        },
-      });
+      const cursor = cursorRef.current;
+      if (!beginResync(cursor)) return;
+
+      try {
+        if (!recordResyncStart(resyncTrackerRef.current, Date.now())) {
+          dispatch({ kind: "error", error: RESYNC_STORM_ERROR });
+          return;
+        }
+
+        const since = cursor.appliedSeq;
+        const detail = await api.getRun(id);
+        const replayedEvents = await api.getEvents(id, since).catch(() => []);
+        const [agents, messages, findings] = await Promise.all([
+          api.getAgents(id).catch(() => [] as Agent[]),
+          api.getMessages(id).catch(() => [] as Message[]),
+          api.getFindings(id).catch(() => [] as Finding[]),
+        ]);
+        const report = detail.report_id
+          ? await api.getReport(id).catch(() => null)
+          : null;
+        const { scenarios, clusters, ...run } = detail;
+        const appliedSeq = completeResync(cursor, replayedEvents);
+        dispatch({
+          kind: "snapshot",
+          state: {
+            run: run as Run,
+            scenarios,
+            clusters,
+            agents,
+            messages,
+            findings,
+            report,
+            seq: appliedSeq,
+            error: null,
+          },
+        });
+      } finally {
+        cursor.resyncInFlight = false;
+      }
     },
     [dispatch],
   );
@@ -326,11 +421,14 @@ export function useEventStream(runId: string | null): RunState {
         connection: retry === 0 ? "connecting" : "reconnecting",
       });
 
-      const ws = new WebSocket(`${WS_BASE}/ws/runs/${runId}?since=${seqRef.current}`);
+      const ws = new WebSocket(
+        `${WS_BASE}/ws/runs/${runId}?since=${cursorRef.current.appliedSeq}`,
+      );
       socket = ws;
 
       ws.onopen = () => {
         retry = 0;
+        resetResyncTracker(resyncTrackerRef.current);
         dispatch({ kind: "connection", connection: "open" });
       };
 
@@ -343,17 +441,17 @@ export function useEventStream(runId: string | null): RunState {
         }
         if (!isRunEvent(payload)) return;
 
-        const incoming = payload.seq;
-        const applied = seqRef.current;
+        const decision = acceptEventSeq(cursorRef.current, payload.seq);
         // A gap means we fell behind: refetch rather than render a state we
         // cannot reconstruct. Silently continuing is subtly wrong, which is
         // worse than visibly reloading.
-        if (typeof incoming === "number" && applied > 0 && incoming > applied + 1) {
+        if (decision === "gap") {
           void resync(runId).catch((err: Error) => {
             dispatch({ kind: "error", error: err.message });
           });
           return;
         }
+        if (decision === "duplicate") return;
         dispatch({ kind: "event", event: payload });
       };
 
