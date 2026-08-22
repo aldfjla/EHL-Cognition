@@ -43,10 +43,32 @@ const config: Config = {
           "60%": { transform: "scale(1.12)" },
           "100%": { transform: "scale(1)", opacity: "1" },
         },
+        // A worker picking up a scenario: the tile pops onto the wall.
+        pop: {
+          "0%": { opacity: "0", transform: "scale(0.94)" },
+          "70%": { opacity: "1", transform: "scale(1.02)" },
+          "100%": { opacity: "1", transform: "scale(1)" },
+        },
+        // Verdict landed: one ring pulse in the outcome's colour so the
+        // running blue -> passed green (or failed red) flip is seen, not just
+        // found later.
+        "settle-pass": {
+          "0%": { transform: "scale(1)", boxShadow: "0 0 0 0 rgba(52,211,153,0.55)" },
+          "45%": { transform: "scale(1.035)", boxShadow: "0 0 0 6px rgba(52,211,153,0.28)" },
+          "100%": { transform: "scale(1)", boxShadow: "0 0 0 0 rgba(52,211,153,0)" },
+        },
+        "settle-fail": {
+          "0%": { transform: "scale(1)", boxShadow: "0 0 0 0 rgba(248,113,113,0.6)" },
+          "45%": { transform: "scale(1.05)", boxShadow: "0 0 0 7px rgba(248,113,113,0.3)" },
+          "100%": { transform: "scale(1)", boxShadow: "0 0 0 0 rgba(248,113,113,0)" },
+        },
       },
       animation: {
         rise: "rise 260ms ease-out",
         land: "land 320ms ease-out",
+        pop: "pop 260ms ease-out",
+        "settle-pass": "settle-pass 520ms ease-out",
+        "settle-fail": "settle-fail 520ms ease-out",
       },
     },
   },
