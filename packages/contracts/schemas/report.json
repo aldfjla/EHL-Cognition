@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://robotci.dev/schemas/report.json",
+  "title": "Report",
+  "description": "The written incident report produced at REPORT stage. Rendered by ReportView and used verbatim as the pull request body.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "run_id", "verdict", "title", "summary", "created_at"],
+  "properties": {
+    "id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "verdict": {
+      "description": "clean: nothing failed. fixed: failures found and repaired, PR opened. unresolved: failures found but not fixed within the iteration budget.",
+      "enum": ["clean", "fixed", "unresolved"]
+    },
+    "title": { "type": "string", "description": "PR title, e.g. 'Fix gripper closure timing under low-friction payloads'." },
+    "summary": { "type": "string", "description": "Markdown executive summary — what broke, why, what changed." },
+    "incidents": {
+      "type": "array",
+      "description": "One entry per failure cluster investigated.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cluster_id", "title", "root_cause", "resolution"],
+        "properties": {
+          "cluster_id": { "type": "string" },
+          "title": { "type": "string" },
+          "affected_scenarios": { "type": "integer", "minimum": 0 },
+          "root_cause": { "type": "string", "description": "Markdown. The Investigator's confirmed explanation." },
+          "resolution": { "type": "string", "description": "Markdown. What the Fixer changed, and why that addresses the cause." },
+          "files_changed": { "type": "array", "items": { "type": "string" } },
+          "before_video": { "type": ["string", "null"], "description": "Artifact path: the failure." },
+          "after_video": { "type": ["string", "null"], "description": "Artifact path: the same seed, passing." },
+          "status": { "enum": ["fixed", "unresolved"] }
+        }
+      }
+    },
+    "diff": { "type": ["string", "null"], "description": "Unified diff of all accepted patches, rendered by DiffViewer." },
+    "before": { "$ref": "#/$defs/suiteStats" },
+    "after": { "$ref": "#/$defs/suiteStats" },
+    "pull_request_url": { "type": ["string", "null"], "format": "uri" },
+    "markdown_path": { "type": ["string", "null"], "description": "Path under ARTIFACTS_DIR to the rendered report file." },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "suiteStats": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["total", "passed", "failed"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "pass_rate": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    }
+  }
+}

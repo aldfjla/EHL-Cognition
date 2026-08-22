@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://robotci.dev/schemas/scenario.json",
+  "title": "Scenario",
+  "description": "One randomized simulated world plus the result of running the pushed control code inside it. One cell of the ScenarioMatrix grid.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "run_id", "index", "seed", "params", "status"],
+  "properties": {
+    "id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "index": { "type": "integer", "minimum": 0, "description": "Position in the matrix, 0-based." },
+    "seed": { "type": "integer", "description": "RNG seed. Replaying this seed reproduces the world exactly — this is what makes failures reproducible for the Investigator." },
+    "label": { "type": "string", "description": "Short human name, e.g. 'heavy cube, low friction'." },
+    "params": {
+      "type": "object",
+      "description": "The sampled world parameters. Keys come from robotci.yaml `scenarios.randomize`; values are concrete scalars.",
+      "additionalProperties": { "type": ["number", "string", "boolean", "array"] }
+    },
+    "status": { "enum": ["pending", "running", "passed", "failed", "error"] },
+    "attempt": { "type": "integer", "minimum": 1, "description": "1 for the baseline suite, incremented on VERIFY re-runs." },
+    "duration_s": { "type": ["number", "null"], "description": "Wall-clock seconds to simulate." },
+    "sim_time_s": { "type": ["number", "null"], "description": "Simulated seconds elapsed before termination." },
+    "criteria": {
+      "type": "array",
+      "description": "Per-criterion outcome from robotci.yaml `task.success`.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "passed"],
+        "properties": {
+          "id": { "type": "string" },
+          "passed": { "type": "boolean" },
+          "value": { "type": ["number", "string", "null"], "description": "Measured value that was compared." },
+          "threshold": { "type": ["number", "string", "null"] }
+        }
+      }
+    },
+    "diagnosis": {
+      "type": ["string", "null"],
+      "description": "Human-readable failure explanation from simkit/scoring.py, e.g. 'Gripper closed 40mm before reaching the cube; object never left the table.' This string is the primary input to the Investigator agent — it is the oracle's voice, not an agent's guess."
+    },
+    "cluster_id": { "type": ["string", "null"], "description": "Assigned by clustering.py after CLUSTER_FAILURES." },
+    "video_path": { "type": ["string", "null"], "description": "Path under ARTIFACTS_DIR to the recorded mp4." },
+    "trace_path": { "type": ["string", "null"], "description": "Path to the joint/state trace for offline analysis." },
+    "error": { "type": ["string", "null"], "description": "Set for status='error': the sim itself broke, distinct from the robot failing the task." }
+  }
+}

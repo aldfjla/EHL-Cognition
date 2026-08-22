@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://robotci.dev/schemas/event.json",
+  "title": "Event",
+  "description": "The envelope pushed over WS /ws/runs/{id}. Every UI update is one of these. See docs/EVENT_PROTOCOL.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "run_id", "type", "ts", "data"],
+  "properties": {
+    "id": { "type": "string", "description": "Monotonic per-run event id; clients resume with ?since=." },
+    "run_id": { "type": "string" },
+    "seq": { "type": "integer", "minimum": 0, "description": "Ordinal within the run. Gaps mean the client missed events and should refetch." },
+    "type": {
+      "enum": [
+        "run.created",
+        "run.stage_changed",
+        "run.finished",
+        "agent.created",
+        "agent.status_changed",
+        "agent.activity",
+        "message.sent",
+        "scenario.created",
+        "scenario.started",
+        "scenario.finished",
+        "suite.progress",
+        "finding.created",
+        "finding.updated",
+        "artifact.created",
+        "report.created",
+        "error"
+      ]
+    },
+    "ts": { "type": "string", "format": "date-time" },
+    "data": {
+      "type": "object",
+      "description": "Payload matching the event type: the full Run, Agent, Message, Scenario, Finding or Report object, or a partial patch for *_changed events."
+    }
+  }
+}

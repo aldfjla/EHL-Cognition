@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://robotci.dev/schemas/run.json",
+  "title": "Run",
+  "description": "One CI run: a single push to the customer repo, taken from trigger to terminal state. The root object the dashboard renders.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "stage", "repo", "commit_sha", "created_at"],
+  "properties": {
+    "id": { "type": "string", "description": "Opaque run id, e.g. 'run_01HQ...'." },
+    "stage": { "$ref": "#/$defs/stage" },
+    "repo": { "type": "string", "description": "Customer repo under test, 'owner/name'." },
+    "branch": { "type": "string", "description": "Branch the push landed on." },
+    "commit_sha": { "type": "string", "description": "Full 40-char SHA under test." },
+    "commit_message": { "type": "string" },
+    "pushed_by": { "type": "string", "description": "GitHub login that triggered the run." },
+    "robot_model": {
+      "type": ["object", "null"],
+      "description": "Resolved physical model. Null until RESOLVE_MODEL completes.",
+      "additionalProperties": false,
+      "required": ["source", "model_path"],
+      "properties": {
+        "source": { "enum": ["menagerie", "repo", "generated"], "description": "How the model was obtained. 'generated' means the Modeler agent synthesized MJCF." },
+        "name": { "type": "string", "description": "Menagerie directory name or synthesized model name." },
+        "model_path": { "type": "string", "description": "Absolute path to the MJCF file used by the suite." },
+        "dof": { "type": "integer", "minimum": 1 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "Modeler's self-reported confidence that this model matches the real hardware." }
+      }
+    },
+    "suite": {
+      "type": ["object", "null"],
+      "description": "Aggregate result of the scenario matrix. Null until RUN_SUITE completes.",
+      "additionalProperties": false,
+      "required": ["total", "passed", "failed"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "pass_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "baseline_pass_rate": { "type": ["number", "null"], "description": "Pass rate before fixes, retained for before/after comparison in the report." }
+      }
+    },
+    "pull_request_url": { "type": ["string", "null"], "format": "uri" },
+    "report_id": { "type": ["string", "null"], "description": "Id of the Report produced at REPORT." },
+    "error": { "type": ["string", "null"], "description": "Set when the run aborts for an infrastructure reason, not a robot failure." },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "$defs": {
+    "stage": {
+      "description": "Pipeline stage. PASSED_CLEAN, PR_OPENED and FAILED_UNRESOLVED are terminal.",
+      "enum": [
+        "TRIGGERED",
+        "RESOLVE_MODEL",
+        "BUILD_HARNESS",
+        "DESIGN_SCENARIOS",
+        "RUN_SUITE",
+        "CLUSTER_FAILURES",
+        "INVESTIGATE",
+        "FIX",
+        "VERIFY",
+        "REPORT",
+        "PR_OPENED",
+        "PASSED_CLEAN",
+        "FAILED_UNRESOLVED"
+      ]
+    }
+  }
+}

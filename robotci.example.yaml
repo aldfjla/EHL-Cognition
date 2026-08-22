@@ -1,0 +1,100 @@
+# =============================================================================
+# robotci.yaml — dropped at the ROOT OF THE CUSTOMER REPO (the robot control
+# code under test), not this repo. Robot CI reads it on every push webhook.
+#
+# Everything here is optional except `entrypoint`. Anything omitted is inferred
+# by the Modeler and Harness Builder agents, which is the interesting path —
+# this file exists so a team CAN be explicit when inference guesses wrong.
+# =============================================================================
+
+version: 1
+
+# ---- Robot identity --------------------------------------------------------
+# How simkit/models/resolver.py finds a physical model for your hardware.
+robot:
+  # Preferred: a MuJoCo Menagerie directory name. Resolution is library-first.
+  # Browse: https://github.com/google-deepmind/mujoco_menagerie
+  menagerie: franka_emika_panda
+
+  # Optional explicit override. If set, skips Menagerie lookup entirely.
+  # Path is relative to the customer repo root.
+  # model_path: sim/my_arm.xml
+
+  # Fallback hints used ONLY when neither of the above resolves and the
+  # Modeler agent has to synthesize an MJCF from your kinematics.
+  fallback:
+    dof: 7
+    payload_kg: 3.0
+    # URDF in-repo is the strongest generation input if you have one.
+    urdf: description/arm.urdf
+
+# ---- Code under test -------------------------------------------------------
+# The Harness Builder agent binds this entrypoint to the simulated robot.
+control:
+  # REQUIRED. Import path or file path to the callable that drives the robot.
+  entrypoint: src/controller.py:run
+
+  # Control loop rate your code assumes, in Hz. The harness matches it.
+  rate_hz: 100
+
+  # Extra pip requirements needed to import your controller.
+  requirements: requirements.txt
+
+  # How your code expects to talk to hardware. The harness fakes this
+  # interface against MuJoCo instead of a real driver.
+  #   joint_position | joint_velocity | joint_torque | cartesian_pose
+  interface: joint_position
+
+# ---- Task definition -------------------------------------------------------
+# What the robot is supposed to accomplish. Drives scenario design and scoring.
+task:
+  name: pick_and_place
+  description: >
+    Pick the cube from the table surface and place it inside the bin
+    without collision, within the time limit.
+
+  # Success criteria evaluated by simkit/scoring.py. Each failing criterion
+  # becomes a human-readable DIAGNOSIS line the Investigator agent reads.
+  success:
+    - id: object_in_bin
+      description: Cube center is inside the bin volume at episode end
+    - id: no_collision
+      description: No contact force above 40 N between arm and environment
+    - id: within_time
+      description: Task completed in under 12 simulated seconds
+    - id: joint_limits_respected
+      description: No joint exceeds 95% of its position or velocity limit
+
+# ---- Scenario matrix -------------------------------------------------------
+# Randomization ranges the QA Lead agent samples to build the NxM grid.
+# Wider ranges find more bugs and take longer.
+scenarios:
+  count: 24
+  seed: 1337
+
+  randomize:
+    object_position:
+      x: [-0.15, 0.15]
+      y: [-0.10, 0.10]
+    object_mass_kg: [0.1, 0.8]
+    friction: [0.4, 1.2]
+    # Sensor noise injected into observations your controller reads.
+    sensor_noise_std: [0.0, 0.01]
+    # Actuation latency in control steps.
+    latency_steps: [0, 3]
+
+# ---- CI policy -------------------------------------------------------------
+policy:
+  # Fraction of scenarios that must pass for the run to be PASSED_CLEAN.
+  pass_threshold: 1.0
+
+  # Max autonomous fix attempts per failure cluster before giving up
+  # and reporting FAILED_UNRESOLVED.
+  max_fix_iterations: 3
+
+  # Open a pull request when fixes verify clean. Set false for report-only.
+  open_pull_request: true
+
+  # Record mp4 evidence. `failures` records only failing scenarios (fast),
+  # `all` records everything (slow, better demo).
+  record_video: failures
