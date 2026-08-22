@@ -33,15 +33,44 @@ exhausting the iteration budget lands on ``FAILED_UNRESOLVED``.
 
 from __future__ import annotations
 
+import argparse
+import asyncio
+import json
+import logging
+import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
+from orchestrator import clustering, github
+from orchestrator import workspace as workspace_mod
+from orchestrator.roles.fixer import FixerAgent
+from orchestrator.roles.harness_builder import HarnessBuilderAgent
+from orchestrator.roles.investigator import InvestigatorAgent
+from orchestrator.roles.modeler import ModelerAgent
+from orchestrator.roles.reporter import ReporterAgent
+from orchestrator.roles.reviewer import ReviewerAgent
+from orchestrator.roles.scenario_designer import ScenarioDesignerAgent
 from orchestrator.schemas import (
+    Agent,
     Cluster,
+    CriterionResult,
+    EventType,
+    Finding,
+    FindingKind,
+    Incident,
+    ModelSource,
     Report,
+    RobotModel,
+    Role,
     Run,
     Scenario,
+    ScenarioStatus,
     Stage,
+    SuiteStats,
+    Verdict,
+    _now,
 )
 
 if TYPE_CHECKING:
@@ -49,6 +78,8 @@ if TYPE_CHECKING:
     from orchestrator.bus import EventBus
     from orchestrator.devin.client import DevinClient
     from orchestrator.workspace import Workspace
+
+log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -79,6 +110,27 @@ TRANSITIONS: dict[Stage, tuple[Stage, ...]] = {
 def can_transition(src: Stage, dst: Stage) -> bool:
     """True if ``src -> dst`` is a legal move."""
     return dst in TRANSITIONS.get(src, ())
+
+
+class PipelineError(RuntimeError):
+    """Infrastructure failure. Never means the robot failed a test."""
+
+
+#: Filename the Modeler writes its synthesized MJCF to, relative to the model
+#: output directory handed to it. Fixed by convention so the pipeline can
+#: validate the model in MuJoCo without parsing the agent's prose.
+MODEL_FILENAME = "robot.xml"
+
+#: Filename the Harness Builder writes its adapter to.
+HARNESS_FILENAME = "harness.py"
+
+#: Root causes at or above this confidence are promoted to ``confirmed`` so FIX
+#: has something to fan out over. The Reviewer refutes them at VERIFY if the
+#: patch does not hold at full-suite scale — the oracle still has the last word.
+CONFIRM_CONFIDENCE = 0.5
+
+#: Emit ``suite.progress`` at most this often, in completed scenarios.
+PROGRESS_EVERY = 1
 
 
 # --------------------------------------------------------------------------- #
@@ -115,8 +167,30 @@ class Pipeline:
 
     def __init__(self, ctx: PipelineContext) -> None:
         self.ctx = ctx
+        self._max_parallel = int(os.getenv("MAX_PARALLEL_AGENTS", "6"))
+        self._artifacts = Path(os.getenv("ARTIFACTS_DIR", "artifacts")) / ctx.run.id
+        #: Suite results before any patch, and after the latest VERIFY, kept as
+        #: raw simkit results so ``simkit.suite.compare`` can diff them.
+        self._before_results: list[Any] = []
+        self._after_results: list[Any] = []
+        self._fix_worktrees: list[str] = []
+        self._conflicts: list[str] = []
 
     # -- driver ------------------------------------------------------------ #
+
+    def _handlers(self) -> dict[Stage, Callable[[], Awaitable[Stage]]]:
+        return {
+            Stage.TRIGGERED: self.stage_triggered,
+            Stage.RESOLVE_MODEL: self.stage_resolve_model,
+            Stage.BUILD_HARNESS: self.stage_build_harness,
+            Stage.DESIGN_SCENARIOS: self.stage_design_scenarios,
+            Stage.RUN_SUITE: self.stage_run_suite,
+            Stage.CLUSTER_FAILURES: self.stage_cluster_failures,
+            Stage.INVESTIGATE: self.stage_investigate,
+            Stage.FIX: self.stage_fix,
+            Stage.VERIFY: self.stage_verify,
+            Stage.REPORT: self.stage_report,
+        }
 
     async def run(self) -> Run:
         """Drive the run to a terminal stage and return the final Run.
@@ -126,18 +200,50 @@ class Pipeline:
         on ``run.error`` and land the run in ``FAILED_UNRESOLVED`` — they must
         never be reported as a robot failure.
         """
-        raise NotImplementedError
-        # TODO(build): loop on current stage, dispatch handler, await next
-        # stage, call advance(); wrap in try/except to record infra errors.
+        run = self.ctx.run
+        await self.ctx.bus.emit(
+            run.id, EventType.RUN_CREATED, run.model_dump(mode="json")
+        )
+        handlers = self._handlers()
+        try:
+            while not run.stage.is_terminal:
+                handler = handlers[run.stage]
+                nxt = await handler()
+                # PR_OPENED is terminal, so its side effects have to happen
+                # before the transition or they would never run.
+                if nxt is Stage.PR_OPENED:
+                    nxt = await self.stage_pr_opened()
+                await self.advance(nxt)
+        except Exception as exc:
+            log.exception("run %s failed in %s", run.id, run.stage.value)
+            run.error = f"{type(exc).__name__}: {exc}"
+            await self.ctx.bus.emit(
+                run.id,
+                EventType.ERROR,
+                {"stage": run.stage.value, "message": run.error, "fatal": True},
+            )
+            await self._force_failed()
+        await self._finish()
+        return run
 
     async def advance(self, dst: Stage) -> None:
         """Move to ``dst``, rejecting illegal transitions, and emit an event.
 
         Raises ``ValueError`` if ``can_transition`` says no.
         """
-        raise NotImplementedError
-        # TODO(build): validate via can_transition, mutate run.stage, persist,
-        # publish EventType.RUN_STAGE_CHANGED on the bus.
+        run = self.ctx.run
+        src = run.stage
+        if src is dst:
+            return
+        if not can_transition(src, dst):
+            raise ValueError(f"illegal transition {src.value} -> {dst.value}")
+        run.stage = dst
+        run.updated_at = _now()
+        await self.ctx.bus.emit(
+            run.id,
+            EventType.RUN_STAGE_CHANGED,
+            {"stage": dst.value, "previous_stage": src.value},
+        )
 
     # -- stage handlers ---------------------------------------------------- #
     # Each returns the next Stage. Agent stages dispatch roles; oracle stages
@@ -149,9 +255,37 @@ class Pipeline:
         Pure setup, no agents. Fails the run if the repo has no readable
         entrypoint — there is nothing to test.
         """
-        raise NotImplementedError
-        # TODO(build): workspace.clone(), parse robotci.yaml into ctx.config,
-        # validate control.entrypoint exists.
+        ctx = self.ctx
+        run = ctx.run
+        self._artifacts.mkdir(parents=True, exist_ok=True)
+        ctx.workspace = await workspace_mod.clone(
+            run.repo, run.commit_sha, run.id, ctx.workspace.root.parent
+        )
+        ctx.config = await workspace_mod.read_config(ctx.workspace)
+        ctx.max_fix_iterations = int(
+            ctx.config.get("policy", {}).get(
+                "max_fix_iterations", ctx.max_fix_iterations
+            )
+        )
+
+        entrypoint = ctx.config.get("control", {}).get("entrypoint", "")
+        if not entrypoint:
+            raise PipelineError(
+                "robotci.yaml has no control.entrypoint and none could be "
+                "inferred; there is no control code to simulate"
+            )
+        module = entrypoint.split(":", 1)[0].replace(".", "/")
+        candidates = [
+            ctx.workspace.base / module,
+            ctx.workspace.base / f"{module}.py",
+        ]
+        if not any(path.exists() for path in candidates):
+            raise PipelineError(f"control.entrypoint {entrypoint!r} does not exist")
+
+        await github.set_commit_status(
+            run.repo, run.commit_sha, "pending", "Robot CI: simulating"
+        )
+        return Stage.RESOLVE_MODEL
 
     async def stage_resolve_model(self) -> Stage:
         """Find a physical model for the robot the code drives.
@@ -160,9 +294,41 @@ class Pipeline:
         without spending an agent. Only when that misses do we dispatch the
         Modeler role to synthesize MJCF from the repo's kinematics.
         """
-        raise NotImplementedError
-        # TODO(build): try simkit resolver; on miss dispatch roles.modeler and
-        # validate the produced MJCF loads in MuJoCo before accepting it.
+        from simkit.models import generator, resolver
+
+        ctx = self.ctx
+        resolution = await asyncio.to_thread(
+            resolver.resolve, ctx.workspace.base, ctx.config
+        )
+        if resolution.found:
+            ctx.run.robot_model = RobotModel(
+                source=ModelSource(resolution.source),
+                name=resolution.name or None,
+                model_path=resolution.model_path,
+                dof=resolution.dof,
+                confidence=resolution.confidence,
+            )
+            return Stage.BUILD_HARNESS
+
+        model_dir = self._artifacts / "model"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        agent = await ModelerAgent(ctx).dispatch(
+            resolver_report=resolution.report,
+            model_out_dir=str(model_dir),
+            candidates=resolution.candidates,
+        )
+        model_path = model_dir / MODEL_FILENAME
+        # The Modeler's word is not evidence: an unloadable model would fail
+        # every downstream stage with a misleading error.
+        ok, detail = await asyncio.to_thread(generator.validate, model_path)
+        if not ok:
+            raise PipelineError(f"Modeler produced an unloadable model: {detail}")
+        ctx.run.robot_model = RobotModel(
+            source=ModelSource.GENERATED,
+            name=agent.title or None,
+            model_path=str(model_path),
+        )
+        return Stage.BUILD_HARNESS
 
     async def stage_build_harness(self) -> Stage:
         """Bind the pushed control code to the simulated robot.
@@ -171,9 +337,35 @@ class Pipeline:
         the customer's ``control.entrypoint`` drive MuJoCo actuators instead of
         a real driver. Accepted only once a smoke scenario executes.
         """
-        raise NotImplementedError
-        # TODO(build): dispatch roles.harness_builder, then prove the harness
-        # by running one trivial scenario through simkit.runner.
+        from simkit import runner
+
+        ctx = self.ctx
+        control = ctx.config.get("control", {})
+        harness_path = self._artifacts / HARNESS_FILENAME
+        await HarnessBuilderAgent(ctx).dispatch(
+            entrypoint=control.get("entrypoint", ""),
+            interface=control.get("interface", ""),
+            rate_hz=control.get("rate_hz", 100),
+            model_path=self._model_path(),
+            harness_out_path=str(harness_path),
+        )
+        if not harness_path.exists():
+            raise PipelineError(f"Harness Builder wrote no harness at {harness_path}")
+
+        # Prove the harness by executing it once. An `error` here is ours.
+        smoke = await asyncio.to_thread(
+            runner.run_scenario,
+            scenario_id="smoke",
+            model_path=self._model_path(),
+            harness_path=str(harness_path),
+            params={},
+            seed=self._base_seed(),
+            task=ctx.config.get("task", {}),
+            record=False,
+        )
+        if smoke.status == "error":
+            raise PipelineError(f"harness smoke test errored: {smoke.error}")
+        return Stage.DESIGN_SCENARIOS
 
     async def stage_design_scenarios(self) -> Stage:
         """Design the randomized world matrix.
@@ -182,9 +374,44 @@ class Pipeline:
         randomize and over what ranges; the concrete sampling is done
         deterministically by :mod:`simkit.scenarios` from a seed.
         """
-        raise NotImplementedError
-        # TODO(build): dispatch roles.scenario_designer for ranges, then call
-        # simkit.scenarios.generate(seed, count, ranges) -> ctx.scenarios.
+        from simkit import scenarios as scenario_gen
+
+        ctx = self.ctx
+        task = ctx.config.get("task", {})
+        suite_size = int(
+            ctx.config.get("scenarios", {}).get("count", os.getenv("SUITE_SIZE", "24"))
+        )
+        agent = await ScenarioDesignerAgent(ctx).dispatch(
+            task_description=task.get("description", task.get("name", "")),
+            success_criteria=task.get("success", []),
+            suite_size=suite_size,
+        )
+        axes = self._axes(agent)
+        if not axes:
+            raise PipelineError(
+                "no randomization axes: neither robotci.yaml scenarios."
+                "randomize nor the Scenario Designer produced any"
+            )
+
+        raw = await asyncio.to_thread(
+            scenario_gen.generate,
+            ctx.run.id,
+            self._base_seed(),
+            suite_size,
+            axes,
+        )
+        ctx.scenarios = [
+            self._to_scenario(index, spec) for index, spec in enumerate(raw)
+        ]
+        # The whole matrix up front, so the dashboard renders the full grid
+        # greyed out instead of growing it cell by cell.
+        for scenario in ctx.scenarios:
+            await ctx.bus.emit(
+                ctx.run.id,
+                EventType.SCENARIO_CREATED,
+                scenario.model_dump(mode="json"),
+            )
+        return Stage.RUN_SUITE
 
     async def stage_run_suite(self) -> Stage:
         """Execute every scenario in parallel. The oracle speaks here.
@@ -192,9 +419,13 @@ class Pipeline:
         No agents involved. Emits ``suite.progress`` as cells complete so the
         matrix fills in live. Returns ``PASSED_CLEAN`` when nothing failed.
         """
-        raise NotImplementedError
-        # TODO(build): simkit.suite.run_suite() with progress callback ->
-        # bus; branch on failure count.
+        results = await self._execute_suite(self.ctx.scenarios)
+        self._before_results = results
+        stats = self._apply_results(self.ctx.scenarios, results)
+        self.ctx.run.suite = stats
+        if stats.failed == 0:
+            return Stage.PASSED_CLEAN
+        return Stage.CLUSTER_FAILURES
 
     async def stage_cluster_failures(self) -> Stage:
         """Group failing scenarios by suspected shared cause.
@@ -203,9 +434,17 @@ class Pipeline:
         Cluster count sets the Investigator fan-out width, so it directly
         controls how many Devin sessions we spend.
         """
-        raise NotImplementedError
-        # TODO(build): clustering.cluster_failures(failed_scenarios); cap
-        # cluster count at MAX_PARALLEL_AGENTS.
+        ctx = self.ctx
+        ctx.clusters = clustering.cluster_failures(
+            ctx.run.id, ctx.scenarios, max_clusters=self._max_parallel
+        )
+        if not ctx.clusters:
+            return Stage.PASSED_CLEAN
+        by_id = {s.id: s for s in ctx.scenarios}
+        for cluster in ctx.clusters:
+            for scenario_id in cluster.scenario_ids:
+                by_id[scenario_id].cluster_id = cluster.id
+        return Stage.INVESTIGATE
 
     async def stage_investigate(self) -> Stage:
         """Fan out one Investigator per cluster to find root causes.
@@ -214,9 +453,46 @@ class Pipeline:
         writes a ``root_cause`` finding to the blackboard; the orchestrator
         relays cross-cluster findings between them as Messages.
         """
-        raise NotImplementedError
-        # TODO(build): asyncio.gather over clusters with a semaphore; relay
-        # findings between live investigators via bus + blackboard.
+        ctx = self.ctx
+        gate = asyncio.Semaphore(self._max_parallel)
+
+        async def investigate(cluster: Cluster) -> None:
+            scenarios = [s for s in ctx.scenarios if s.id in set(cluster.scenario_ids)]
+            async with gate:
+                role = InvestigatorAgent(ctx)
+                agent = await role.dispatch(
+                    cluster_id=cluster.id,
+                    cluster_label=cluster.label,
+                    cluster_size=cluster.size,
+                    scenario_seeds=[s.seed for s in scenarios],
+                    diagnoses=[s.diagnosis or "" for s in scenarios],
+                    param_correlation=clustering.correlate_params(scenarios),
+                )
+            # Anything noticed outside this cluster is relayed to the peers
+            # still working the other clusters — the only channel they have.
+            for finding in self._findings_of(agent):
+                if finding.kind is FindingKind.OBSERVATION:
+                    await role.relay(finding, Role.INVESTIGATOR, "finding")
+
+        results = await asyncio.gather(
+            *(investigate(cluster) for cluster in ctx.clusters),
+            return_exceptions=True,
+        )
+        for cluster, outcome in zip(ctx.clusters, results, strict=True):
+            if isinstance(outcome, BaseException):
+                await self._nonfatal(f"investigating {cluster.label}", outcome)
+
+        causes = [
+            f
+            for f in ctx.blackboard.all()
+            if f.kind is FindingKind.ROOT_CAUSE and f.confidence >= CONFIRM_CONFIDENCE
+        ]
+        for finding in causes:
+            await ctx.blackboard.confirm(finding.id, finding.author_agent_id or "")
+        if not ctx.blackboard.confirmed_root_causes():
+            ctx.run.error = "no root cause was established for any cluster"
+            return Stage.FAILED_UNRESOLVED
+        return Stage.FIX
 
     async def stage_fix(self) -> Stage:
         """Fan out one Fixer per confirmed root cause.
@@ -225,9 +501,39 @@ class Pipeline:
         re-running only its own cluster's scenarios — cheap, fast feedback
         before the expensive full-suite gate at VERIFY.
         """
-        raise NotImplementedError
-        # TODO(build): dispatch roles.fixer per confirmed finding; each fixer
-        # re-runs its cluster's seeds until they pass or iterations run out.
+        ctx = self.ctx
+        gate = asyncio.Semaphore(self._max_parallel)
+        causes = ctx.blackboard.confirmed_root_causes()
+        self._fix_worktrees = []
+
+        async def fix(cause: Finding) -> None:
+            name = f"fix-{cause.cluster_id or cause.id}"
+            branch = f"robotci/{name}-{ctx.run.commit_sha[:7]}"
+            path = await workspace_mod.create_worktree(ctx.workspace, name, branch)
+            seeds = [s.seed for s in ctx.scenarios if s.cluster_id == cause.cluster_id]
+            async with gate:
+                await FixerAgent(ctx).dispatch(
+                    root_cause=cause.summary,
+                    finding_id=cause.id,
+                    cluster_id=cause.cluster_id,
+                    files=cause.files,
+                    worktree=str(path),
+                    scenario_seeds=seeds,
+                    iteration=ctx.fix_iteration,
+                )
+            self._fix_worktrees.append(name)
+
+        outcomes = await asyncio.gather(
+            *(fix(cause) for cause in causes), return_exceptions=True
+        )
+        for cause, outcome in zip(causes, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                await self._nonfatal(f"fixing {cause.summary}", outcome)
+
+        if not self._fix_worktrees:
+            ctx.run.error = "every Fixer failed before producing a patch"
+            return Stage.FAILED_UNRESOLVED
+        return Stage.VERIFY
 
     async def stage_verify(self) -> Stage:
         """Re-run the FULL suite against all accepted patches together.
@@ -237,24 +543,473 @@ class Pipeline:
         same repo will otherwise conflict. Loops back to FIX while the budget
         holds; the Reviewer role adjudicates conflicts and dedupes patches.
         """
-        raise NotImplementedError
-        # TODO(build): merge patches, re-run full suite, compare against
-        # baseline; dispatch roles.reviewer on regression; increment
-        # ctx.fix_iteration and loop to FIX or give up.
+        from simkit import suite as suite_mod
+
+        ctx = self.ctx
+        self._conflicts = await workspace_mod.merge_patches(
+            ctx.workspace, self._fix_worktrees, into="verify"
+        )
+        verify_tree = ctx.workspace.worktree("verify")
+
+        results = await self._execute_suite(ctx.scenarios, repo_dir=verify_tree)
+        self._after_results = results
+        after = self._apply_results(ctx.scenarios, results)
+        before = ctx.run.suite or after
+        comparison = await asyncio.to_thread(
+            suite_mod.compare, self._before_results, results
+        )
+
+        await ReviewerAgent(ctx).dispatch(
+            fix_summary=[f.summary for f in ctx.blackboard.confirmed_root_causes()],
+            before_stats=before.model_dump(mode="json"),
+            after_stats=after.model_dump(mode="json"),
+            regressions=comparison.get("newly_broken", []),
+            conflicts=self._conflicts,
+            diff=await workspace_mod.diff(ctx.workspace, "verify"),
+        )
+
+        clean = after.failed == 0 and not comparison.get("newly_broken")
+        if clean and not self._conflicts:
+            return Stage.REPORT
+        ctx.fix_iteration += 1
+        if ctx.fix_iteration < ctx.max_fix_iterations:
+            # The Reviewer's notes are on the board; the next FIX round reads
+            # them through the relay policy.
+            return Stage.FIX
+        if after.passed > before.passed:
+            # Partial progress still ships, with the unresolved incidents
+            # named honestly in the report.
+            return Stage.REPORT
+        ctx.run.error = (
+            f"fix budget exhausted after {ctx.fix_iteration} iterations with "
+            f"{after.failed} scenarios still failing"
+        )
+        return Stage.FAILED_UNRESOLVED
 
     async def stage_report(self) -> Stage:
         """Write the incident report from the confirmed blackboard findings."""
-        raise NotImplementedError
-        # TODO(build): dispatch roles.reporter -> Report; render markdown to
-        # ARTIFACTS_DIR; attach before/after videos per incident.
+        ctx = self.ctx
+        after = self._stats(ctx.scenarios)
+        before = ctx.run.suite or after
+        diff = await workspace_mod.diff(ctx.workspace, "verify")
+
+        await ReporterAgent(ctx).dispatch(
+            confirmed_findings=[
+                f.model_dump(mode="json")
+                for f in ctx.blackboard.for_role(Role.REPORTER)
+            ],
+            before_stats=before.model_dump(mode="json"),
+            after_stats=after.model_dump(mode="json"),
+            diff=diff,
+            video_pairs=self._video_pairs(),
+        )
+
+        incidents = [self._incident(cluster) for cluster in ctx.clusters]
+        verdict = (
+            Verdict.FIXED
+            if after.failed == 0
+            else Verdict.UNRESOLVED
+            if after.failed >= before.failed
+            else Verdict.FIXED
+        )
+        report = Report(
+            run_id=ctx.run.id,
+            verdict=verdict,
+            title=self._report_title(before, after),
+            summary=self._report_summary(before, after, incidents),
+            incidents=incidents,
+            diff=diff,
+            before=before,
+            after=after,
+        )
+        markdown = self._artifacts / "report.md"
+        markdown.write_text(github.render_pr_body(report))
+        report.markdown_path = str(markdown)
+
+        ctx.report = report
+        ctx.run.report_id = report.id
+        await ctx.bus.emit(
+            ctx.run.id, EventType.REPORT_CREATED, report.model_dump(mode="json")
+        )
+        return Stage.PR_OPENED
 
     async def stage_pr_opened(self) -> Stage:
         """Push the branch and open the pull request. Terminal."""
-        raise NotImplementedError
-        # TODO(build): github.open_pull_request() with the report as body;
-        # set run.pull_request_url.
+        ctx = self.ctx
+        report = ctx.report
+        if report is None:
+            raise PipelineError("cannot open a pull request without a report")
+
+        branch = github.branch_name(ctx.run)
+        await github.push_branch(
+            str(ctx.workspace.worktree("verify")),
+            branch,
+            f"{report.title}\n\nRobot CI verified this against the full "
+            f"scenario suite. See {report.markdown_path or 'the report'}.",
+        )
+        body = github.render_pr_body(report)
+        if ctx.config.get("policy", {}).get("open_pull_request", True):
+            url = await github.open_pull_request(
+                ctx.run.repo,
+                branch,
+                os.getenv("TARGET_BRANCH", ctx.run.branch),
+                report,
+            )
+            report.pull_request_url = url
+            ctx.run.pull_request_url = url
+        else:
+            # PRs disabled: the report still has to reach a human.
+            await github.comment_on_commit(ctx.run.repo, ctx.run.commit_sha, body)
+
+        state = "success" if report.verdict is Verdict.FIXED else "failure"
+        after = report.after
+        await github.set_commit_status(
+            ctx.run.repo,
+            ctx.run.commit_sha,
+            state,
+            f"Robot CI: {after.passed}/{after.total} scenarios pass"
+            if after
+            else "Robot CI finished",
+            target_url=ctx.run.pull_request_url,
+        )
+        return Stage.PR_OPENED
+
+    # -- suite execution --------------------------------------------------- #
+
+    async def _execute_suite(
+        self, scenarios: list[Scenario], repo_dir: Path | None = None
+    ) -> list[Any]:
+        """Run the whole matrix off the event loop, streaming progress.
+
+        ``simkit.suite.run_suite`` is synchronous and CPU-bound, so it runs in a
+        worker thread; its progress callback fires on that thread and is bounced
+        back onto the loop, because a blocking emit inside the callback would
+        stall the suite.
+        """
+        from simkit import suite as suite_mod
+
+        ctx = self.ctx
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+        def on_progress(payload: dict[str, Any]) -> None:
+            # Must be cheap and must never raise: a throwing callback is not
+            # allowed to fail the suite.
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, dict(payload))
+            except RuntimeError:  # loop already closed
+                pass
+
+        async def drain() -> None:
+            completed = 0
+            passed = 0
+            failed = 0
+            while True:
+                payload = await queue.get()
+                if payload is None:
+                    return
+                completed += 1
+                status = str(payload.get("status", ""))
+                if status == "passed":
+                    passed += 1
+                elif status in ("failed", "error"):
+                    failed += 1
+                await ctx.bus.emit(ctx.run.id, EventType.SCENARIO_FINISHED, payload)
+                if completed % PROGRESS_EVERY == 0:
+                    await ctx.bus.emit(
+                        ctx.run.id,
+                        EventType.SUITE_PROGRESS,
+                        {
+                            "total": len(scenarios),
+                            "completed": completed,
+                            "passed": passed,
+                            "failed": failed,
+                        },
+                    )
+
+        drainer = asyncio.create_task(drain())
+        try:
+            results = await asyncio.to_thread(
+                suite_mod.run_suite,
+                scenarios=[self._suite_spec(s) for s in scenarios],
+                model_path=self._model_path(),
+                harness_path=str(self._artifacts / HARNESS_FILENAME),
+                task=ctx.config.get("task", {}),
+                parallel=self._max_parallel,
+                record=ctx.config.get("policy", {}).get("record_video", "failures"),
+                on_progress=on_progress,
+            )
+        finally:
+            await queue.put(None)
+            await drainer
+        return results
+
+    def _apply_results(
+        self, scenarios: list[Scenario], results: list[Any]
+    ) -> SuiteStats:
+        """Fold simkit results back onto the Scenario records."""
+        by_id = {s.id: s for s in scenarios}
+        for result in results:
+            scenario = by_id.get(result.scenario_id)
+            if scenario is None:
+                continue
+            scenario.status = ScenarioStatus(result.status)
+            scenario.duration_s = result.duration_s
+            scenario.sim_time_s = result.sim_time_s
+            scenario.diagnosis = result.diagnosis
+            scenario.video_path = result.video_path
+            scenario.trace_path = result.trace_path
+            scenario.error = result.error
+            scenario.criteria = [
+                CriterionResult(**criterion) for criterion in result.criteria
+            ]
+        return self._stats(scenarios)
+
+    @staticmethod
+    def _stats(scenarios: list[Scenario]) -> SuiteStats:
+        passed = sum(1 for s in scenarios if s.status is ScenarioStatus.PASSED)
+        failed = sum(
+            1
+            for s in scenarios
+            if s.status in (ScenarioStatus.FAILED, ScenarioStatus.ERROR)
+        )
+        return SuiteStats.from_counts(passed=passed, failed=failed)
+
+    @staticmethod
+    def _suite_spec(scenario: Scenario) -> dict[str, Any]:
+        return {
+            "id": scenario.id,
+            "index": scenario.index,
+            "seed": scenario.seed,
+            "label": scenario.label,
+            "params": scenario.params,
+        }
+
+    def _to_scenario(self, index: int, spec: dict[str, Any]) -> Scenario:
+        fields = set(Scenario.model_fields)
+        payload = {k: v for k, v in spec.items() if k in fields}
+        payload.setdefault("index", index)
+        payload["run_id"] = self.ctx.run.id
+        return Scenario(**payload)
+
+    # -- report helpers ---------------------------------------------------- #
+
+    def _incident(self, cluster: Cluster) -> Incident:
+        ctx = self.ctx
+        findings = ctx.blackboard.for_cluster(cluster.id)
+        cause = next(
+            (f for f in findings if f.kind is FindingKind.ROOT_CAUSE),
+            None,
+        )
+        patch = next((f for f in findings if f.kind is FindingKind.PATCH), None)
+        scenarios = [s for s in ctx.scenarios if s.cluster_id == cluster.id]
+        still_failing = any(
+            s.status in (ScenarioStatus.FAILED, ScenarioStatus.ERROR) for s in scenarios
+        )
+        before_video = next((s.video_path for s in scenarios if s.video_path), None)
+        return Incident(
+            cluster_id=cluster.id,
+            title=cluster.label,
+            affected_scenarios=cluster.size,
+            root_cause=cause.summary if cause else "not established",
+            resolution=patch.summary if patch else "no patch accepted",
+            files_changed=patch.files if patch else [],
+            before_video=before_video,
+            after_video=None if still_failing else before_video,
+            status="unresolved" if still_failing or patch is None else "fixed",
+        )
+
+    def _video_pairs(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "cluster_id": cluster.id,
+                "label": cluster.label,
+                "video": next(
+                    (
+                        s.video_path
+                        for s in self.ctx.scenarios
+                        if s.cluster_id == cluster.id and s.video_path
+                    ),
+                    None,
+                ),
+            }
+            for cluster in self.ctx.clusters
+        ]
+
+    def _report_title(self, before: SuiteStats, after: SuiteStats) -> str:
+        fixed = after.passed - before.passed
+        if after.failed == 0:
+            return (
+                f"Fix {len(self.ctx.clusters)} simulated failure(s) in the robot task"
+            )
+        return f"Fix {max(fixed, 0)} of {before.failed} simulated failures"
+
+    def _report_summary(
+        self, before: SuiteStats, after: SuiteStats, incidents: list[Incident]
+    ) -> str:
+        unresolved = [i for i in incidents if i.status == "unresolved"]
+        lines = [
+            (
+                f"Robot CI simulated `{self.ctx.run.commit_sha[:7]}` across "
+                f"{before.total} randomized scenarios: {before.failed} failed."
+            ),
+            "",
+            (
+                f"After {len(incidents) - len(unresolved)} accepted fix(es), "
+                f"{after.passed}/{after.total} scenarios pass."
+            ),
+        ]
+        if unresolved:
+            lines += [
+                "",
+                "Still failing: "
+                + ", ".join(f"{i.title} ({i.affected_scenarios})" for i in unresolved),
+            ]
+        if self._conflicts:
+            lines += ["", "Conflicting patches: " + ", ".join(self._conflicts)]
+        return "\n".join(lines)
+
+    # -- misc helpers ------------------------------------------------------ #
+
+    def _model_path(self) -> str:
+        model = self.ctx.run.robot_model
+        if model is None:
+            raise PipelineError("no robot model resolved")
+        return model.model_path
+
+    def _base_seed(self) -> int:
+        return int(self.ctx.config.get("scenarios", {}).get("seed", 1337))
+
+    def _axes(self, agent: Agent) -> dict[str, tuple[float, float]]:
+        """Randomization axes: the Designer's, else ``robotci.yaml``.
+
+        The Designer publishes them as a JSON object in an ``observation``
+        finding's ``detail`` — the role API hands the pipeline an ``Agent``, not
+        the session's structured output, so the board is the only channel.
+        """
+        for finding in reversed(self._findings_of(agent)):
+            axes = _parse_axes(finding.detail)
+            if axes:
+                return axes
+        configured = self.ctx.config.get("scenarios", {}).get("randomize", {})
+        return {
+            name: (float(bounds[0]), float(bounds[1]))
+            for name, bounds in configured.items()
+            if isinstance(bounds, (list, tuple)) and len(bounds) == 2
+        }
+
+    def _findings_of(self, agent: Agent) -> list[Finding]:
+        ids = set(agent.finding_ids)
+        return [f for f in self.ctx.blackboard.all() if f.id in ids]
+
+    async def _nonfatal(self, what: str, exc: BaseException) -> None:
+        """Report an agent-level failure without killing the run."""
+        log.warning("%s failed: %s", what, exc)
+        await self.ctx.bus.emit(
+            self.ctx.run.id,
+            EventType.ERROR,
+            {
+                "stage": self.ctx.run.stage.value,
+                "message": f"{what} failed: {exc}",
+                "fatal": False,
+            },
+        )
+
+    async def _force_failed(self) -> None:
+        run = self.ctx.run
+        if run.stage is Stage.FAILED_UNRESOLVED:
+            return
+        if can_transition(run.stage, Stage.FAILED_UNRESOLVED):
+            await self.advance(Stage.FAILED_UNRESOLVED)
+            return
+        previous = run.stage
+        run.stage = Stage.FAILED_UNRESOLVED
+        await self.ctx.bus.emit(
+            run.id,
+            EventType.RUN_STAGE_CHANGED,
+            {"stage": run.stage.value, "previous_stage": previous.value},
+        )
+
+    async def _finish(self) -> None:
+        run = self.ctx.run
+        run.finished_at = _now()
+        run.updated_at = run.finished_at
+        await self.ctx.bus.emit(
+            run.id, EventType.RUN_FINISHED, run.model_dump(mode="json")
+        )
+        await self.ctx.bus.close(run.id)
+        if run.stage is not Stage.FAILED_UNRESOLVED:
+            # Keep the checkout on a failed run: it is the only way to see what
+            # the agents were looking at.
+            await workspace_mod.cleanup(self.ctx.workspace, keep_artifacts=True)
 
 
-# TODO(build): add a headless entrypoint — `python -m orchestrator.pipeline
-# --repo owner/name --sha <sha>` — so the pipeline can be demoed without the
-# API process running.
+def _parse_axes(detail: str) -> dict[str, tuple[float, float]]:
+    """Pull ``{"friction": [0.2, 0.9]}`` out of a finding's detail text."""
+    start = detail.find("{")
+    end = detail.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        payload = json.loads(detail[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+    axes: dict[str, tuple[float, float]] = {}
+    for name, bounds in payload.items() if isinstance(payload, dict) else []:
+        if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+            try:
+                axes[name] = (float(bounds[0]), float(bounds[1]))
+            except (TypeError, ValueError):
+                continue
+    return axes
+
+
+# --------------------------------------------------------------------------- #
+# Headless entrypoint
+# --------------------------------------------------------------------------- #
+
+
+async def run_headless(repo: str, sha: str, branch: str = "main") -> Run:
+    """Drive one run without the API process. The demo fallback path."""
+    from orchestrator.blackboard import Blackboard
+    from orchestrator.bus import EventBus
+    from orchestrator.devin.client import DevinClient
+    from orchestrator.workspace import Workspace
+
+    run = Run(repo=repo, branch=branch, commit_sha=sha)
+    bus = EventBus()
+    root = Path(os.getenv("ARTIFACTS_DIR", "artifacts")) / "workspaces" / run.id
+    ctx = PipelineContext(
+        run=run,
+        workspace=Workspace(run_id=run.id, repo=repo, commit_sha=sha, root=root),
+        bus=bus,
+        blackboard=Blackboard(run.id, bus),
+        devin=DevinClient(
+            api_key=os.getenv("DEVIN_API_KEY", ""),
+            api_base=os.getenv("DEVIN_API_BASE", "https://api.devin.ai/v1"),
+            max_parallel=int(os.getenv("MAX_PARALLEL_AGENTS", "6")),
+        ),
+    )
+    return await Pipeline(ctx).run()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m orchestrator.pipeline")
+    parser.add_argument("--repo", required=True, help="owner/name")
+    parser.add_argument("--sha", required=True, help="pushed commit sha")
+    parser.add_argument("--branch", default=os.getenv("TARGET_BRANCH", "main"))
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
+    run = asyncio.run(run_headless(args.repo, args.sha, args.branch))
+    print(f"{run.id} finished in {run.stage.value}")
+    if run.pull_request_url:
+        print(run.pull_request_url)
+    if run.error:
+        print(f"error: {run.error}")
+    return 0 if run.stage is not Stage.FAILED_UNRESOLVED else 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
