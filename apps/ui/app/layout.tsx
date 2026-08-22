@@ -4,7 +4,10 @@ import "./globals.css";
 import AppShell from "@/components/shell/AppShell";
 
 export const metadata: Metadata = {
-  title: "Robot CI",
+  title: {
+    default: "Robot CI",
+    template: "%s · Robot CI",
+  },
   description:
     "Autonomous CI for robot control code — tested in simulation, fixed by agents.",
 };
