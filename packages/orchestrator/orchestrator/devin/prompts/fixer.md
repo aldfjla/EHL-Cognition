@@ -17,6 +17,13 @@ Constraints the team has established — your patch must not violate these:
 
 {{constraints}}
 
+Theories the debugging engineer already tried and ruled out. Do not re-derive
+these; they are dead ends:
+
+{{failed_theories}}
+
+Notes from the Tech Lead, if this is a repeat attempt: {{reviewer_notes}}
+
 ## Task
 
 1. Work in `{{worktree}}`. This is your own checkout; other engineers have
@@ -52,5 +59,6 @@ Constraints the team has established — your patch must not violate these:
 }
 ```
 
-<!-- TODO(build): pass the fixer the investigator's failed theories too, so it
-     does not re-derive a dead end. -->
+If the seeds still fail, set `patched` and `cluster_seeds_passing` to false and
+say what you learned. An honest failed attempt is usable by the next iteration;
+a claimed fix the full suite then rejects costs the run a whole pass.

@@ -7,6 +7,13 @@ Find or build a physics model of the robot this code drives.
 The library was already searched automatically and did not produce a confident
 match, which is why you are here. Search result: {{resolver_report}}
 
+The Menagerie directories available locally (so you can name one without
+cloning the library):
+
+{{menagerie_index}}
+
+Hints from `robotci.yaml`, if the developer gave any: {{robot_hints}}
+
 ## Task
 
 1. Read the repo and work out **what robot this is**: joint count, link lengths,
@@ -46,6 +53,3 @@ without the robot exploding.
 
 Set `confidence` low if you inferred masses or inertias — downstream agents need
 to know when a failure might be the model's fault rather than the code's.
-
-<!-- TODO(build): supply the Menagerie index as prompt context so the agent can
-     name a directory without cloning the whole library. -->

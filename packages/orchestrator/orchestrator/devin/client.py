@@ -269,6 +269,10 @@ class DevinClient:
             ),
         )
 
+    async def ping(self) -> dict[str, Any]:
+        """Cheap authenticated call, so a bad key fails before a session does."""
+        return await self._request("GET", "/sessions", None)
+
     async def get_session(self, session_id: str) -> dict[str, Any]:
         """GET /session/{id} — full state including status and messages."""
         return await self._request("GET", f"/session/{session_id}")

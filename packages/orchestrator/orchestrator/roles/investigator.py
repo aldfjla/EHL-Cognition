@@ -65,7 +65,8 @@ class InvestigatorAgent(RoleAgent):
             "param_correlation": kwargs.get("param_correlation"),
             # Joint traces are where the real answer usually is, so hand over
             # the files rather than only the diagnosis string.
-            "trace_paths": [s.trace_path for s in scenarios if s.trace_path],
+            "trace_paths": kwargs.get("trace_paths")
+            or [s.trace_path for s in scenarios if s.trace_path],
             "model_path": kwargs.get("model_path")
             or (model.model_path if model else ""),
             "harness_path": kwargs.get("harness_path", ""),

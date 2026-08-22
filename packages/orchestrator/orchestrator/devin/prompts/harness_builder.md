@@ -19,7 +19,24 @@ Write an adapter at `{{harness_out_path}}` that:
 3. Maps their commands onto MuJoCo actuators and their sensor reads onto
    `mjData`, respecting their control rate.
 4. Exposes the callable `run_episode(model, data, params) -> EpisodeResult`
-   that `simkit.runner` calls.
+   that `simkit.runner` calls. `EpisodeResult` is the dataclass in
+   `simkit.runner`; return one with at least these fields set:
+
+   ```python
+   EpisodeResult(
+       scenario_id=params["scenario_id"],
+       seed=params["seed"],
+       status="passed" | "failed" | "error",
+       sim_time_s=...,  # simulated seconds elapsed
+       duration_s=...,  # wall seconds elapsed
+       trace={"qpos": [...], "qvel": [...], "contacts": [...], "object_pose": [...]},
+       error=None,  # set only when the sim broke, not when the robot failed
+   )
+   ```
+
+   Leave `criteria`, `diagnosis` and the artifact paths alone — `simkit` scores
+   the episode and fills those in. `status="error"` means the simulation itself
+   broke; a robot that simply failed the task is `"failed"`.
 
 ## Prove it
 
@@ -44,6 +61,3 @@ Paste the joint trajectory of your smoke test into your final message.
 ```
 
 `constraints` becomes a blackboard entry every later agent must respect.
-
-<!-- TODO(build): pin the EpisodeResult dataclass shape here once
-     simkit/runner.py defines it for real. -->

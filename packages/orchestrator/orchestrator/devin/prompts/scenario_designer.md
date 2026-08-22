@@ -11,9 +11,11 @@ The task under test is: {{task_description}}
 
 Success criteria: {{success_criteria}}
 
-Propose the randomization axes and ranges for {{suite_size}} scenarios. You are
-choosing the *ranges*, not the samples — sampling is done deterministically from
-a seed so failures reproduce exactly.
+Propose at most {{max_axes}} randomization axes, with ranges, for
+{{suite_size}} scenarios. More axes than that and the suite samples none of
+them densely enough for failures to cluster. You are choosing the *ranges*, not
+the samples — sampling is done deterministically from a seed so failures
+reproduce exactly.
 
 ## What makes a good matrix
 
@@ -45,5 +47,6 @@ tell you exactly where the boundaries are.
 }
 ```
 
-<!-- TODO(build): cap the number of axes — too many and SUITE_SIZE samples
-     cover none of them densely enough to cluster. -->
+Every axis needs numeric `low` and `high`, and a `why` naming the threshold in
+their code it straddles. An axis you cannot justify that way is coverage spent
+on nothing.
