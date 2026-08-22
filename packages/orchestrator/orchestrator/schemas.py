@@ -151,6 +151,11 @@ class ScenarioStatus(str, Enum):
     ERROR = "error"  # the sim broke, distinct from the robot failing the task
 
 
+class ScenarioErrorKind(str, Enum):
+    TIMEOUT = "timeout"
+    INFRA = "infra"
+
+
 class FindingKind(str, Enum):
     ROOT_CAUSE = "root_cause"
     PATCH = "patch"
@@ -221,6 +226,26 @@ class RobotModel(_Base):
         ge=0.0,
         le=1.0,
         description="Modeler's confidence that this matches the real hardware.",
+    )
+    provenance: str | None = Field(
+        default=None,
+        description="Concrete file, Menagerie entry, or signal behind the pick.",
+    )
+    license: str | None = Field(
+        default=None,
+        description="License read from the source model when it is known.",
+    )
+    processing_steps: list[str] = Field(
+        default_factory=list,
+        description="Ordered conversion and validation steps applied.",
+    )
+    approximate: bool = Field(
+        default=False,
+        description="True when the model identity or physics is an approximation.",
+    )
+    cache_hit: bool = Field(
+        default=False,
+        description="True when this model came from the durable resolution cache.",
     )
 
 
@@ -411,6 +436,9 @@ class Scenario(_Base):
     )
     trace_path: str | None = None
     error: str | None = None
+    error_kind: ScenarioErrorKind | None = None
+    retries: int = Field(default=0, ge=0)
+    retry_reason: str | None = None
 
 
 class Finding(_Base):

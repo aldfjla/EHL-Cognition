@@ -24,7 +24,12 @@
         "name": { "type": "string", "description": "Menagerie directory name or synthesized model name." },
         "model_path": { "type": "string", "description": "Absolute path to the MJCF file used by the suite." },
         "dof": { "type": "integer", "minimum": 1 },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "Modeler's self-reported confidence that this model matches the real hardware." }
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "Modeler's self-reported confidence that this model matches the real hardware." },
+        "provenance": { "type": ["string", "null"], "description": "Concrete file, Menagerie entry, or signal behind the model pick." },
+        "license": { "type": ["string", "null"], "description": "License read from the source model when known." },
+        "processing_steps": { "type": "array", "items": { "type": "string" }, "description": "Ordered conversion and validation steps applied." },
+        "approximate": { "type": "boolean", "description": "Whether the model identity or physics is an approximation." },
+        "cache_hit": { "type": "boolean", "description": "Whether the model came from the durable resolution cache." }
       }
     },
     "suite": {

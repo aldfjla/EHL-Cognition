@@ -99,3 +99,6 @@ policy:
   # Record mp4 evidence. `failures` records only failing scenarios (fast),
   # `all` records everything (slow, better demo).
   record_video: failures
+
+  # Per-scenario wall-clock watchdog. Overrides SCENARIO_TIMEOUT_S when set.
+  scenario_timeout_s: 60
