@@ -174,6 +174,14 @@ make your webhook page look broken — with a stable reason:
 The ignored body echoes the filters that were applied, so GitHub's delivery
 page shows what Robot CI thinks it is watching. The same line is logged.
 
+The repair-agent tree is bounded by `MAX_AGENT_TREE_DEPTH=3` (Investigator
+owner → Fixer → Reviewer, the whole repair contract) and
+`MAX_AGENT_CHILDREN=4` (three configured fix iterations plus one spare seat).
+Hitting either cap is always recorded as a non-fatal error event and a cluster
+error, never silently skipped. A refused Fixer seat leaves its cluster
+unresolved; a refused Reviewer seat is advisory-only and does not discard a
+patch whose originally red seeds passed simkit verification.
+
 ## Layout
 
 ```

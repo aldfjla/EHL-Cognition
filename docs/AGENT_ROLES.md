@@ -143,6 +143,26 @@ Separate worktrees are not fastidiousness: two agents editing one checkout
 corrupt each other's diffs, and the resulting mess presents as a robot bug
 rather than an orchestration bug.
 
+### Fixer sub-tree
+
+Repair has four jobs mapped onto three seats:
+
+1. the Investigator owner reproduces the red seeds and finds the root cause;
+2. its Fixer child proposes a patch; and
+3. its Reviewer child verifies the patch against the originally red seeds.
+
+Reproduction and root-cause analysis stay in one Investigator session because
+splitting them would duplicate prompt budget and re-derive the reproduction
+evidence. The tree is capped at depth three (owner → Fixer → Reviewer) and
+four children per parent (three configured fix iterations plus one spare seat).
+These caps prevent agents from inventing work beyond the repair contract and
+prevent repair attempts from thrashing instead of converging. The child's
+verdict is advisory; deterministic simkit results decide whether a cluster is
+accepted.
+
+No new `Role` enum value was added: `Role` is a contract shared with the UI,
+which is out of scope for this backend change.
+
 ### 6. Reviewer — *Tech Lead*
 **Stage:** `VERIFY`  ·  **Fan-out:** 1  ·  **Prompt:** `reviewer.md`
 
