@@ -134,6 +134,12 @@ export interface Agent {
   parent_agent_id: string | null;
   finding_ids: string[];
   last_activity: string | null;
+  /** Embeddable live view of the agent's machine, when the session has one. */
+  desktop_url: string | null;
+  /** The failure being worked on, in the oracle's words. Not our instruction. */
+  issue: string | null;
+  /** Coarse phase inside the agent's own work. */
+  step: string | null;
   created_at: string;
   updated_at: string;
   finished_at: string | null;
@@ -197,6 +203,11 @@ export interface Scenario {
   diagnosis: string | null;
   cluster_id: string | null;
   video_path: string | null;
+  /** Latest rendered frame while running; null once video_path takes over. */
+  live_frame_path: string | null;
+  worker_id: string | null;
+  /** Fraction of the simulated horizon completed. Advisory only. */
+  progress: number | null;
   trace_path: string | null;
   error: string | null;
 }
@@ -276,13 +287,16 @@ export type EventType =
   | "run.stage_changed"
   | "run.finished"
   | "agent.created"
+  | "agent.updated"
   | "agent.status_changed"
   | "agent.activity"
   | "message.sent"
   | "scenario.created"
   | "scenario.started"
+  | "scenario.progress"
   | "scenario.finished"
   | "suite.progress"
+  | "worker.pool_changed"
   | "finding.created"
   | "finding.updated"
   | "artifact.created"
@@ -314,16 +328,31 @@ export interface EventPayloads {
     status: AgentStatus;
     previous_status: AgentStatus | null;
   };
+  "agent.updated": Partial<Agent> & { agent_id: string };
   "agent.activity": { agent_id: string; text: string; ts: string };
   "message.sent": Message;
   "scenario.created": Scenario;
-  "scenario.started": { scenario_id: string };
+  "scenario.started": { scenario_id: string; worker_id?: string | null };
+  "scenario.progress": {
+    scenario_id: string;
+    progress: number;
+    sim_time_s: number;
+    live_frame_path?: string | null;
+  };
   "scenario.finished": Scenario;
   "suite.progress": {
     total: number;
     completed: number;
     passed: number;
     failed: number;
+    running?: number;
+    workers?: number;
+  };
+  "worker.pool_changed": {
+    workers: number;
+    busy: number;
+    queued: number;
+    reason?: string;
   };
   "finding.created": Finding;
   "finding.updated": {

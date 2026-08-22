@@ -134,3 +134,55 @@ async def test_publish_assigns_seq_even_if_the_caller_set_one() -> None:
     event = Event(run_id=RUN, type=EventType.RUN_CREATED, data={}, seq=99)
     await bus.publish(event)
     assert event.seq == 1
+
+
+async def test_emit_throttled_drops_inside_window_and_passes_after() -> None:
+    now = [10.0]
+    bus = EventBus(clock=lambda: now[0])
+
+    first = await bus.emit_throttled(
+        RUN,
+        EventType.SCENARIO_PROGRESS,
+        {},
+        key="scenario.progress:s1",
+        min_interval_s=1.0,
+    )
+    now[0] += 0.5
+    dropped = await bus.emit_throttled(
+        RUN,
+        EventType.SCENARIO_PROGRESS,
+        {},
+        key="scenario.progress:s1",
+        min_interval_s=1.0,
+    )
+    now[0] += 0.5
+    second = await bus.emit_throttled(
+        RUN,
+        EventType.SCENARIO_PROGRESS,
+        {},
+        key="scenario.progress:s1",
+        min_interval_s=1.0,
+    )
+
+    assert first is not None
+    assert dropped is None
+    assert second is not None
+    assert [event.seq for event in bus.history(RUN)] == [1, 2]
+
+
+async def test_concurrent_emitters_keep_seq_contiguous() -> None:
+    bus = EventBus()
+
+    async def emit_many() -> None:
+        for _ in range(25):
+            await bus.emit_throttled(
+                RUN,
+                EventType.SCENARIO_PROGRESS,
+                {},
+                key=str(asyncio.current_task()),
+                min_interval_s=0,
+            )
+
+    await asyncio.gather(*(emit_many() for _ in range(8)))
+
+    assert [event.seq for event in bus.history(RUN)] == list(range(1, 201))

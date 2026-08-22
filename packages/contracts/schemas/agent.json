@@ -22,6 +22,9 @@
     "parent_agent_id": { "type": ["string", "null"], "description": "Agent that spawned this one, e.g. investigator -> fixer handoff." },
     "finding_ids": { "type": "array", "items": { "type": "string" }, "description": "Blackboard findings this agent authored." },
     "last_activity": { "type": ["string", "null"], "description": "Most recent line from the Devin transcript, for the live 'what is it doing' ticker." },
+    "desktop_url": { "type": ["string", "null"], "format": "uri", "description": "Embeddable live view of the agent's own machine, when the Devin session exposes one. Null when the session has no such surface — the dashboard falls back to session_url plus the activity ticker rather than showing a dead frame." },
+    "issue": { "type": ["string", "null"], "description": "The concrete failure this agent is working on, in the oracle's words — normally the cluster's representative diagnosis. Distinct from `task`, which is the instruction we gave it." },
+    "step": { "type": ["string", "null"], "description": "Coarse phase inside the agent's own work, e.g. 'reproducing seed 41207'. Set by the orchestrator from structured output, not scraped from the transcript." },
     "created_at": { "type": "string", "format": "date-time" },
     "updated_at": { "type": "string", "format": "date-time" },
     "finished_at": { "type": ["string", "null"], "format": "date-time" }
