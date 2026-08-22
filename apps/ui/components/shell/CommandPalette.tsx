@@ -31,6 +31,11 @@ const STATIC_COMMANDS: Command[] = [
     href: "/runs?connect=1",
   },
   {
+    id: "nav-internal-db",
+    label: "Internal · database browser",
+    href: "/internal/db",
+  },
+  {
     id: "demo-replay",
     label: "Demo: scripted run replay",
     href: `/runs/${MOCK_RUN_ID}`,

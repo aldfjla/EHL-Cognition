@@ -116,6 +116,31 @@ export interface ConnectRepoResponse {
   webhook: { url: string; secret_configured: boolean };
 }
 
+// ---- internal database browser -------------------------------------------
+
+export interface InternalDbColumn {
+  name: string;
+  type: string;
+  nullable: boolean;
+  primary_key: boolean;
+}
+
+export interface InternalDbTable {
+  name: string;
+  primary_key: string | null;
+  row_count: number;
+  columns: InternalDbColumn[];
+}
+
+export type InternalDbValue = string | number | boolean | null;
+export type InternalDbRow = Record<string, InternalDbValue>;
+
+export interface InternalDbRows {
+  columns: InternalDbColumn[];
+  rows: InternalDbRow[];
+  total: number;
+}
+
 // ---- agent.json -----------------------------------------------------------
 
 export type Role =
