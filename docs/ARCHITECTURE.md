@@ -90,7 +90,7 @@ pipeline can move to its own process without touching a router.
 TRIGGERED
    ↓  clone repo @ sha, read robotci.yaml                    [no agent]
 RESOLVE_MODEL
-   ↓  Menagerie lookup; Modeler agent only on a miss         [oracle-first]
+   ↓  shipped/converted model or Menagerie lookup; Modeler only on a miss [oracle-first]
 BUILD_HARNESS
    ↓  Harness Builder binds pushed code to MuJoCo            [agent + smoke test]
 DESIGN_SCENARIOS

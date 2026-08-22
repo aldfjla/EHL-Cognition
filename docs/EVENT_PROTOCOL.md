@@ -131,10 +131,10 @@ recipient's prompt, not before. `TeamChat` and `AgentGraph` both consume this.
 | type | when | `data` |
 |---|---|---|
 | `scenario.created` | matrix generated | full `Scenario` (status `pending`) |
-| `scenario.started` | worker picks it up | `{scenario_id, worker_id}` |
+| `scenario.started` | worker picks it up | `{scenario_id, worker_id, attempt}` |
 | `scenario.progress` | while simulating, throttled | `{scenario_id, progress, sim_time_s, live_frame_path}` |
 | `scenario.finished` | result available | full `Scenario` |
-| `suite.progress` | every N completions | `{total, completed, passed, failed, running, workers}` |
+| `suite.progress` | every N completions | `{total, completed, passed, failed, running, queued, workers}` |
 | `worker.pool_changed` | pool resized or saturation changes | `{workers, busy, queued, reason}` |
 
 The whole matrix is emitted as `scenario.created` up front, so
@@ -145,6 +145,13 @@ the things worth showing.
 `suite.progress` is redundant with counting `scenario.finished` events. It
 exists so the index page and any late subscriber get a summary without
 replaying the whole matrix.
+
+Infrastructure errors may be retried after a worker is reacquired. Intermediate
+attempts emit another `scenario.started` with an incremented `attempt`; only
+the final attempt emits `scenario.finished`. A timeout remains a scenario
+`error` with `error_kind: "timeout"` and is never retried. Other worker or
+harness errors use `error_kind: "infra"` and report their retry count and
+`retry_reason` on the final `Scenario`.
 
 ## Live simulation feeds
 

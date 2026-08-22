@@ -43,6 +43,7 @@ ignore returns it.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -55,7 +56,7 @@ from orchestrator import triggers
 from orchestrator.blackboard import Blackboard
 from orchestrator.bus import EventBus
 from orchestrator.pipeline import Pipeline, PipelineContext
-from orchestrator.schemas import EventType, Run, Stage
+from orchestrator.schemas import EventType, Run, Scenario, ScenarioStatus, Stage
 from orchestrator.workspace import Workspace
 from sqlmodel import Session
 
@@ -137,7 +138,13 @@ async def _drive_pipeline(
             suite_size=suite_size,
             default_suite_size=settings.suite_size,
         )
-        await Pipeline(ctx).run()
+        persistence = asyncio.create_task(_persist_scenario_events(run.id, bus))
+        try:
+            await Pipeline(ctx).run()
+        finally:
+            if not persistence.done():
+                await bus.close(run.id)
+            await persistence
     except Exception as exc:
         log.exception("run %s failed", run.id)
         await events.emit(
@@ -196,6 +203,37 @@ def _filter_cache(repo_name: str) -> Any:
         log.info("cached %s trigger filters from robotci.yaml: %s", repo_name, filters)
 
     return cache
+
+
+async def _persist_scenario_events(run_id: str, bus: EventBus) -> None:
+    """Mirror live Scenario transitions into the API store.
+
+    The orchestrator owns the event stream and cannot import the API store.
+    Consuming the same stream here keeps REST's database-derived worker counts
+    correct while a suite is running, including the transition to ``running``.
+    """
+    async for event in bus.subscribe(run_id):
+        if event.type is EventType.SCENARIO_CREATED:
+            scenario = Scenario(**event.data)
+        elif event.type is EventType.SCENARIO_STARTED:
+            with session_scope() as db:
+                scenario = repo.get_scenario(db, str(event.data.get("scenario_id")))
+                if scenario is None:
+                    continue
+                scenario = scenario.model_copy(
+                    update={
+                        "status": ScenarioStatus.RUNNING,
+                        "worker_id": event.data.get("worker_id"),
+                    }
+                )
+                repo.upsert_scenario(db, scenario)
+            continue
+        elif event.type is EventType.SCENARIO_FINISHED:
+            scenario = Scenario(**event.data)
+        else:
+            continue
+        with session_scope() as db:
+            repo.upsert_scenario(db, scenario)
 
 
 def _devin_or_none() -> Any:

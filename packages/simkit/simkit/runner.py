@@ -49,6 +49,8 @@ from simkit.live import LiveFrameWriter
 DEFAULT_RATE_HZ = 100
 #: Simulated-time budget used when the task declares no ``within_time``.
 DEFAULT_SIM_LIMIT_S = 12.0
+#: Parent and in-worker guards allow a healthy episode generous realtime slack.
+DEFAULT_SCENARIO_TIMEOUT_S = 60.0
 
 
 @dataclass
@@ -67,6 +69,9 @@ class EpisodeResult:
     video_path: str | None = None
     trace_path: str | None = None
     error: str | None = None
+    error_kind: str | None = None  # timeout | infra | None
+    retries: int = 0
+    retry_reason: str | None = None
     live_frame_path: str | None = None
     worker_id: str | None = None
 
@@ -92,7 +97,7 @@ def run_scenario(
     seed: int,
     task: dict[str, Any],
     record: bool = False,
-    max_wall_s: float = 120.0,
+    max_wall_s: float = DEFAULT_SCENARIO_TIMEOUT_S,
     live: bool = False,
     on_observe: Callable[[dict[str, Any]], None] | None = None,
     observe_hz: float = 2.0,
@@ -199,15 +204,19 @@ def run_scenario(
 
     except WatchdogExpired as exc:
         result.status = "error"
+        result.error_kind = "timeout"
         result.error = str(exc)
     except HarnessError as exc:
         result.status = "error"
+        result.error_kind = "infra"
         result.error = f"harness: {exc}"
     except scene_mod.SceneError as exc:
         result.status = "error"
+        result.error_kind = "infra"
         result.error = f"scene: {exc}"
     except Exception as exc:  # noqa: BLE001 - any crash is our error, not theirs
         result.status = "error"
+        result.error_kind = "infra"
         result.error = f"{type(exc).__name__}: {exc}"
     finally:
         if recorder is not None:
