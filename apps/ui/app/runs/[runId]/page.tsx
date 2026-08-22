@@ -93,7 +93,7 @@ export default function MissionControlPage({
               <span aria-hidden className="text-2xl leading-none">
                 ←
               </span>
-              Runs
+              Back
             </Link>
             <h1 className="font-mono text-lg font-semibold">{runId}</h1>
             {replay && (
