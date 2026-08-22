@@ -128,7 +128,8 @@ async def _drive_pipeline(
     finally:
         if persistence is not None:
             await bus.close(run.id)
-            if asyncio.current_task().cancelling():
+            driver = asyncio.current_task()
+            if driver is not None and driver.cancelling():
                 persistence.cancel()
             await persistence
 
