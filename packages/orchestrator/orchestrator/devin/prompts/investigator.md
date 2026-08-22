@@ -19,6 +19,11 @@ What distinguishes these scenarios from the passing ones:
 
 {{param_correlation}}
 
+Recorded joint traces for these runs — read them, the answer is usually in the
+per-step `qpos`/`qvel`/`contacts` history rather than in the diagnosis string:
+
+{{trace_paths}}
+
 ## Task
 
 1. **Reproduce it first.** Re-run one failing seed before forming any theory:
@@ -56,5 +61,6 @@ explanation.
 }
 ```
 
-<!-- TODO(build): give the investigator read access to the trace file, not just
-     the diagnosis string — joint traces are where the real answer usually is. -->
+Set `reproduced` to false if the seed did not reproduce the failure. That is a
+real finding — it means the scenario is flaky — and it is treated as one; do not
+invent a mechanism to fill the field.

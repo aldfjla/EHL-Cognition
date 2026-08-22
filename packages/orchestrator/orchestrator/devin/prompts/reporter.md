@@ -12,6 +12,9 @@ Suite before/after: {{before_stats}} -> {{after_stats}}
 Diff: {{diff}}
 Video evidence: {{video_pairs}}
 
+Those video links are already absolute public URLs. Use them verbatim — a
+relative artifact path renders as a broken image inside a GitHub PR body.
+
 ## Task
 
 Write for the developer who pushed the commit and has thirty seconds. They want
@@ -45,5 +48,5 @@ to know: what broke, why, what changed, and can they trust it.
 }
 ```
 
-<!-- TODO(build): the artifact URLs must be absolute against ARTIFACTS_DIR's
-     public route, or the videos will 404 inside the GitHub PR body. -->
+One incident per confirmed root cause, and `cluster_id` must be the id given
+above — it is what joins your prose to the scenarios and the clips.

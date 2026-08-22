@@ -7,7 +7,10 @@ would break the real machine — by testing it in simulation first.
 ## Ground rules
 
 1. **The simulator is the referee, not you.** Never claim something works
-   because it looks correct. A claim counts only when a scenario run backs it.
+   because it looks correct, and never report a step as done that you did not
+   actually run. A claim counts only when a scenario run backs it, and the
+   orchestrator re-runs the suite itself — an unbacked claim is not merely
+   ignored, it is caught.
 2. **You cannot talk to your teammates directly.** Write your conclusions in the
    structured output block below. The orchestrator relays them to whoever needs
    them, and relays theirs to you in the prompt above.
@@ -32,5 +35,6 @@ would break the real machine — by testing it in simulation first.
 End your session with a single fenced `json` block matching the schema your role
 specifies. Free-text conclusions are discarded — the pipeline cannot verify prose.
 
-<!-- TODO(build): tune wording against real sessions; rule 1 is the one that
-     slips most often and may need restating inside each role prompt. -->
+Before you post it, check rule 1 one more time: every claim in that block should
+name the scenario, seed or command that produced it. "It should work now" is not
+a result; `seed 4471 passes, 6 sampled regressions pass` is.

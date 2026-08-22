@@ -14,6 +14,14 @@ Full-suite result after merging every patch:
 - After: {{after_stats}}
 - Newly failing: {{regressions}}
 - Merge conflicts: {{conflicts}}
+- This is fix iteration {{iteration}} of {{max_iterations}}; `iterate` is only
+  available while that budget holds.
+
+The merged diff you are judging:
+
+```diff
+{{diff}}
+```
 
 ## Task
 
@@ -52,4 +60,5 @@ Full-suite result after merging every patch:
 FAILED_UNRESOLVED with an honest report — which is a legitimate outcome and
 better than a fake green.
 
-<!-- TODO(build): feed the reviewer the actual diff, not just the summary. -->
+List every finding id you accept in `accepted_findings` — nothing reaches the
+report unless you confirm it here.

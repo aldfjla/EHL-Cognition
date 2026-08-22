@@ -14,9 +14,73 @@ Outputs: an ``Agent`` row that stays current, ``agent.*`` events on the bus,
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from orchestrator.schemas import Agent, AgentStatus, Role
+from orchestrator.schemas import (
+    Agent,
+    AgentStatus,
+    EventType,
+    Message,
+    MessageKind,
+    Role,
+    Speaker,
+)
+
+#: Live, non-terminal sessions keyed by ``(run_id, role)``.
+#:
+#: Devin sessions cannot address each other, so a relay has to find the
+#: recipient's session object. The registry is that lookup — see
+#: ``orchestrator.roles.base.RoleAgent.relay``.
+_LIVE: dict[tuple[str, Role], list[AgentSession]] = {}
+
+#: Optional sink invoked with ``(agent, line)`` for every transcript line.
+#:
+#: Set by the API process to persist transcripts, so a finished session can be
+#: replayed into the dashboard after a restart.
+_TRANSCRIPT_SINK: Callable[[Agent, str], Any] | None = None
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def live_sessions(run_id: str, role: Role | None = None) -> list[AgentSession]:
+    """Sessions of ``run_id`` that have not reached a terminal status."""
+    if role is not None:
+        return list(_LIVE.get((run_id, role), ()))
+    out: list[AgentSession] = []
+    for (rid, _role), sessions in _LIVE.items():
+        if rid == run_id:
+            out.extend(sessions)
+    return out
+
+
+def set_transcript_sink(sink: Callable[[Agent, str], Any] | None) -> None:
+    """Install (or clear) the hook that persists transcript lines."""
+    global _TRANSCRIPT_SINK
+    _TRANSCRIPT_SINK = sink
+
+
+def file_transcript_sink(directory: Path) -> Callable[[Agent, str], None]:
+    """A :func:`set_transcript_sink` sink appending JSONL under ``directory``.
+
+    One file per agent, so a finished run can be replayed into the dashboard
+    after the API restarts.
+    """
+    directory = Path(directory)
+
+    def sink(agent: Agent, line: str) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        record = {"agent_id": agent.id, "ts": _now().isoformat(), "text": line}
+        path = directory / f"{agent.id}.jsonl"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+    return sink
 
 
 class AgentSession:
@@ -31,6 +95,28 @@ class AgentSession:
         self.agent = agent
         self.client = client
         self.bus = bus
+        #: Every transcript line seen, oldest first.
+        self.transcript: list[str] = []
+
+    # -- registry ---------------------------------------------------------- #
+
+    @property
+    def _key(self) -> tuple[str, Role]:
+        return (self.agent.run_id, self.agent.role)
+
+    def _register(self) -> None:
+        _LIVE.setdefault(self._key, []).append(self)
+
+    def _unregister(self) -> None:
+        sessions = _LIVE.get(self._key)
+        if not sessions:
+            return
+        if self in sessions:
+            sessions.remove(self)
+        if not sessions:
+            _LIVE.pop(self._key, None)
+
+    # -- lifecycle --------------------------------------------------------- #
 
     @classmethod
     async def start(
@@ -51,31 +137,109 @@ class AgentSession:
         card in ``starting`` immediately — a five-second blank grid is the
         difference between the demo looking alive and looking hung.
         """
-        raise NotImplementedError
-        # TODO(build): build Agent, emit agent.created, call
-        # client.create_session, store session_id/url, emit status change.
+        agent = Agent(
+            run_id=run_id,
+            role=role,
+            title=title,
+            task=task,
+            status=AgentStatus.STARTING,
+            **agent_fields,
+        )
+        session = cls(agent, client, bus)
+        session._register()
+        await bus.emit(run_id, EventType.AGENT_CREATED, agent.model_dump(mode="json"))
+
+        try:
+            handle = await client.create_session(
+                prompt,
+                title=title,
+                tags=[f"run:{run_id}", f"role:{role.value}"],
+            )
+        except Exception as exc:
+            await session.set_status(AgentStatus.FAILED, str(exc))
+            raise
+
+        agent.session_id = handle.session_id
+        agent.session_url = handle.url
+        await session.set_status(AgentStatus.WORKING)
+        return session
 
     async def wait(self, timeout_s: float = 1800.0) -> dict[str, Any]:
         """Await completion, streaming transcript lines to the bus."""
-        raise NotImplementedError
-        # TODO(build): client.wait_until_done with on_activity ->
-        # emit agent.activity and update agent.last_activity.
+        if not self.agent.session_id:
+            raise RuntimeError(f"agent {self.agent.id} has no session to wait on")
+
+        async def on_activity(line: str) -> None:
+            self.transcript.append(line)
+            self.agent.last_activity = line
+            self.agent.updated_at = _now()
+            if _TRANSCRIPT_SINK is not None:
+                _TRANSCRIPT_SINK(self.agent, line)
+            await self.bus.emit(
+                self.agent.run_id,
+                EventType.AGENT_ACTIVITY,
+                {
+                    "agent_id": self.agent.id,
+                    "text": line,
+                    "ts": self.agent.updated_at.isoformat(),
+                },
+            )
+
+        try:
+            payload = await self.client.wait_until_done(
+                self.agent.session_id,
+                timeout_s=timeout_s,
+                on_activity=on_activity,
+            )
+        except Exception as exc:
+            await self.set_status(AgentStatus.FAILED, str(exc))
+            raise
+
+        status = str(payload.get("status_enum") or payload.get("status") or "").lower()
+        if status == "blocked":
+            await self.set_status(AgentStatus.BLOCKED, "session is waiting on input")
+        return payload
 
     async def ask(self, message: str) -> None:
         """Relay a message into this session and record it on the bus."""
-        raise NotImplementedError
-        # TODO(build): client.send_message + emit message.sent.
+        if not self.agent.session_id:
+            raise RuntimeError(f"agent {self.agent.id} has no session to message")
+        await self.client.send_message(self.agent.session_id, message)
+        relay = Message(
+            run_id=self.agent.run_id,
+            to_agent_id=self.agent.id,
+            from_role=Speaker.ORCHESTRATOR,
+            to_role=Speaker(self.agent.role.value),
+            kind=MessageKind.ANSWER,
+            body=message,
+        )
+        await self.bus.emit(
+            self.agent.run_id,
+            EventType.MESSAGE_SENT,
+            relay.model_dump(mode="json"),
+        )
 
     async def set_status(self, status: AgentStatus, detail: str = "") -> None:
         """Update status and emit ``agent.status_changed``."""
-        raise NotImplementedError
-        # TODO(build): mutate, stamp updated_at/finished_at, publish.
+        previous = self.agent.status
+        self.agent.status = status
+        self.agent.updated_at = _now()
+        if status.is_terminal:
+            self.agent.finished_at = self.agent.updated_at
+            self._unregister()
+        data: dict[str, Any] = {
+            "agent_id": self.agent.id,
+            "status": status.value,
+            "previous_status": previous.value,
+            "session_id": self.agent.session_id,
+            "session_url": self.agent.session_url,
+        }
+        if detail:
+            data["detail"] = detail
+        await self.bus.emit(self.agent.run_id, EventType.AGENT_STATUS_CHANGED, data)
 
     async def output(self) -> dict[str, Any]:
         """Parsed structured output from the session."""
-        raise NotImplementedError
-        # TODO(build): delegate to client.structured_output.
-
-
-# TODO(build): add a transcript-persisting hook so finished sessions can be
-# replayed into the dashboard after the API restarts.
+        if not self.agent.session_id:
+            raise RuntimeError(f"agent {self.agent.id} produced no session")
+        return await self.client.structured_output(self.agent.session_id)

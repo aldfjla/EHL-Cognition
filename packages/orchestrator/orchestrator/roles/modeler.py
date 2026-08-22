@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from orchestrator.roles.base import RoleAgent
-from orchestrator.schemas import Agent, Finding, Role
+from orchestrator.schemas import Agent, Finding, FindingKind, Role
 
 
 class ModelerAgent(RoleAgent):
@@ -34,13 +34,44 @@ class ModelerAgent(RoleAgent):
     role = Role.MODELER
     prompt_file = "modeler.md"
     display_name = "Hardware Engineer"
+    required_keys = ("source", "model_path", "reasoning")
 
     def template_vars(self, **kwargs: Any) -> dict[str, Any]:
         """Substitutions for ``devin/prompts/modeler.md``."""
-        raise NotImplementedError
-        # TODO(build): pass resolver_report, model_out_dir, and the Menagerie index summary.
+        robot = (self.ctx.config.get("robot") or {}) if self.ctx.config else {}
+        return {
+            "resolver_report": kwargs.get("resolver_report")
+            or "no confident Menagerie match",
+            "model_out_dir": kwargs.get("model_out_dir")
+            or (self.ctx.workspace.worktree("model")),
+            "menagerie_index": kwargs.get("menagerie_index") or "(not supplied)",
+            "robot_hints": robot,
+        }
 
     def to_findings(self, agent: Agent, output: dict[str, Any]) -> list[Finding]:
         """Convert structured output into blackboard findings."""
-        raise NotImplementedError
-        # TODO(build): map output keys onto Finding objects per the docstring.
+        confidence = float(output.get("confidence", 0.5) or 0.5)
+        name = output.get("name") or output.get("model_path")
+        findings = [
+            self.finding(
+                agent,
+                FindingKind.OBSERVATION,
+                f"Robot identified as {name} ({output.get('source')})",
+                detail=str(output.get("reasoning", "")),
+                confidence=confidence,
+                files=[str(output.get("model_path", ""))],
+            )
+        ]
+        # Every guessed physical quantity is a constraint: a later
+        # Investigator has to know a failure might be the model's fault.
+        for assumption in output.get("assumptions") or []:
+            findings.append(
+                self.finding(
+                    agent,
+                    FindingKind.CONSTRAINT,
+                    str(assumption),
+                    detail=f"Guessed while building {name}.",
+                    confidence=confidence,
+                )
+            )
+        return findings

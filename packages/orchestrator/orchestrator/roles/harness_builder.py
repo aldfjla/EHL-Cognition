@@ -26,7 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from orchestrator.roles.base import RoleAgent
-from orchestrator.schemas import Agent, Finding, Role
+from orchestrator.schemas import Agent, Finding, FindingKind, Role
 
 
 class HarnessBuilderAgent(RoleAgent):
@@ -35,13 +35,53 @@ class HarnessBuilderAgent(RoleAgent):
     role = Role.HARNESS_BUILDER
     prompt_file = "harness_builder.md"
     display_name = "Test Infrastructure Engineer"
+    required_keys = ("harness_path", "interface_notes")
 
     def template_vars(self, **kwargs: Any) -> dict[str, Any]:
         """Substitutions for ``devin/prompts/harness_builder.md``."""
-        raise NotImplementedError
-        # TODO(build): pass entrypoint, interface, rate_hz, model_path, harness_out_path.
+        control = (self.ctx.config.get("control") or {}) if self.ctx.config else {}
+        model = self.ctx.run.robot_model
+        return {
+            "entrypoint": kwargs.get("entrypoint") or control.get("entrypoint", ""),
+            "interface": kwargs.get("interface")
+            or control.get("interface", "joint_position"),
+            "rate_hz": kwargs.get("rate_hz") or control.get("rate_hz", 100),
+            "model_path": kwargs.get("model_path")
+            or (model.model_path if model else ""),
+            "harness_out_path": kwargs.get("harness_out_path")
+            or (self.ctx.workspace.base / "robotci_harness.py"),
+        }
 
     def to_findings(self, agent: Agent, output: dict[str, Any]) -> list[Finding]:
         """Convert structured output into blackboard findings."""
-        raise NotImplementedError
-        # TODO(build): map output keys onto Finding objects per the docstring.
+        confidence = float(output.get("confidence", 0.5) or 0.5)
+        harness_path = str(output.get("harness_path", ""))
+        findings = [
+            self.finding(
+                agent,
+                FindingKind.OBSERVATION,
+                f"Harness binds the pushed entrypoint at {harness_path}",
+                detail="\n".join(
+                    [
+                        str(output.get("interface_notes", "")),
+                        *(f"Shim: {shim}" for shim in output.get("shims") or []),
+                    ]
+                ).strip(),
+                confidence=confidence,
+                files=[harness_path] if harness_path else None,
+            )
+        ]
+        # Constraints are broadcast: an agent that violates one of these makes
+        # every downstream result wrong.
+        for constraint in output.get("constraints") or []:
+            findings.append(
+                self.finding(
+                    agent,
+                    FindingKind.CONSTRAINT,
+                    str(constraint),
+                    detail="Assumption the pushed control code makes; the "
+                    "harness honours it and so must every patch.",
+                    confidence=confidence,
+                )
+            )
+        return findings
