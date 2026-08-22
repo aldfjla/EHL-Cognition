@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from orchestrator import pipeline as pipeline_mod
@@ -16,8 +17,9 @@ from orchestrator.pipeline import (
     PipelineError,
     can_transition,
 )
-from orchestrator.schemas import TERMINAL_STAGES, EventType, Run, Stage
+from orchestrator.schemas import TERMINAL_STAGES, EventType, Run, Scenario, Stage
 from orchestrator.workspace import Workspace
+from simkit import scoring
 
 
 def make_ctx(tmp_path: Path) -> PipelineContext:
@@ -247,3 +249,42 @@ async def test_pr_opened_side_effects_run_before_the_terminal_transition(
 def test_module_exposes_a_headless_entrypoint() -> None:
     assert callable(pipeline_mod.run_headless)
     assert callable(pipeline_mod.main)
+
+
+def test_apply_result_translates_real_simkit_scoring_output() -> None:
+    """The orchestrator publishes simkit's measured value as contract value."""
+    raw = SimpleNamespace(
+        sim_time_s=1.0,
+        trace={"n": 1, "contact_force": [7.5]},
+    )
+    outcomes, diagnosis = scoring.evaluate(
+        raw,
+        [
+            {"id": "no_collision", "max_force_n": 10.0},
+            {"id": "unknown_criterion"},
+        ],
+    )
+    scenario = Scenario(
+        run_id="run-test",
+        id="scenario-test",
+        index=0,
+        seed=1,
+    )
+    result = SimpleNamespace(
+        status="failed",
+        duration_s=0.1,
+        sim_time_s=1.0,
+        diagnosis=diagnosis,
+        video_path=None,
+        trace_path=None,
+        error=None,
+        worker_id="w0",
+        criteria=outcomes,
+    )
+
+    pipeline_mod.Pipeline._apply_result(scenario, result)
+
+    assert scenario.criteria[0].value == 7.5
+    assert scenario.criteria[0].threshold == 10.0
+    assert scenario.criteria[1].value is None
+    assert "unknown criterion" in (scenario.diagnosis or "")

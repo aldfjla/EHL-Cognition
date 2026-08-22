@@ -1033,9 +1033,7 @@ class Pipeline:
         scenario.trace_path = result.trace_path
         scenario.error = result.error
         scenario.worker_id = getattr(result, "worker_id", scenario.worker_id)
-        scenario.criteria = [
-            CriterionResult(**criterion) for criterion in result.criteria
-        ]
+        scenario.criteria = [_criterion_result(outcome) for outcome in result.criteria]
 
     @staticmethod
     def _stats(scenarios: list[Scenario]) -> SuiteStats:
@@ -1216,6 +1214,23 @@ class Pipeline:
             # Keep the checkout on a failed run: it is the only way to see what
             # the agents were looking at.
             await workspace_mod.cleanup(self.ctx.workspace, keep_artifacts=True)
+
+
+def _criterion_result(outcome: dict[str, Any]) -> CriterionResult:
+    """Translate simkit scoring fields into the published contract.
+
+    Simkit keeps ``measured`` for its oracle-facing dictionaries. The
+    orchestrator owns the boundary conversion to the contract's ``value``.
+    Only contract fields are copied, so producer drift remains visible rather
+    than being hidden by ``**outcome``. Unknown-criterion details remain in
+    simkit's diagnosis, which is copied onto the Scenario above.
+    """
+    return CriterionResult(
+        id=outcome["id"],
+        passed=outcome["passed"],
+        value=outcome["measured"],
+        threshold=outcome["threshold"],
+    )
 
 
 def _parse_axes(detail: str) -> dict[str, tuple[float, float]]:
