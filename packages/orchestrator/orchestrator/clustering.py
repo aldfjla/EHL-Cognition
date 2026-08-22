@@ -132,7 +132,9 @@ def correlate_params(scenarios: list[Scenario]) -> dict[str, tuple[float, float]
     failures = [s for s in scenarios if s.status in _FAILING]
     if not failures:
         return {}
-    population = scenarios if len(failures) < len(scenarios) else failures
+    # With no passing scenarios to compare against there is no population to
+    # discriminate from, so fall back on absolute narrowness.
+    comparative = len(failures) < len(scenarios)
 
     discriminating: dict[str, tuple[float, float]] = {}
     for name in sorted(_numeric_params(failures)):
@@ -140,7 +142,7 @@ def correlate_params(scenarios: list[Scenario]) -> dict[str, tuple[float, float]
         if not values:
             continue
         low, high = min(values), max(values)
-        reference = _values(population, name)
+        reference = _values(scenarios, name) if comparative else []
         ref_spread = max(reference) - min(reference) if reference else 0.0
         spread = high - low
         if ref_spread > 0:

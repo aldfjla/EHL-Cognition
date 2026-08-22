@@ -45,6 +45,9 @@ class EventBus:
         self._subscribers: dict[str, set[asyncio.Queue[Event | None]]] = {}
         self._seq: dict[str, int] = {}
         self._closed: set[str] = set()
+        #: Runs something has subscribed to. A run nobody ever streamed keeps
+        #: its buffer so a late REST catch-up still has something to return.
+        self._streamed: set[str] = set()
 
     async def publish(self, event: Event) -> None:
         """Assign ``seq``, buffer, and fan out to subscribers. Never blocks."""
@@ -88,6 +91,7 @@ class EventBus:
             maxsize=SUBSCRIBER_QUEUE_SIZE
         )
         self._subscribers.setdefault(run_id, set()).add(queue)
+        self._streamed.add(run_id)
         last_seq = since or 0
         try:
             for event in self.history(run_id, since):
@@ -140,7 +144,13 @@ class EventBus:
 
         Retention policy: buffers of live runs are kept for late subscribers,
         buffers of finished runs only until the last subscriber disconnects.
+        A run nobody ever streamed keeps its buffer — dropping it would strand
+        the REST catch-up path with nothing to serve.
         """
-        if run_id in self._closed and not self._subscribers.get(run_id):
+        if (
+            run_id in self._closed
+            and run_id in self._streamed
+            and not self._subscribers.get(run_id)
+        ):
             self._history.pop(run_id, None)
             self._seq.pop(run_id, None)

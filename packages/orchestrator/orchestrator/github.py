@@ -49,7 +49,12 @@ def dry_run() -> bool:
     Read from the environment rather than passed through every call site: a
     rehearsal must not depend on one caller remembering to thread a flag.
     """
-    return os.getenv("ROBOTCI_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on")
+    return os.getenv("ROBOTCI_DRY_RUN", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def branch_name(run: Run) -> str:
@@ -93,7 +98,9 @@ async def open_pull_request(
     """
     body = render_pr_body(report)
     if dry_run():
-        log.info("DRY_RUN: would open PR %s -> %s on %s: %s", head, base, repo, report.title)
+        log.info(
+            "DRY_RUN: would open PR %s -> %s on %s: %s", head, base, repo, report.title
+        )
         return f"https://github.com/{repo}/pull/DRY_RUN"
 
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as handle:
@@ -193,10 +200,14 @@ def render_pr_body(report: Report) -> str:
         lines += [
             "| suite | passed | failed | pass rate |",
             "|---|---|---|---|",
-            f"| before | {report.before.passed} | {report.before.failed} "
-            f"| {report.before.pass_rate:.0%} |",
-            f"| after | {report.after.passed} | {report.after.failed} "
-            f"| {report.after.pass_rate:.0%} |",
+            (
+                f"| before | {report.before.passed} | {report.before.failed} "
+                f"| {report.before.pass_rate:.0%} |"
+            ),
+            (
+                f"| after | {report.after.passed} | {report.after.failed} "
+                f"| {report.after.pass_rate:.0%} |"
+            ),
             "",
         ]
     for incident in report.incidents:
@@ -212,8 +223,10 @@ def render_pr_body(report: Report) -> str:
             lines += ["Files: " + ", ".join(incident.files_changed), ""]
         if incident.before_video or incident.after_video:
             lines += [
-                f"Video: before `{incident.before_video}`, "
-                f"after `{incident.after_video}`",
+                (
+                    f"Video: before `{incident.before_video}`, "
+                    f"after `{incident.after_video}`"
+                ),
                 "",
             ]
     return "\n".join(lines).strip() + "\n"
