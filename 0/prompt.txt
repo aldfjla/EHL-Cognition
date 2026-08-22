@@ -1,0 +1,214 @@
+# Scaffold `EHL-Cognition` — Robot CI (Devin autonomous layer for robotics)
+
+## Context
+
+This repo is the entry for the **Cognition track at the TUM.ai / EHL hackathon**. The track brief (keynote slide 18) is *"Devin for X — Building the Autonomous Layer"*: pick a domain whose output can be expressed as code, then build a system that **programmatically triggers Devin sessions via the API**, gives them a way to **check their own work**, and produces **real artifacts with no human in the loop**.
+
+The chosen domain is **robotics**. The thesis: robotics already has the feedback loop software has — it's called simulation — but nobody has wired an autonomous engineer into it. Robotics teams therefore have no CI: they push code that drives real hardware, test it once by hand, and discover regressions weeks later on a physical robot.
+
+**What we're building.** A developer pushes control code for a real robot (e.g. a robot arm) to their repo. Our system wakes up, has Devin stand up a simulation of that exact robot — resolving or generating its physical model — runs the pushed code across a large matrix of randomized simulated worlds, and for every failure dispatches a fleet of Devin sessions that reproduce it, find the root cause, fix it, and prove the fix by re-running the full suite. It ends with a written incident report and a pull request containing working code and video evidence. A React dashboard shows the whole thing live: which agents exist, what each is working on, and how they communicate — like watching a software engineering team.
+
+**This task is scaffolding only.** Produce the complete folder structure, config files, and stub modules with docstrings and `TODO`s. Do not implement pipeline logic, simulation, or Devin calls yet — a later session will direct that build. The written docs (`README.md`, `docs/`) are the exception: they must be real content, because they become the spec that later agent sessions implement from.
+
+---
+
+## Decisions already made
+
+| Decision | Choice |
+|---|---|
+| Orchestrator + UI | FastAPI (Python) + Next.js dashboard over WebSocket |
+| Robot code under test | Lives in a **separate GitHub repo**; this repo is the external CI system watching it |
+| Robot model sourcing | **Library first** (MuJoCo Menagerie), Devin-generated MJCF as fallback |
+| Scaffold depth | Empty stubs + `TODO`s; docs and config files fully written |
+
+## Environment constraints (verified on this machine)
+
+- Python **3.14.4** (`mujoco` 3.12.0 resolves for it — verify the wheel actually installs during setup; if not, fall back to a 3.12 venv)
+- Node **v20.20.2**, npm 10.8.2 — Next.js 15 is fine
+- **No Docker** → the entire stack must run as plain local processes, no containers anywhere
+- **No system ffmpeg** → use the `imageio-ffmpeg` pip package, which ships its own binary
+- **No `uv`** → use `python3 -m venv` + `pip`
+- `gh` 2.86 and `git` 2.53 available → PR creation and repo cloning via `gh`
+
+---
+
+## Step 1 — Wipe the existing contents
+
+Current tracked contents are only `README.md` and `hello-entire.md` (an unrelated tooling demo file). Delete both.
+
+**Keep:** `.git/` (has the `origin` remote `git@github.com:aldfjla/EHL-Cognition.git`), `.claude/` and `.entire/` (local tooling config, untracked — not project content).
+
+Do not run `git rm -rf .` or delete the working directory itself.
+
+---
+
+## Step 2 — Create the folder structure
+
+```
+EHL-Cognition/
+├── README.md                       # written: what it is, why, quickstart
+├── Makefile                        # setup / api / ui / dev / test / fmt
+├── .env.example                    # written: every env var, documented
+├── .gitignore                      # python, node, venv, sqlite, media artifacts
+├── robotci.example.yaml            # written: config the CUSTOMER repo provides
+│
+├── docs/                           # written — these are the build spec
+│   ├── ARCHITECTURE.md             # pipeline stages, data flow, process layout
+│   ├── AGENT_ROLES.md              # the "engineering team": each Devin role + prompt contract
+│   ├── EVENT_PROTOCOL.md           # event + message schemas driving the UI
+│   ├── SIMULATION.md               # model resolution, scenarios, scoring, video
+│   ├── DEMO_SCRIPT.md              # the 90-second stage run
+│   └── PITCH.md                    # the judging narrative
+│
+├── apps/
+│   ├── api/                        # FastAPI orchestrator process
+│   │   ├── pyproject.toml
+│   │   ├── app/
+│   │   │   ├── main.py             # app factory, router mounts, CORS, /health
+│   │   │   ├── config.py           # pydantic-settings from .env
+│   │   │   ├── deps.py             # DI: store, bus, devin client
+│   │   │   ├── routers/
+│   │   │   │   ├── webhooks.py     # POST /webhooks/github — push trigger
+│   │   │   │   ├── runs.py         # GET /runs, GET /runs/{id}
+│   │   │   │   ├── agents.py       # GET /runs/{id}/agents, /agents/{id}/messages
+│   │   │   │   ├── artifacts.py    # serve videos, reports, diffs
+│   │   │   │   └── stream.py       # WS /ws/runs/{id} — live event feed
+│   │   │   └── store/
+│   │   │       ├── db.py           # SQLite engine/session
+│   │   │       ├── tables.py       # SQLModel tables
+│   │   │       └── repo.py         # query helpers
+│   │   └── tests/test_health.py
+│   │
+│   └── ui/                         # Next.js dashboard
+│       ├── package.json, tsconfig.json, next.config.ts,
+│       │   tailwind.config.ts, postcss.config.mjs
+│       ├── app/
+│       │   ├── layout.tsx, globals.css
+│       │   ├── page.tsx                    # runs list
+│       │   └── runs/[runId]/page.tsx       # MISSION CONTROL
+│       ├── components/
+│       │   ├── PipelineTimeline.tsx        # stage progress rail
+│       │   ├── AgentGrid.tsx               # all live agents
+│       │   ├── AgentCard.tsx               # role, task, iteration, status
+│       │   ├── TeamChat.tsx                # agent-to-agent message feed
+│       │   ├── AgentGraph.tsx              # who is talking to whom
+│       │   ├── ScenarioMatrix.tsx          # NxM pass/fail grid
+│       │   ├── DiffViewer.tsx
+│       │   ├── VideoCompare.tsx            # before/after clips
+│       │   └── ReportView.tsx
+│       └── lib/
+│           ├── api.ts, useEventStream.ts, types.ts  # types mirror packages/contracts
+│
+├── packages/
+│   ├── contracts/                  # single source of truth for shared shapes
+│   │   ├── schemas/*.json          # run, agent, message, scenario, finding, report
+│   │   └── README.md               # how TS types stay in sync
+│   │
+│   ├── orchestrator/               # core logic, framework-free, importable
+│   │   ├── pyproject.toml
+│   │   ├── pipeline.py             # stage machine (see stages below)
+│   │   ├── schemas.py              # pydantic models mirroring contracts/
+│   │   ├── bus.py                  # async pub/sub -> WebSocket
+│   │   ├── blackboard.py           # shared findings store agents read/write
+│   │   ├── clustering.py           # group failing scenarios by suspected cause
+│   │   ├── workspace.py            # clone/checkout the customer repo via gh
+│   │   ├── github.py               # branches, PRs, status checks
+│   │   ├── devin/
+│   │   │   ├── client.py           # HTTP client: create/poll/message sessions
+│   │   │   ├── session.py          # one session's lifecycle + transcript
+│   │   │   ├── knowledge.py        # persistent memory read/write
+│   │   │   └── prompts/*.md        # one prompt template per role
+│   │   └── roles/                  # the engineering team
+│   │       ├── base.py
+│   │       ├── modeler.py          # Hardware Eng — resolve/generate robot model
+│   │       ├── harness_builder.py  # Test Infra — bind pushed code to the sim
+│   │       ├── scenario_designer.py# QA Lead — design the world matrix
+│   │       ├── investigator.py     # Debug Eng — root cause one failure cluster
+│   │       ├── fixer.py            # patch + self-verify
+│   │       ├── reviewer.py         # Tech Lead — re-run full suite, dedupe, gate
+│   │       └── reporter.py         # Eng Manager — report + PR
+│   │
+│   └── simkit/                     # THE ORACLE — pure python, no agents
+│       ├── pyproject.toml
+│       ├── models/
+│       │   ├── resolver.py         # code -> robot identity -> model file
+│       │   ├── menagerie.py        # local Menagerie index/lookup
+│       │   └── generator.py        # fallback: synthesize MJCF from kinematics
+│       ├── scene.py                # assemble robot + task world
+│       ├── scenarios.py            # randomized world params
+│       ├── runner.py               # run ONE scenario -> result
+│       ├── scoring.py              # criteria -> human-readable DIAGNOSIS
+│       ├── recorder.py             # frames -> mp4 (imageio-ffmpeg)
+│       ├── suite.py                # run N scenarios in parallel -> score table
+│       └── cli.py                  # `simkit run` / `simkit suite`
+│
+├── scripts/
+│   ├── setup.sh                    # venv, pip install -e, npm install
+│   ├── fetch_menagerie.sh          # download robot model library
+│   ├── seed_mock_run.py            # emit a fake run so the UI can be built early
+│   ├── devin_smoke.py              # prove API auth + one session, hour one
+│   └── dev.sh                      # run api + ui together
+│
+└── vendor/menagerie/               # gitignored, populated by fetch script
+```
+
+### Pipeline stages (encode as an enum in `packages/orchestrator/pipeline.py`)
+
+`TRIGGERED → RESOLVE_MODEL → BUILD_HARNESS → DESIGN_SCENARIOS → RUN_SUITE → CLUSTER_FAILURES → INVESTIGATE (fan-out) → FIX (fan-out) → VERIFY → REPORT → PR_OPENED`
+
+Terminal states: `PASSED_CLEAN`, `PR_OPENED`, `FAILED_UNRESOLVED`.
+
+### Agent communication model (document in `docs/AGENT_ROLES.md`)
+
+Devin sessions cannot talk to each other directly. The orchestrator **mediates**: every agent writes findings to `blackboard.py`, and the orchestrator relays relevant findings into other sessions' prompts. Each relay is emitted as a typed message on `bus.py`, which is what `TeamChat.tsx` and `AgentGraph.tsx` render.
+
+Message shape: `{ id, run_id, from_role, to_role | "broadcast", kind: hypothesis|finding|question|answer|verdict|handoff, body, refs[], ts }`.
+
+This is the honest architecture *and* the best part of the demo — say so in the docs.
+
+---
+
+## Step 3 — File content rules for this pass
+
+- **Python stubs**: module docstring stating responsibility + inputs/outputs, typed function signatures, `raise NotImplementedError` or `pass`, and a `# TODO(build):` line naming what must be implemented. Files must be import-clean.
+- **`schemas.py` / `contracts/`**: define the shapes for real (not stubs) — everything else depends on them.
+- **TS components**: default-exported React components rendering a labelled placeholder with the prop interface declared. `npm run build` must pass.
+- **Config files** (`pyproject.toml`, `package.json`, `Makefile`, `.env.example`, `.gitignore`, `robotci.example.yaml`): fully written and correct.
+- **`docs/*`**: fully written prose — this is the spec the next session builds from.
+
+### Dependencies to declare (do not install in this pass)
+
+- **api**: `fastapi`, `uvicorn[standard]`, `pydantic>=2`, `pydantic-settings`, `sqlmodel`, `httpx`, `websockets`, `python-multipart`
+- **orchestrator**: `httpx`, `pydantic>=2`, `pyyaml`, `tenacity`
+- **simkit**: `mujoco`, `numpy`, `imageio`, `imageio-ffmpeg`, `pyyaml`
+- **dev**: `pytest`, `pytest-asyncio`, `ruff`
+- **ui**: `next@15`, `react@19`, `typescript`, `tailwindcss`, `lucide-react`, `clsx`
+
+### `.env.example` keys
+
+`DEVIN_API_KEY`, `DEVIN_API_BASE`, `GITHUB_TOKEN`, `TARGET_REPO`, `TARGET_BRANCH`, `WEBHOOK_SECRET`, `DATABASE_URL`, `API_HOST`, `API_PORT`, `UI_ORIGIN`, `ARTIFACTS_DIR`, `MENAGERIE_DIR`, `SUITE_SIZE`, `MAX_PARALLEL_AGENTS`, `MAX_AGENT_ITERATIONS`.
+
+---
+
+## Verification
+
+1. `git status` shows `README.md` and `hello-entire.md` deleted; `.git`, `.claude`, `.entire` untouched.
+2. `find . -not -path './.git/*' -type f | sort` matches the tree above.
+3. `bash scripts/setup.sh` completes — venv created, packages install editable, `npm install` succeeds. **If `mujoco` has no cp314 wheel, stop and report it** rather than working around it silently.
+4. `make api` → `curl localhost:8000/health` returns `{"status":"ok"}`.
+5. `make ui` → dashboard builds and loads at `localhost:3000` with placeholder components visible.
+6. `pytest` collects the stub tests without import errors.
+7. `python -c "import orchestrator.pipeline, orchestrator.schemas, simkit.runner"` succeeds — no broken imports anywhere in the stub tree.
+8. Every stub file contains at least one `# TODO(build):` marker; `grep -rn "TODO(build)" | wc -l` gives a build checklist for the next session.
+
+## Explicitly out of scope for this pass
+
+Devin API calls, MuJoCo scene construction, scenario generation, scoring, video recording, GitHub webhook verification, PR creation, and the real-time UI wiring. All are stubbed with `TODO(build)` markers and specified in `docs/`.
+
+---
+
+continue
+
+---
+
+continue
