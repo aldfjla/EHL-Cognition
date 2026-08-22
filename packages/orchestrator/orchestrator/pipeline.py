@@ -440,7 +440,7 @@ class Pipeline:
         ctx = self.ctx
         control = ctx.config.get("control", {})
         harness_path = self._artifacts / HARNESS_FILENAME
-        await HarnessBuilderAgent(ctx).dispatch(
+        agent = await HarnessBuilderAgent(ctx).dispatch(
             entrypoint=control.get("entrypoint", ""),
             interface=control.get("interface", ""),
             rate_hz=control.get("rate_hz", 100),
@@ -448,7 +448,12 @@ class Pipeline:
             harness_out_path=str(harness_path),
         )
         if not harness_path.exists():
-            raise PipelineError(f"Harness Builder wrote no harness at {harness_path}")
+            status = getattr(agent.status, "value", agent.status)
+            session_url = agent.session_url or "unknown"
+            raise PipelineError(
+                f"Harness Builder wrote no harness at {harness_path} "
+                f"(agent status {status}, session {session_url})"
+            )
 
         # Prove the harness by executing it once. An `error` here is ours.
         smoke = await asyncio.to_thread(

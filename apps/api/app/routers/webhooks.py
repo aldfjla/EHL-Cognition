@@ -56,7 +56,17 @@ from orchestrator import triggers
 from orchestrator.blackboard import Blackboard
 from orchestrator.bus import EventBus
 from orchestrator.pipeline import Pipeline, PipelineContext
-from orchestrator.schemas import EventType, Run, Scenario, ScenarioStatus, Stage
+from orchestrator.schemas import (
+    Agent,
+    EventType,
+    Finding,
+    Message,
+    Report,
+    Run,
+    Scenario,
+    ScenarioStatus,
+    Stage,
+)
 from orchestrator.workspace import Workspace
 from sqlmodel import Session
 
@@ -132,7 +142,7 @@ async def _drive_pipeline(
             run=run,
             workspace=workspace,
             bus=bus,
-            blackboard=Blackboard(run.id),
+            blackboard=Blackboard(run.id, bus),
             devin=_devin_or_none(),
             on_config=_filter_cache(run.repo),
             max_fix_iterations=settings.max_agent_iterations,
@@ -140,7 +150,7 @@ async def _drive_pipeline(
             suite_size=suite_size,
             default_suite_size=settings.suite_size,
         )
-        persistence = asyncio.create_task(_persist_scenario_events(run.id, bus))
+        persistence = asyncio.create_task(_persist_run_events(run.id, bus))
         # Let persistence subscribe before a synchronously failing pipeline emits.
         await asyncio.sleep(0)
         await Pipeline(ctx).run()
@@ -211,35 +221,139 @@ def _filter_cache(repo_name: str) -> Any:
     return cache
 
 
-async def _persist_scenario_events(run_id: str, bus: EventBus) -> None:
-    """Mirror live Scenario transitions into the API store.
+async def _persist_run_events(run_id: str, bus: EventBus) -> None:
+    """Mirror live run events into the API store on a best-effort basis.
 
     The orchestrator owns the event stream and cannot import the API store.
-    Consuming the same stream here keeps REST's database-derived worker counts
-    correct while a suite is running, including the transition to ``running``.
+    Consuming the same stream here keeps REST's database-derived dashboard
+    state current while a run is running, including agents and findings.
     """
     async for event in bus.subscribe(run_id):
-        if event.type is EventType.SCENARIO_CREATED:
-            scenario = Scenario(**event.data)
-        elif event.type is EventType.SCENARIO_STARTED:
-            with session_scope() as db:
-                scenario = repo.get_scenario(db, str(event.data.get("scenario_id")))
-                if scenario is None:
-                    continue
-                scenario = scenario.model_copy(
-                    update={
-                        "status": ScenarioStatus.RUNNING,
-                        "worker_id": event.data.get("worker_id"),
-                    }
-                )
-                repo.upsert_scenario(db, scenario)
-            continue
-        elif event.type is EventType.SCENARIO_FINISHED:
-            scenario = Scenario(**event.data)
-        else:
-            continue
+        try:
+            _persist_run_event(run_id, event.type, event.data, event.ts)
+        except Exception as exc:  # noqa: BLE001 - mirroring must not stop a run
+            log.warning(
+                "persisting %s for run %s failed: %s",
+                event.type.value,
+                run_id,
+                exc,
+            )
+
+
+def _persist_run_event(
+    run_id: str, event_type: EventType, data: dict[str, Any], event_ts: datetime
+) -> None:
+    """Persist one event; callers isolate failures to this event."""
+    if event_type is EventType.RUN_STAGE_CHANGED:
         with session_scope() as db:
-            repo.upsert_scenario(db, scenario)
+            run = repo.get_run(db, run_id)
+            if run is not None and data.get("stage"):
+                repo.update_run(
+                    db, run.model_copy(update={"stage": Stage(data["stage"])})
+                )
+        return
+
+    if event_type is EventType.RUN_FINISHED:
+        with session_scope() as db:
+            repo.update_run(db, Run(**data))
+        return
+
+    if event_type is EventType.ERROR and data.get("fatal") is True:
+        message = str(data.get("message") or "")
+        if not message:
+            return
+        with session_scope() as db:
+            run = repo.get_run(db, run_id)
+            if run is not None and not run.error:
+                repo.update_run(db, run.model_copy(update={"error": message}))
+        return
+
+    if event_type is EventType.SCENARIO_CREATED:
+        with session_scope() as db:
+            repo.upsert_scenario(db, Scenario(**data))
+        return
+
+    if event_type is EventType.SCENARIO_STARTED:
+        with session_scope() as db:
+            scenario = repo.get_scenario(db, str(data.get("scenario_id")))
+            if scenario is not None:
+                repo.upsert_scenario(
+                    db,
+                    scenario.model_copy(
+                        update={
+                            "status": ScenarioStatus.RUNNING,
+                            "worker_id": data.get("worker_id"),
+                        }
+                    ),
+                )
+        return
+
+    if event_type is EventType.SCENARIO_FINISHED:
+        with session_scope() as db:
+            repo.upsert_scenario(db, Scenario(**data))
+        return
+
+    if event_type is EventType.AGENT_CREATED:
+        with session_scope() as db:
+            repo.upsert_agent(db, Agent(**data))
+        return
+
+    if event_type in (
+        EventType.AGENT_STATUS_CHANGED,
+        EventType.AGENT_UPDATED,
+        EventType.AGENT_ACTIVITY,
+    ):
+        agent_id = str(data.get("agent_id") or "")
+        if not agent_id:
+            return
+        with session_scope() as db:
+            agent = repo.get_agent(db, agent_id)
+            if agent is None:
+                return
+            patch: dict[str, Any] = {}
+            if event_type is EventType.AGENT_ACTIVITY:
+                if "text" in data:
+                    patch["last_activity"] = data["text"]
+            else:
+                fields = set(Agent.model_fields)
+                patch = {
+                    name: value
+                    for name, value in data.items()
+                    if name in fields and name != "id"
+                }
+            if patch:
+                values = agent.model_dump(mode="json")
+                values.update(patch)
+                repo.upsert_agent(db, Agent.model_validate(values))
+        return
+
+    if event_type is EventType.MESSAGE_SENT:
+        with session_scope() as db:
+            repo.add_message(db, Message(**data))
+        return
+
+    if event_type in (EventType.FINDING_CREATED, EventType.FINDING_UPDATED):
+        with session_scope() as db:
+            if event_type is EventType.FINDING_CREATED:
+                finding = Finding(**data)
+            else:
+                finding = repo.get_finding(db, str(data.get("finding_id")))
+                if finding is None:
+                    return
+                patch = {
+                    name: value
+                    for name, value in data.items()
+                    if name in Finding.model_fields and name != "id"
+                }
+                values = finding.model_dump(mode="json")
+                values.update(patch)
+                finding = Finding.model_validate(values)
+            repo.upsert_finding(db, finding)
+        return
+
+    if event_type is EventType.REPORT_CREATED:
+        with session_scope() as db:
+            repo.save_report(db, Report(**data))
 
 
 def _devin_or_none() -> Any:

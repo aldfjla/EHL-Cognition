@@ -14,9 +14,9 @@ import json
 from typing import Any
 
 from fastapi.testclient import TestClient
-from orchestrator.schemas import EventType, Repo, Run, Stage
+from orchestrator.schemas import Agent, AgentStatus, EventType, Repo, Role, Run, Stage
 
-from app.routers.webhooks import _drive_pipeline, verify_signature
+from app.routers.webhooks import _drive_pipeline, _persist_run_events, verify_signature
 from app.store import repo
 from app.store.db import session_scope
 
@@ -218,6 +218,84 @@ async def test_pipeline_error_reaches_existing_subscriber(
         and event.data["fatal"] is True
         for event in seen
     )
+
+
+async def test_run_events_are_mirrored_into_rest_store(run: Run, bus: Any) -> None:
+    """Stage, fatal errors and agent lifecycle events populate REST state."""
+    persistence = asyncio.create_task(_persist_run_events(run.id, bus))
+    await asyncio.sleep(0)
+
+    await bus.emit(
+        run.id,
+        EventType.RUN_STAGE_CHANGED,
+        {"stage": Stage.FIX.value, "previous_stage": Stage.RUN_SUITE.value},
+    )
+    await bus.emit(
+        run.id,
+        EventType.ERROR,
+        {"stage": Stage.FIX.value, "message": "agent unavailable", "fatal": True},
+    )
+    agent = Agent(
+        run_id=run.id,
+        role=Role.INVESTIGATOR,
+        title="Trace",
+        task="find the issue",
+        status=AgentStatus.STARTING,
+    )
+    await bus.emit(run.id, EventType.AGENT_CREATED, agent.model_dump(mode="json"))
+    await bus.emit(
+        run.id,
+        EventType.AGENT_STATUS_CHANGED,
+        {
+            "agent_id": agent.id,
+            "status": AgentStatus.WORKING.value,
+            "session_id": "devin-1",
+            "session_url": "https://app.devin.ai/sessions/devin-1",
+        },
+    )
+    await bus.emit(
+        run.id,
+        EventType.AGENT_UPDATED,
+        {
+            "agent_id": agent.id,
+            "desktop_url": "https://desktop.example/1",
+            "issue": "measured timeout",
+            "step": "investigating",
+        },
+    )
+    await bus.emit(
+        run.id,
+        EventType.AGENT_ACTIVITY,
+        {"agent_id": agent.id, "text": "reading the trace"},
+    )
+    await bus.emit(
+        run.id,
+        EventType.AGENT_STATUS_CHANGED,
+        {
+            "agent_id": agent.id,
+            "status": AgentStatus.SUCCEEDED.value,
+            "finished_at": "2026-01-01T00:00:00+00:00",
+        },
+    )
+    await bus.close(run.id)
+    await asyncio.wait_for(persistence, timeout=1)
+
+    with session_scope() as db:
+        stored_run = repo.get_run(db, run.id)
+        stored_agents = repo.list_agents(db, run.id)
+
+    assert stored_run is not None
+    assert stored_run.stage is Stage.FIX
+    assert stored_run.error == "agent unavailable"
+    assert len(stored_agents) == 1
+    stored = stored_agents[0]
+    assert stored.status is AgentStatus.SUCCEEDED
+    assert stored.session_id == "devin-1"
+    assert stored.desktop_url == "https://desktop.example/1"
+    assert stored.issue == "measured timeout"
+    assert stored.step == "investigating"
+    assert stored.last_activity == "reading the trace"
+    assert stored.finished_at is not None
 
 
 def test_connected_repo_push_uses_branch_and_suite_size(
