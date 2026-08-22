@@ -122,6 +122,61 @@ async def test_remember_tags_the_repo(api: dict[str, Any]) -> None:
     assert "[robotci:acme/arm]" in post["trigger_description"]
 
 
+async def test_v3_recall_pages_items_and_matches_trigger(
+    api: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEVIN_ORG_ID", "org-test")
+    paths: list[str] = []
+
+    async def fake_request(
+        method: str, path: str, body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        paths.append(path)
+        if "after=" in path:
+            return {
+                "items": [
+                    {
+                        "name": "unrelated",
+                        "trigger": "[robotci:acme/arm]",
+                        "body": "v3 fact",
+                    }
+                ],
+                "has_next_page": False,
+            }
+        return {"items": [], "end_cursor": "cursor-1", "has_next_page": True}
+
+    monkeypatch.setattr(knowledge, "_request", fake_request)
+    assert await knowledge.recall("acme/arm") == ["v3 fact"]
+    assert paths == [
+        "/organizations/org-test/knowledge/notes?first=100",
+        "/organizations/org-test/knowledge/notes?first=100&after=cursor-1",
+    ]
+
+
+async def test_v3_remember_uses_trigger_and_note_id(
+    api: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEVIN_ORG_ID", "org-test")
+    seen: dict[str, Any] = {}
+
+    async def fake_request(
+        method: str, path: str, body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        seen.update(method=method, path=path, body=body)
+        return {"note_id": "note-v3"}
+
+    monkeypatch.setattr(knowledge, "_request", fake_request)
+    assert (
+        await knowledge.remember(
+            "acme/arm", finding(FindingKind.CONSTRAINT, "joint 4 stop")
+        )
+        == "note-v3"
+    )
+    assert seen["path"] == "/organizations/org-test/knowledge/notes"
+    assert "trigger" in seen["body"]
+    assert "trigger_description" not in seen["body"]
+
+
 def test_render_preamble_headers_and_caps() -> None:
     assert knowledge.render_preamble([]) == ""
     rendered = knowledge.render_preamble(
