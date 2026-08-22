@@ -244,8 +244,9 @@ def _row_to_repo(row: RepoRow) -> Repo:
         "branch": row.branch,
         "suite_size": row.suite_size,
         "branches": json.loads(row.branches_json or "[]"),
-        "path_include": json.loads(row.path_include_json or "[]"),
-        "path_exclude": json.loads(row.path_exclude_json or "[]"),
+        # ``or "null"`` covers a legacy empty string, not a configured ``[]``.
+        "path_include": json.loads(row.path_include_json or "null"),
+        "path_exclude": json.loads(row.path_exclude_json or "null"),
         "filters_source": row.filters_source,
         "created_at": row.created_at,
         "last_push_at": row.last_push_at,

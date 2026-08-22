@@ -24,14 +24,14 @@
       "description": "Extra watched branch glob patterns beyond 'branch'. Empty means only 'branch'."
     },
     "path_include": {
-      "type": "array",
+      "type": ["array", "null"],
       "items": { "type": "string" },
-      "description": "Path globs a push must touch to start a run. Empty means the built-in default set."
+      "description": "Path globs a push must touch to start a run. Null means unset (built-in default set); an empty array is configured as 'no patterns'."
     },
     "path_exclude": {
-      "type": "array",
+      "type": ["array", "null"],
       "items": { "type": "string" },
-      "description": "Path globs subtracted from path_include. Empty means the built-in default set."
+      "description": "Path globs subtracted from path_include. Null means unset (built-in default set); an empty array disables the defaults."
     },
     "filters_source": {
       "enum": ["default", "registry", "robotci.yaml"],

@@ -52,8 +52,10 @@ class RepoCreate(BaseModel):
     branch: str = Field(default="main", min_length=1)
     suite_size: int = Field(default=50, ge=1)
     branches: list[str] = Field(default_factory=list)
-    path_include: list[str] = Field(default_factory=list)
-    path_exclude: list[str] = Field(default_factory=list)
+    #: Omit to leave unset (built-in defaults apply); send ``[]`` to configure
+    #: "no patterns" — the two are stored distinguishably.
+    path_include: list[str] | None = None
+    path_exclude: list[str] | None = None
 
     _full_name = field_validator("full_name")(_validate_full_name)
 

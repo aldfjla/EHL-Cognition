@@ -84,6 +84,56 @@ def test_from_registry_falls_back_to_defaults_when_unset() -> None:
     assert triggers.from_registry(branch="") == Filters()
 
 
+def test_from_registry_honours_a_stored_empty_exclude_list() -> None:
+    # ``None`` is unset and takes the defaults; ``[]`` is a configured answer
+    # meaning "exclude nothing" and must not be read back as unset.
+    filters = triggers.from_registry(
+        branch="main", path_include=["docs/*.yaml"], path_exclude=[]
+    )
+
+    assert filters.path_exclude == ()
+    assert triggers.select_paths(["docs/tuning.yaml"], filters) == (
+        "docs/tuning.yaml",
+    )
+
+
+def test_dot_prefixed_paths_keep_their_dot() -> None:
+    # ``lstrip("./")`` would turn this into ``github/workflows/ci.yml`` and the
+    # default ``.github/*`` exclusion could never match.
+    assert triggers.normalise(".github/workflows/ci.yml") == (
+        ".github/workflows/ci.yml"
+    )
+    assert triggers.normalise("./.env") == ".env"
+    assert triggers.normalise("/src/a.py") == "src/a.py"
+    assert triggers.changed_paths(
+        {"commits": [{"added": [".github/workflows/ci.yml"]}]}
+    ) == (".github/workflows/ci.yml",)
+
+
+def test_defaults_ignore_ci_plumbing_of_the_customer_repo() -> None:
+    filters = Filters()
+
+    assert triggers.select_paths([".github/workflows/ci.yml"], filters) == ()
+    decision = triggers.evaluate(
+        filters, branch="main", paths=[".github/workflows/ci.yml"]
+    )
+    assert not decision.start
+    assert decision.code == Code.NO_MATCHING_PATHS
+
+
+def test_dot_prefixed_patterns_match_dot_prefixed_paths() -> None:
+    filters = triggers.parse(
+        {"ci": {"paths": {"include": [".env", ".config/*"], "exclude": []}}}
+    )
+    assert filters is not None
+
+    assert triggers.select_paths([".env"], filters) == (".env",)
+    assert triggers.select_paths([".config/robot.toml"], filters) == (
+        ".config/robot.toml",
+    )
+    assert triggers.select_paths(["src/a.py"], filters) == ()
+
+
 def test_changed_paths_collects_every_commit() -> None:
     payload: dict[str, Any] = {
         "commits": [

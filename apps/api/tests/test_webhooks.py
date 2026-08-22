@@ -234,6 +234,89 @@ def test_docs_only_push_is_ignored_with_a_reason_code(client: TestClient) -> Non
         assert repo.list_runs(check) == []
 
 
+def test_workflow_only_push_is_ignored(client: TestClient) -> None:
+    """The default ``.github/*`` exclusion must actually match, dot included."""
+    body, headers = signed(
+        push_payload(commits=commits(".github/workflows/ci.yml", "README.md"))
+    )
+
+    response = client.post("/webhooks/github", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["reason_code"] == "no_matching_paths"
+    with session_scope() as check:
+        assert repo.list_runs(check) == []
+
+
+def test_dot_prefixed_include_starts_a_run(client: TestClient, db: Any) -> None:
+    """A repo that watches ``.env`` keeps its dot through the round-trip."""
+    repo.create_repo(
+        db,
+        Repo(
+            full_name="acme/robot",
+            branch="main",
+            path_include=[".env", ".config/*"],
+            path_exclude=[],
+            filters_source="robotci.yaml",
+        ),
+    )
+    db.commit()
+
+    payload = client.post(
+        "/webhooks/github", **_signed_kwargs(push_payload(commits=commits(".env")))
+    ).json()
+
+    assert payload["reason_code"] == "started"
+    assert payload["matched_paths"] == [".env"]
+
+
+def test_stored_empty_exclude_survives_the_round_trip(
+    client: TestClient, db: Any
+) -> None:
+    """``paths.exclude: []`` disables the defaults; storage must not undo it."""
+    from app.routers.webhooks import _filter_cache
+
+    connected = repo.create_repo(db, Repo(full_name="acme/robot", branch="main"))
+    db.commit()
+
+    asyncio.run(
+        _filter_cache("acme/robot")(
+            {"ci": {"paths": {"include": ["docs/*.yaml"], "exclude": []}}}
+        )
+    )
+
+    with session_scope() as check:
+        stored = repo.get_repo(check, connected.id)
+    assert stored is not None
+    assert stored.path_exclude == []
+
+    payload = client.post(
+        "/webhooks/github",
+        **_signed_kwargs(push_payload(commits=commits("docs/tuning.yaml"))),
+    ).json()
+
+    assert payload["reason_code"] == "started"
+    assert payload["matched_paths"] == ["docs/tuning.yaml"]
+
+
+def test_unset_path_filters_read_back_as_defaults(client: TestClient, db: Any) -> None:
+    connected = repo.create_repo(db, Repo(full_name="acme/robot", branch="main"))
+    db.commit()
+
+    with session_scope() as check:
+        stored = repo.get_repo(check, connected.id)
+    assert stored is not None
+    assert stored.path_include is None
+    assert stored.path_exclude is None
+
+    payload = client.post(
+        "/webhooks/github",
+        **_signed_kwargs(push_payload(commits=commits("docs/tuning.yaml"))),
+    ).json()
+
+    assert payload["reason_code"] == "no_matching_paths"
+
+
 def test_control_code_push_starts_a_run_and_reports_the_match(
     client: TestClient,
 ) -> None:

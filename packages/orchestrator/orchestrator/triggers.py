@@ -23,7 +23,10 @@ FastAPI.
 Glob semantics
 --------------
 Patterns are matched with :func:`fnmatch.fnmatchcase` after normalising away a
-leading ``./`` and ``/``. ``*`` therefore crosses ``/`` — ``src/*`` matches
+leading ``./`` and then a leading ``/`` — as *prefixes*, not character sets: a
+dot-prefixed path such as ``.github/workflows/ci.yml`` must survive intact or
+the default ``.github/*`` exclusion could never match. ``*`` crosses ``/`` —
+``src/*`` matches
 ``src/deep/file.py``. This is deliberately more permissive than gitignore
 semantics: a filter that accidentally matches too much costs a run, one that
 accidentally matches too little silently skips CI on real code.
@@ -79,6 +82,20 @@ DEFAULT_PATH_EXCLUDE: tuple[str, ...] = (
     "*.gif",
     "*.mp4",
 )
+
+
+def normalise(path: str) -> str:
+    """Strip a leading ``./`` and then a leading ``/``, and nothing else.
+
+    ``str.lstrip`` takes a character *set*, so ``lstrip("./")`` would also eat
+    the leading dot of ``.github/workflows/ci.yml`` and silently defeat the
+    default ``.github/*`` exclusion. Applied identically to configured patterns
+    and to incoming paths, so both sides of a comparison agree.
+    """
+    stripped = path.strip()
+    if stripped.startswith("./"):
+        stripped = stripped[2:]
+    return stripped.removeprefix("/")
 
 
 class Code:
@@ -138,12 +155,9 @@ def _clean(patterns: Iterable[Any] | None, default: tuple[str, ...]) -> tuple[st
         return default
     if isinstance(patterns, str):
         patterns = [patterns]
-    cleaned = tuple(
-        str(pattern).strip().lstrip("./").lstrip("/")
-        for pattern in patterns
-        if str(pattern).strip()
+    return tuple(
+        normalise(str(pattern)) for pattern in patterns if str(pattern).strip()
     )
-    return cleaned
 
 
 def parse(config: Mapping[str, Any] | None) -> Filters | None:
@@ -185,9 +199,12 @@ def from_registry(
     """Filters as stored on a connected repository row.
 
     The registry keeps ``branch`` as its primary field (it is what the connect
-    form asks for) plus optional extra patterns, so the watched set is the union
-    of the two. Empty stored lists mean "unset", not "empty": the API stores
-    what the user typed and there is no way to type "watch nothing".
+    form asks for) plus optional extra patterns, so the watched branch set is
+    the union of the two, and cannot be empty: there is no way to say "watch no
+    branch". The path lists are nullable instead, because ``paths.exclude: []``
+    in a repo's ``robotci.yaml`` is a real answer meaning "exclude nothing".
+    ``None`` there means unset and falls back to the defaults; an empty list is
+    honoured as configured.
     """
     watched = tuple(
         dict.fromkeys(
@@ -197,8 +214,16 @@ def from_registry(
     )
     return Filters(
         branches=watched or DEFAULT_BRANCHES,
-        path_include=tuple(path_include or ()) or DEFAULT_PATH_INCLUDE,
-        path_exclude=tuple(path_exclude or ()) or DEFAULT_PATH_EXCLUDE,
+        path_include=(
+            DEFAULT_PATH_INCLUDE
+            if path_include is None
+            else _clean(path_include, DEFAULT_PATH_INCLUDE)
+        ),
+        path_exclude=(
+            DEFAULT_PATH_EXCLUDE
+            if path_exclude is None
+            else _clean(path_exclude, DEFAULT_PATH_EXCLUDE)
+        ),
     )
 
 
@@ -237,7 +262,7 @@ def changed_paths(payload: Mapping[str, Any]) -> tuple[str, ...] | None:
         return None
     seen: dict[str, None] = {}
     for path in paths:
-        seen.setdefault(path.lstrip("./").lstrip("/"), None)
+        seen.setdefault(normalise(path), None)
     return tuple(seen)
 
 
@@ -247,7 +272,7 @@ def matches(path: str, patterns: Iterable[str]) -> bool:
     The basename check makes ``*.md`` mean what a reader expects it to mean for
     ``docs/deep/notes.md`` without forcing every pattern to be written ``**/``.
     """
-    normalised = path.lstrip("./").lstrip("/")
+    normalised = normalise(path)
     base = normalised.rsplit("/", 1)[-1]
     return any(
         fnmatchcase(normalised, pattern) or fnmatchcase(base, pattern)

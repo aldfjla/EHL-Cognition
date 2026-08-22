@@ -310,9 +310,12 @@ class Repo(_Base):
     #: after the first checkout — see :mod:`orchestrator.triggers`.
     branches: list[str] = Field(default_factory=list)
     #: Path globs a push must touch to start a run, and globs subtracted from
-    #: them. Empty include means the built-in default set.
-    path_include: list[str] = Field(default_factory=list)
-    path_exclude: list[str] = Field(default_factory=list)
+    #: them. ``None`` means unset (use the built-in defaults); an *empty list*
+    #: is a configured value meaning "nothing" — ``paths.exclude: []`` in a
+    #: repo's ``robotci.yaml`` disables the default exclusions and must survive
+    #: the round-trip through storage.
+    path_include: list[str] | None = None
+    path_exclude: list[str] | None = None
     #: Where the filters above came from: ``"default"`` until a checkout has
     #: been read, then ``"robotci.yaml"`` or ``"registry"`` when set by API.
     filters_source: Literal["default", "registry", "robotci.yaml"] = "default"
