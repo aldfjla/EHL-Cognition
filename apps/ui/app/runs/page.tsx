@@ -1,20 +1,21 @@
 "use client";
 
 /**
- * Runs index — every CI run, newest first.
+ * Dashboard — repository controls followed by every CI run, newest first.
  *
- * Entry point of the dashboard, reached from the landing page at `/`. Each row
- * links to that run's mission control page. Kept plain on purpose: the
- * interesting screen is the run detail, and this one exists to get there.
+ * Robot CI stays dormant until a push lands on a watched branch. This page
+ * connects a repository first, then lists each run so a push can be followed
+ * into its mission control page.
  *
- * Live on its own small subscription to `WS /ws/runs` so a push appears here
- * without a refresh; the per-run stream is the run page's business.
+ * The repository section polls every 15 seconds; the run history has its own
+ * `WS /ws/runs` subscription so a push appears here without a refresh.
  */
 
 import clsx from "clsx";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 
+import RepositoriesSection from "@/components/repos/RepositoriesSection";
 import * as api from "@/lib/api";
 import { LIVE_MOCK_RUN_ID } from "@/lib/mockLive";
 import { MOCK_RUN_ID } from "@/lib/mockRun";
@@ -119,26 +120,29 @@ export default function RunsIndexPage() {
       <header className="mb-8">
         <h1 className="text-2xl font-semibold tracking-tight">Robot CI</h1>
         <p className="mt-1 text-sm text-slate-400">
-          Autonomous CI for robot control code. Every push is simulated,
-          debugged and fixed without a human in the loop.
+          Robot CI stays dormant until a push lands on a watched branch — then
+          it wakes, simulates, fixes, and opens a PR.
         </p>
       </header>
 
-      {error !== null && (
-        <div className="mb-4 rounded border border-status-blocked/60 bg-amber-950/30 px-3 py-2 text-xs text-status-blocked">
-          API unreachable ({error}). Start it with{" "}
-          <code className="font-mono">make api</code>, or open the{" "}
-          <Link
-            href={`/runs/${MOCK_RUN_ID}`}
-            className="text-sky-300 hover:underline"
-          >
-            scripted replay
-          </Link>{" "}
-          — it needs no backend.
-        </div>
-      )}
+      <Suspense fallback={null}>
+        <RepositoriesSection />
+      </Suspense>
 
       <section className="rounded-lg border border-surface-border bg-surface-raised p-4">
+        {error !== null && (
+          <div className="mb-4 rounded border border-status-blocked/60 bg-amber-950/30 px-3 py-2 text-xs text-status-blocked">
+            API unreachable ({error}). Start it with{" "}
+            <code className="font-mono">make api</code>, or open the{" "}
+            <Link
+              href={`/runs/${MOCK_RUN_ID}`}
+              className="text-sky-300 hover:underline"
+            >
+              scripted replay
+            </Link>{" "}
+            — it needs no backend.
+          </div>
+        )}
         <div className="stub-label">
           Runs · {runs.length}
           {loading ? " · loading" : ""}

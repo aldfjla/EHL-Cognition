@@ -9,8 +9,7 @@
  * Keyboard surface:
  *   Ctrl/⌘+K   command palette
  *   ?          shortcut sheet
- *   g then r   runs index
- *   g then p   repositories
+ *   g then r   dashboard
  */
 
 import clsx from "clsx";
@@ -23,8 +22,7 @@ import { LIVE_MOCK_RUN_ID } from "@/lib/mockLive";
 import { MOCK_RUN_ID } from "@/lib/mockRun";
 
 const NAV = [
-  { href: "/", label: "Runs" },
-  { href: "/repos", label: "Repositories" },
+  { href: "/runs", label: "Dashboard" },
 ] as const;
 
 const DEMOS = [
@@ -36,8 +34,7 @@ const DEMOS = [
 const SHORTCUTS: Array<{ keys: string; does: string }> = [
   { keys: "Ctrl K", does: "Open the command palette" },
   { keys: "?", does: "Toggle this sheet" },
-  { keys: "g r", does: "Go to runs" },
-  { keys: "g p", does: "Go to repositories" },
+  { keys: "g r", does: "Go to dashboard" },
   { keys: "1 – 4", does: "Switch tabs on a run page" },
   { keys: "Esc", does: "Close any overlay" },
 ];
@@ -91,8 +88,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       }
       if (pendingG.current) {
         pendingG.current = false;
-        if (event.key === "r") router.push("/");
-        if (event.key === "p") router.push("/repos");
+        if (event.key === "r") router.push("/runs");
       }
     };
     window.addEventListener("keydown", onKey);
@@ -118,8 +114,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
           <nav className="flex items-center gap-1">
             {NAV.map(({ href, label }) => {
-              const active =
-                href === "/" ? pathname === "/" : pathname.startsWith(href);
+              const active = pathname.startsWith(href);
               return (
                 <Link
                   key={href}
