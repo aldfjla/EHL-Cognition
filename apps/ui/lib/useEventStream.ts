@@ -20,7 +20,6 @@
 
 import { useCallback, useEffect, useReducer, useRef } from "react";
 
-import { ApiError } from "./api";
 import * as api from "./api";
 import { MOCK_RUN_ID, mockClusters, replayMockRun } from "./mockRun";
 import type {
@@ -392,7 +391,7 @@ export function useEventStream(runId: string | null): RunState {
         try {
           detail = await api.getRun(id);
         } catch (err) {
-          if (err instanceof ApiError && err.status === 404) {
+          if (err instanceof api.ApiError && err.status === 404) {
             dispatch({ kind: "missing", missing: true });
             return false;
           }
