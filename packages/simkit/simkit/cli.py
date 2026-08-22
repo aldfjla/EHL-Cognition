@@ -43,12 +43,7 @@ EXIT_SCENARIO_FAILED = 1
 EXIT_ERROR = 2
 
 #: Randomization axes used when the config declares none.
-DEFAULT_AXES: dict[str, tuple[float, float]] = {
-    "object_position.x": (-0.15, 0.15),
-    "object_position.y": (-0.10, 0.10),
-    "object_mass_kg": (0.1, 0.8),
-    "friction": (0.4, 1.2),
-}
+DEFAULT_AXES = scenarios_mod.DEFAULT_AXES
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,8 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--max-wall-s",
         type=float,
-        default=120.0,
-        help="wall-clock watchdog, seconds (default: 120)",
+        default=60.0,
+        help="wall-clock watchdog, seconds (default: 60)",
     )
     run.set_defaults(func=cmd_run)
 

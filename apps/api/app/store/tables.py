@@ -124,6 +124,9 @@ class ScenarioRow(SQLModel, table=True):
     progress: float | None = None
     trace_path: str | None = None
     error: str | None = None
+    error_kind: str | None = None
+    retries: int = 0
+    retry_reason: str | None = None
 
 
 class MessageRow(SQLModel, table=True):

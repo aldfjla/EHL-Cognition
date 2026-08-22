@@ -46,6 +46,9 @@
     "worker_id": { "type": ["string", "null"], "description": "Which suite worker is simulating this scenario. Lets the dashboard group live tiles by worker and show the pool saturated." },
     "progress": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Fraction of the scenario's simulated horizon completed. Advisory only — never a success signal." },
     "trace_path": { "type": ["string", "null"], "description": "Path to the joint/state trace for offline analysis." },
-    "error": { "type": ["string", "null"], "description": "Set for status='error': the sim itself broke, distinct from the robot failing the task." }
+    "error": { "type": ["string", "null"], "description": "Set for status='error': the sim itself broke, distinct from the robot failing the task." },
+    "error_kind": { "type": ["string", "null"], "enum": ["timeout", "infra"], "description": "Why an error occurred; timeout is distinct from other infrastructure errors." },
+    "retries": { "type": "integer", "minimum": 0, "description": "Number of infrastructure retries before the final attempt." },
+    "retry_reason": { "type": ["string", "null"], "description": "Reason the scenario was retried, when applicable." }
   }
 }
