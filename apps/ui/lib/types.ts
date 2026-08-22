@@ -50,6 +50,13 @@ export interface RobotModel {
   model_path: string;
   dof?: number | null;
   confidence?: number | null;
+  /** The concrete file, Menagerie entry or signal behind the pick. */
+  provenance?: string | null;
+  /** Only set when the source model states a license we recognise. */
+  license?: string | null;
+  processing_steps?: string[];
+  approximate?: boolean;
+  cache_hit?: boolean;
 }
 
 export interface SuiteStats {
