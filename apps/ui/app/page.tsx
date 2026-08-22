@@ -89,16 +89,19 @@ export default function LandingPage() {
     <>
       <ScrollProgress />
 
-      <div className="relative overflow-hidden">
-        {/* Faint grid + glow: enough texture to read as a product, not a demo. */}
+      {/* No `overflow-hidden` on this wrapper: it would clip the sticky
+          header out of the viewport, and hide any real horizontal overflow. */}
+      <div className="relative">
+        {/* Faint grid + glow: enough texture to read as a product, not a demo.
+            Clipped by their own fixed viewport box so the wide glow never adds
+            horizontal scroll. */}
         <div
           aria-hidden
-          className="pointer-events-none fixed inset-0 -z-10 opacity-[0.35] [background-image:linear-gradient(to_right,#1f2a35_1px,transparent_1px),linear-gradient(to_bottom,#1f2a35_1px,transparent_1px)] [background-size:64px_64px] [mask-image:radial-gradient(ellipse_at_50%_0%,black,transparent_75%)]"
-        />
-        <div
-          aria-hidden
-          className="pointer-events-none fixed left-1/2 top-[-18rem] -z-10 h-[36rem] w-[72rem] -translate-x-1/2 rounded-full bg-sky-500/10 blur-[140px]"
-        />
+          className="pointer-events-none fixed inset-0 -z-10 overflow-hidden"
+        >
+          <div className="absolute inset-0 opacity-[0.35] [background-image:linear-gradient(to_right,#1f2a35_1px,transparent_1px),linear-gradient(to_bottom,#1f2a35_1px,transparent_1px)] [background-size:64px_64px] [mask-image:radial-gradient(ellipse_at_50%_0%,black,transparent_75%)]" />
+          <div className="absolute left-1/2 top-[-18rem] h-[36rem] w-[72rem] -translate-x-1/2 rounded-full bg-sky-500/10 blur-[140px]" />
+        </div>
 
         <header className="sticky top-0 z-40 border-b border-surface-border/60 bg-surface/80 backdrop-blur">
           <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
@@ -299,7 +302,9 @@ export default function LandingPage() {
                   </a>
                 </div>
               </Reveal>
-              <Reveal delay={120}>
+              {/* min-w-0: without it the grid item takes the pre's content
+                  width and the section overflows on narrow viewports. */}
+              <Reveal delay={120} className="min-w-0">
                 <pre className="overflow-x-auto rounded-2xl border border-surface-border bg-surface-raised/60 p-6 font-mono text-[13px] leading-relaxed text-slate-300">
                   {QUICKSTART}
                 </pre>
