@@ -92,9 +92,7 @@ def test_from_registry_honours_a_stored_empty_exclude_list() -> None:
     )
 
     assert filters.path_exclude == ()
-    assert triggers.select_paths(["docs/tuning.yaml"], filters) == (
-        "docs/tuning.yaml",
-    )
+    assert triggers.select_paths(["docs/tuning.yaml"], filters) == ("docs/tuning.yaml",)
 
 
 def test_dot_prefixed_paths_keep_their_dot() -> None:

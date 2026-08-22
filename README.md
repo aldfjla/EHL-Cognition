@@ -144,7 +144,11 @@ ci:
 | `ci.paths.exclude` | `*.md`, `*.rst`, `docs/*`, `.github/*`, `LICENSE*`, images, video | subtracted from the include set; excludes win. `exclude: []` disables the defaults |
 
 So a README-only push does not burn a run. Omit the section entirely and the
-defaults apply.
+defaults apply; write an empty list and that is a configured answer, not an
+omission — `exclude: []` really means "exclude nothing", and it survives being
+cached on your repository. Patterns and paths are compared after stripping a
+leading `./` and `/` only, so dot-prefixed entries like `.github/*` or `.env`
+match what you would expect.
 
 The webhook cannot read this file — your repo is not cloned yet at that point —
 so it evaluates the copy Robot CI cached for your repository (what you entered

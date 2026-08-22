@@ -92,10 +92,7 @@ def normalise(path: str) -> str:
     default ``.github/*`` exclusion. Applied identically to configured patterns
     and to incoming paths, so both sides of a comparison agree.
     """
-    stripped = path.strip()
-    if stripped.startswith("./"):
-        stripped = stripped[2:]
-    return stripped.removeprefix("/")
+    return path.strip().removeprefix("./").removeprefix("/")
 
 
 class Code:
