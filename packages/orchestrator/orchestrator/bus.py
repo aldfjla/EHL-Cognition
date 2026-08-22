@@ -22,6 +22,8 @@ Design notes
 
 from __future__ import annotations
 
+import asyncio
+from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -39,44 +41,106 @@ class EventBus:
 
     def __init__(self, replay_size: int = REPLAY_BUFFER_SIZE) -> None:
         self._replay_size = replay_size
-        # TODO(build): dict[run_id, deque[Event]] history and
-        # dict[run_id, set[asyncio.Queue[Event]]] subscribers.
+        self._history: dict[str, deque[Event]] = {}
+        self._subscribers: dict[str, set[asyncio.Queue[Event | None]]] = {}
+        self._seq: dict[str, int] = {}
+        self._closed: set[str] = set()
 
     async def publish(self, event: Event) -> None:
         """Assign ``seq``, buffer, and fan out to subscribers. Never blocks."""
-        raise NotImplementedError
-        # TODO(build): stamp seq, append to replay deque, put_nowait to each
-        # subscriber queue, drop subscribers whose queue is full.
+        run_id = event.run_id
+        self._seq[run_id] = self._seq.get(run_id, 0) + 1
+        event.seq = self._seq[run_id]
+
+        history = self._history.get(run_id)
+        if history is None:
+            history = deque(maxlen=self._replay_size)
+            self._history[run_id] = history
+        history.append(event)
+
+        stalled: list[asyncio.Queue[Event | None]] = []
+        for queue in self._subscribers.get(run_id, set()):
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                stalled.append(queue)
+        for queue in stalled:
+            self._drop(run_id, queue)
 
     async def emit(self, run_id: str, type_: EventType, data: dict[str, Any]) -> Event:
         """Convenience: build an Event, publish it, return it.
 
         The form callers should use — keeps ``seq`` and ``ts`` out of caller code.
         """
-        raise NotImplementedError
-        # TODO(build): construct Event(run_id=..., type=type_, data=data), publish.
+        event = Event(run_id=run_id, type=type_, data=data)
+        await self.publish(event)
+        return event
 
-    def subscribe(self, run_id: str, since: int | None = None) -> AsyncIterator[Event]:
+    async def subscribe(
+        self, run_id: str, since: int | None = None
+    ) -> AsyncIterator[Event]:
         """Yield events for ``run_id``, starting with replay from ``since``.
 
         ``since`` is the last ``seq`` the client saw; ``None`` replays the whole
         buffer. The iterator ends when the run reaches a terminal stage.
         """
-        raise NotImplementedError
-        # TODO(build): async generator — drain replay past `since`, then yield
-        # from a fresh queue; unregister the queue in a finally block.
+        queue: asyncio.Queue[Event | None] = asyncio.Queue(
+            maxsize=SUBSCRIBER_QUEUE_SIZE
+        )
+        self._subscribers.setdefault(run_id, set()).add(queue)
+        last_seq = since or 0
+        try:
+            for event in self.history(run_id, since):
+                last_seq = max(last_seq, event.seq)
+                yield event
+            if run_id in self._closed:
+                return
+            while True:
+                event = await queue.get()
+                if event is None:
+                    return
+                if event.seq <= last_seq:
+                    # Already delivered by the replay pass above.
+                    continue
+                last_seq = event.seq
+                yield event
+        finally:
+            self._drop(run_id, queue)
 
     def history(self, run_id: str, since: int | None = None) -> list[Event]:
         """Buffered events for a run, for the REST catch-up path."""
-        raise NotImplementedError
-        # TODO(build): slice the replay deque by seq.
+        events = self._history.get(run_id, ())
+        if since is None:
+            return list(events)
+        return [event for event in events if event.seq > since]
 
     async def close(self, run_id: str) -> None:
         """Signal end-of-stream and release subscribers for a finished run."""
-        raise NotImplementedError
-        # TODO(build): push a sentinel to each queue, clear registrations.
+        self._closed.add(run_id)
+        for queue in self._subscribers.pop(run_id, set()):
+            try:
+                queue.put_nowait(None)
+            except asyncio.QueueFull:  # pragma: no cover - sentinel is best effort
+                pass
+        self._evict_if_idle(run_id)
 
+    # -- internals --------------------------------------------------------- #
 
-# TODO(build): decide the retention policy for replay buffers of finished runs —
-# right now they would leak for the process lifetime. Evict on run.finished
-# after the last subscriber disconnects.
+    def _drop(self, run_id: str, queue: asyncio.Queue[Event | None]) -> None:
+        """Unregister one subscriber, evicting the run's buffer when idle."""
+        subscribers = self._subscribers.get(run_id)
+        if subscribers is not None:
+            subscribers.discard(queue)
+            if not subscribers:
+                self._subscribers.pop(run_id, None)
+        self._evict_if_idle(run_id)
+
+    def _evict_if_idle(self, run_id: str) -> None:
+        """Free the replay buffer of a closed run once nobody is reading it.
+
+        Retention policy: buffers of live runs are kept for late subscribers,
+        buffers of finished runs only until the last subscriber disconnects.
+        """
+        if run_id in self._closed and not self._subscribers.get(run_id):
+            self._history.pop(run_id, None)
+            self._seq.pop(run_id, None)
