@@ -41,9 +41,7 @@ const SCENARIO_COUNT = 24;
 const GRIP_FAILURES = [3, 9, 14];
 const LATENCY_FAILURES = [17, 21];
 
-const T0 = Date.UTC(2026, 7, 22, 14, 2, 0);
-
-let clockMs = T0;
+let clockMs = Date.now();
 
 function tick(ms: number): string {
   clockMs += ms;
@@ -152,11 +150,12 @@ function makeAgent(
 /**
  * Build the scripted event log for a replayed run.
  *
- * Pure and deterministic: the same call always produces the same log, so the
- * replay can be diffed, unit-tested and trusted on stage.
+ * Deterministic in structure and ordering — the same call always produces the
+ * same events in the same order — but timestamps are anchored to the wall clock
+ * at build time so that live agent cards show plausible elapsed times.
  */
 export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
-  clockMs = T0;
+  clockMs = Date.now();
   const script: ScriptedEvent[] = [];
   let seq = 0;
 
