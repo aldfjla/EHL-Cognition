@@ -335,17 +335,23 @@ class Pipeline:
         return Stage.RESOLVE_MODEL
 
     async def stage_resolve_model(self) -> Stage:
-        """Find a physical model for the robot the code drives.
+        """Find a physical model before spending an agent.
 
-        Library first: ask :mod:`simkit.models.resolver` for a Menagerie match
-        without spending an agent. Only when that misses do we dispatch the
-        Modeler role to synthesize MJCF from the repo's kinematics.
+        A durable cache hit follows the same resolved-model path and therefore
+        skips Modeler dispatch entirely.
         """
         from simkit.models import generator, resolver
 
         ctx = self.ctx
+        model_dir = self._artifacts / "model"
+        model_dir.mkdir(parents=True, exist_ok=True)
         resolution = await asyncio.to_thread(
-            resolver.resolve, ctx.workspace.base, ctx.config
+            resolver.resolve,
+            ctx.workspace.base,
+            ctx.config,
+            model_dir,
+            resolver.default_cache_dir(),
+            ctx.run.repo,
         )
         if resolution.found:
             ctx.run.robot_model = RobotModel(
@@ -354,11 +360,14 @@ class Pipeline:
                 model_path=resolution.model_path,
                 dof=resolution.dof,
                 confidence=resolution.confidence,
+                provenance=resolution.provenance,
+                license=resolution.license,
+                processing_steps=resolution.processing_steps,
+                approximate=resolution.approximate,
+                cache_hit=resolution.cache_hit,
             )
             return Stage.BUILD_HARNESS
 
-        model_dir = self._artifacts / "model"
-        model_dir.mkdir(parents=True, exist_ok=True)
         agent = await ModelerAgent(ctx).dispatch(
             resolver_report=resolution.report,
             model_out_dir=str(model_dir),
@@ -374,6 +383,9 @@ class Pipeline:
             source=ModelSource.GENERATED,
             name=agent.title or None,
             model_path=str(model_path),
+            provenance="Modeler agent synthesized the MJCF after automatic resolution missed",
+            processing_steps=["Modeler synthesis", "MJCF validation"],
+            approximate=True,
         )
         return Stage.BUILD_HARNESS
 

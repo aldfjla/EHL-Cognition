@@ -299,6 +299,34 @@ def resolve_model_path(model: MenagerieModel, menagerie_dir: Path) -> Path:
     return (Path(menagerie_dir) / model.model_path).resolve()
 
 
+def read_license(model: MenagerieModel, menagerie_dir: Path) -> str | None:
+    """Return a recognizable license name from the model's own LICENSE file.
+
+    Menagerie does not normalize license metadata in its index.  Do not turn a
+    copyright notice into a guessed license: unknown text remains unknown.
+    """
+    path = Path(menagerie_dir) / model.name / "LICENSE"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    lowered = text.lower()
+    if "mit license" in lowered:
+        return "MIT License"
+    if "apache license" in lowered:
+        return "Apache License 2.0"
+    if "gnu general public license" in lowered:
+        return "GNU General Public License"
+    if "bsd" in lowered:
+        for line in text.splitlines():
+            if "bsd" in line.lower():
+                return line.strip()
+        return "BSD License"
+    return None
+
+
 # -- index construction internals ------------------------------------------- #
 
 
