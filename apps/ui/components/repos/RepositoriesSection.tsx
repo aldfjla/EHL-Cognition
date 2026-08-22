@@ -1,5 +1,18 @@
 "use client";
 
+/**
+ * Repository controls — connect a GitHub repo so a push wakes the system.
+ *
+ * The mental model this section sells: Robot CI is *dormant*. Connecting a repo
+ * arms it; the first push to the watched branch wakes it and starts a run. Each
+ * card shows that state honestly — dormant / running — plus the latest run and
+ * the webhook the customer still has to install on GitHub's side.
+ *
+ * Sits above the run history on the dashboard; `?connect=1` opens the connect
+ * dialog straight away (the ⌘K action), which is why the host page wraps this
+ * in Suspense.
+ */
+
 import clsx from "clsx";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
