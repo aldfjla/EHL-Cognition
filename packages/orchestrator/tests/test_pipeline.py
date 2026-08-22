@@ -27,6 +27,7 @@ from orchestrator.schemas import (
     SuiteStats,
 )
 from orchestrator.workspace import Workspace
+from simkit.models import resolver as resolver_module
 
 
 def make_ctx(tmp_path: Path) -> PipelineContext:
@@ -438,3 +439,34 @@ async def test_green_verify_reaches_pr_opened(
     await pipe.advance(Stage.PR_OPENED)
     assert ctx.run.stage is Stage.PR_OPENED
     assert ctx.run.pull_request_url == "https://github.com/acme/arm-control/pull/1"
+
+
+async def test_resolve_model_cache_hit_skips_modeler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    ctx = make_ctx(tmp_path / "workspace")
+    ctx.config = {"robot": {}}
+    pipe = Pipeline(ctx)
+    cached = resolver_module.Resolution(
+        found=True,
+        source="repo",
+        name="cached_arm",
+        model_path=str(tmp_path / "cached.xml"),
+        dof=2,
+        confidence=0.98,
+        provenance="cache source",
+        processing_steps=["MJCF validation"],
+        cache_hit=True,
+    )
+
+    async def fail_modeler(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("Modeler must not run on a cache hit")
+
+    monkeypatch.setattr(resolver_module, "resolve", lambda *_args, **_kwargs: cached)
+    monkeypatch.setattr(pipeline_mod, "ModelerAgent", fail_modeler)
+
+    assert await pipe.stage_resolve_model() is Stage.BUILD_HARNESS
+    assert ctx.run.robot_model is not None
+    assert ctx.run.robot_model.cache_hit is True
+    assert ctx.run.robot_model.provenance == "cache source"
