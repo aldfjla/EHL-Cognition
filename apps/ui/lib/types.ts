@@ -78,6 +78,15 @@ export interface Run {
   finished_at: string | null;
 }
 
+/**
+ * `GET /runs/{id}` response: the run plus everything mission control needs for
+ * first paint, in one round trip (see apps/api/app/routers/runs.py).
+ */
+export interface RunDetail extends Run {
+  scenarios: Scenario[];
+  clusters: Cluster[];
+}
+
 // ---- agent.json -----------------------------------------------------------
 
 export type Role =
@@ -289,5 +298,53 @@ export interface RunEvent<T = Record<string, unknown>> {
   data: T;
 }
 
-// TODO(build): add discriminated-union narrowing on RunEvent["type"] so
-// reducers get typed payloads instead of Record<string, unknown>.
+// ---- typed payloads -------------------------------------------------------
+
+/**
+ * Payload shapes per event type, from docs/EVENT_PROTOCOL.md. Full objects for
+ * `*.created`/`*.finished`, partial patches for `*_changed`.
+ */
+export interface EventPayloads {
+  "run.created": Run;
+  "run.stage_changed": { stage: Stage; previous_stage: Stage | null };
+  "run.finished": Run;
+  "agent.created": Agent;
+  "agent.status_changed": {
+    agent_id: string;
+    status: AgentStatus;
+    previous_status: AgentStatus | null;
+  };
+  "agent.activity": { agent_id: string; text: string; ts: string };
+  "message.sent": Message;
+  "scenario.created": Scenario;
+  "scenario.started": { scenario_id: string };
+  "scenario.finished": Scenario;
+  "suite.progress": {
+    total: number;
+    completed: number;
+    passed: number;
+    failed: number;
+  };
+  "finding.created": Finding;
+  "finding.updated": {
+    finding_id: string;
+    status: FindingStatus;
+    superseded_by?: string | null;
+  };
+  "artifact.created": {
+    kind: string;
+    path: string;
+    scenario_id?: string | null;
+    run_id: string;
+  };
+  "report.created": Report;
+  error: { stage: Stage | null; message: string; fatal: boolean };
+}
+
+/**
+ * Discriminated union over `type`, so reducers get narrowed payloads instead of
+ * `Record<string, unknown>`.
+ */
+export type TypedRunEvent = {
+  [K in EventType]: RunEvent<EventPayloads[K]> & { type: K };
+}[EventType];

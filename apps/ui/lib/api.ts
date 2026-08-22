@@ -9,9 +9,21 @@
  * The WebSocket lives in `./useEventStream`; this file is request/response only.
  */
 
-import type { Agent, Finding, Message, Report, Run, RunEvent, Scenario } from "./types";
+import type {
+  Agent,
+  Finding,
+  Message,
+  Report,
+  Run,
+  RunDetail,
+  RunEvent,
+  Scenario,
+} from "./types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+
+/** A hung API must surface as an error state, not an infinite skeleton. */
+export const REQUEST_TIMEOUT_MS = 8000;
 
 /** Thrown for any non-2xx response, carrying the status for the caller. */
 export class ApiError extends Error {
@@ -25,10 +37,30 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  // TODO(build): fetch(`${API_BASE}${path}`), throw ApiError on !res.ok,
-  // return res.json() as T. Add a short timeout via AbortController — a hung
-  // API should surface as an error state, not an infinite skeleton.
-  throw new Error("not implemented");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      cache: "no-store",
+      ...init,
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        `${init?.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText}`,
+        res.status,
+      );
+    }
+    return (await res.json()) as T;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new ApiError(`${path} timed out after ${REQUEST_TIMEOUT_MS}ms`, 504);
+    }
+    throw new ApiError(`${path} unreachable: ${(err as Error).message}`, 0);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Runs, newest first. Backs the index page. */
@@ -37,8 +69,13 @@ export async function listRuns(limit = 25): Promise<Run[]> {
 }
 
 /** One run with its scenarios and clusters — the mission control first paint. */
-export async function getRun(runId: string): Promise<Run> {
-  return request<Run>(`/runs/${runId}`);
+export async function getRun(runId: string): Promise<RunDetail> {
+  const detail = await request<RunDetail>(`/runs/${runId}`);
+  return {
+    ...detail,
+    scenarios: detail.scenarios ?? [],
+    clusters: detail.clusters ?? [],
+  };
 }
 
 /** The team roster for a run, in dispatch order. */
@@ -78,9 +115,17 @@ export async function getEvents(runId: string, since = 0): Promise<RunEvent[]> {
 
 /** Absolute URL for an artifact path returned on a scenario or incident. */
 export function artifactUrl(path: string): string {
-  // TODO(build): normalise — the API returns paths relative to ARTIFACTS_DIR,
-  // and `<video src>` needs an absolute URL against API_BASE.
-  return `${API_BASE}/artifacts/${path}`;
+  if (/^(https?:|blob:|data:)/.test(path)) return path;
+
+  const rel = path.replace(/^\.?\/+/, "");
+  const segments = rel.split("/").filter(Boolean).map(encodeURIComponent);
+
+  // mp4s go through the range-capable video route (seeking breaks without it);
+  // anything else falls through to the plain artifact path space.
+  if (segments.length === 2 && rel.endsWith(".mp4")) {
+    return `${API_BASE}/artifacts/video/${segments.join("/")}`;
+  }
+  return `${API_BASE}/artifacts/${segments.join("/")}`;
 }
 
 /** Start a run without GitHub. The demo trigger. */
