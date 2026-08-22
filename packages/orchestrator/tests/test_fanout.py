@@ -25,7 +25,7 @@ from orchestrator.schemas import (
     ScenarioStatus,
     Speaker,
 )
-from orchestrator.workspace import Workspace
+from orchestrator.workspace import PatchConflict, Workspace
 
 
 def make_context(tmp_path: Path) -> PipelineContext:
@@ -130,7 +130,7 @@ async def test_cluster_b_verifies_while_cluster_a_is_stalled(
     async def create_worktree(*_args: object, **_kwargs: object) -> Path:
         return tmp_path / "fix"
 
-    async def merge_patches(*_args: object, **_kwargs: object) -> list[str]:
+    async def merge_patches(*_args: object, **_kwargs: object) -> list[PatchConflict]:
         return []
 
     async def execute_suite(
@@ -197,7 +197,7 @@ async def test_fixer_claim_does_not_resolve_failed_cluster(
     async def create_worktree(*_args: object, **_kwargs: object) -> Path:
         return tmp_path / "fix"
 
-    async def merge_patches(*_args: object, **_kwargs: object) -> list[str]:
+    async def merge_patches(*_args: object, **_kwargs: object) -> list[PatchConflict]:
         return []
 
     async def execute_suite(
@@ -257,7 +257,7 @@ async def test_one_fixer_failure_does_not_cancel_other_clusters(
     async def create_worktree(*_args: object, **_kwargs: object) -> Path:
         return tmp_path / "fix"
 
-    async def merge_patches(*_args: object, **_kwargs: object) -> list[str]:
+    async def merge_patches(*_args: object, **_kwargs: object) -> list[PatchConflict]:
         return []
 
     async def execute_suite(
@@ -336,7 +336,7 @@ async def test_agent_gate_bounds_investigators_and_fixers(
     async def create_worktree(*_args: object, **_kwargs: object) -> Path:
         return tmp_path / "fix"
 
-    async def merge_patches(*_args: object, **_kwargs: object) -> list[str]:
+    async def merge_patches(*_args: object, **_kwargs: object) -> list[PatchConflict]:
         return []
 
     async def execute_suite(
@@ -371,15 +371,29 @@ async def test_conflicting_applies_are_serialized_and_unresolved(
     maximum = 0
 
     async def merge_patches(
-        _workspace: Workspace, worktrees: list[str], *, into: str
-    ) -> list[str]:
+        _workspace: Workspace,
+        worktrees: list[str],
+        *,
+        into: str,
+        landed_worktrees: list[str],
+    ) -> list[PatchConflict]:
         nonlocal active, maximum
-        del into
+        del into, landed_worktrees
         active += 1
         maximum = max(maximum, active)
         await asyncio.sleep(0.001)
         active -= 1
-        return worktrees if worktrees == [works[0].worktree] else []
+        if worktrees != [works[0].worktree]:
+            return []
+        return [
+            PatchConflict(
+                worktree=works[0].worktree,
+                branch="test",
+                sha="a" * 40,
+                files=("control.py",),
+                blocked_by=("sibling",),
+            )
+        ]
 
     async def execute_suite(
         scenarios: list[Scenario], repo_dir: Path | None = None
@@ -463,7 +477,9 @@ async def test_cluster_verification_is_read_only_and_has_no_suite_progress(
     try:
         original_merge = pipeline_mod.workspace_mod.merge_patches
 
-        async def merge_patches(*_args: object, **_kwargs: object) -> list[str]:
+        async def merge_patches(
+            *_args: object, **_kwargs: object
+        ) -> list[PatchConflict]:
             return []
 
         pipeline_mod.workspace_mod.merge_patches = merge_patches
@@ -517,7 +533,7 @@ async def test_after_video_is_a_distinct_recording_of_a_passing_seed(
         del repo_dir
         return [result(ctx.scenarios[0].id, ctx.scenarios[0].seed, "passed")]
 
-    async def merge_patches(*_args: object, **_kwargs: object) -> list[str]:
+    async def merge_patches(*_args: object, **_kwargs: object) -> list[PatchConflict]:
         return []
 
     monkeypatch.setattr(pipe, "_execute_cluster_suite", execute_cluster_suite)
@@ -569,7 +585,7 @@ async def test_after_video_is_unavailable_when_post_fix_seed_fails(
         del repo_dir
         return [result(ctx.scenarios[0].id, ctx.scenarios[0].seed, "passed")]
 
-    async def merge_patches(*_args: object, **_kwargs: object) -> list[str]:
+    async def merge_patches(*_args: object, **_kwargs: object) -> list[PatchConflict]:
         return []
 
     monkeypatch.setattr(pipe, "_execute_cluster_suite", execute_cluster_suite)
