@@ -174,6 +174,9 @@ export default function DatabaseBrowser() {
   const last = Math.min(offset + rows.length, total);
   const canPrevious = offset > 0;
   const canNext = offset + PAGE_SIZE < total;
+  const gridColumns = {
+    gridTemplateColumns: `repeat(${columns.length + 1}, minmax(150px, 1fr))`,
+  };
 
   return (
     <section>
@@ -273,13 +276,11 @@ export default function DatabaseBrowser() {
               </div>
 
               <div className="overflow-x-auto">
-                <div
-                  className="min-w-max"
-                  style={{
-                    gridTemplateColumns: `repeat(${columns.length + 1}, minmax(150px, 1fr))`,
-                  }}
-                >
-                  <div className="grid border-b border-surface-border bg-surface px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-slate-500" style={{ gridTemplateColumns: `repeat(${columns.length + 1}, minmax(150px, 1fr))` }}>
+                <div className="min-w-max">
+                  <div
+                    className="grid border-b border-surface-border bg-surface px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-slate-500"
+                    style={gridColumns}
+                  >
                     {columns.map((column) => (
                       <div key={column.name} className="pr-3">
                         {column.name}
@@ -307,7 +308,7 @@ export default function DatabaseBrowser() {
                         <div
                           key={rowKey}
                           className="grid border-b border-surface-border/70 font-mono text-xs text-slate-300 last:border-b-0"
-                          style={{ gridTemplateColumns: `repeat(${columns.length + 1}, minmax(150px, 1fr))` }}
+                          style={gridColumns}
                         >
                           {columns.map((column) => {
                             const value = row[column.name];
