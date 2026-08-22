@@ -23,8 +23,9 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from orchestrator.schemas import Event, EventType
@@ -39,11 +40,18 @@ SUBSCRIBER_QUEUE_SIZE = 256
 class EventBus:
     """Async fan-out of run events to any number of subscribers."""
 
-    def __init__(self, replay_size: int = REPLAY_BUFFER_SIZE) -> None:
+    def __init__(
+        self,
+        replay_size: int = REPLAY_BUFFER_SIZE,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._replay_size = replay_size
+        self._clock = clock
         self._history: dict[str, deque[Event]] = {}
         self._subscribers: dict[str, set[asyncio.Queue[Event | None]]] = {}
         self._seq: dict[str, int] = {}
+        self._throttle_last: dict[tuple[str, str], float] = {}
         self._closed: set[str] = set()
         #: Runs something has subscribed to. A run nobody ever streamed keeps
         #: its buffer so a late REST catch-up still has something to return.
@@ -78,6 +86,34 @@ class EventBus:
         event = Event(run_id=run_id, type=type_, data=data)
         await self.publish(event)
         return event
+
+    async def emit_throttled(
+        self,
+        run_id: str,
+        type_: EventType,
+        data: dict[str, Any],
+        *,
+        key: str,
+        min_interval_s: float,
+    ) -> Event | None:
+        """Publish a side-channel event only when its interval has elapsed.
+
+        Progress and frame notifications are a side channel: a dropped event is
+        one nobody needed, whereas queueing it would starve state events and
+        break the rule that publishing never blocks the pipeline. State events
+        are always sent through :meth:`emit`, never this method.
+        """
+        now = self._clock()
+        throttle_key = (run_id, key)
+        previous = self._throttle_last.get(throttle_key)
+        if (
+            previous is not None
+            and min_interval_s > 0
+            and now - previous < min_interval_s
+        ):
+            return None
+        self._throttle_last[throttle_key] = now
+        return await self.emit(run_id, type_, data)
 
     async def subscribe(
         self, run_id: str, since: int | None = None
@@ -121,6 +157,9 @@ class EventBus:
     async def close(self, run_id: str) -> None:
         """Signal end-of-stream and release subscribers for a finished run."""
         self._closed.add(run_id)
+        for throttle_key in tuple(self._throttle_last):
+            if throttle_key[0] == run_id:
+                self._throttle_last.pop(throttle_key, None)
         for queue in self._subscribers.pop(run_id, set()):
             try:
                 queue.put_nowait(None)
@@ -154,3 +193,6 @@ class EventBus:
         ):
             self._history.pop(run_id, None)
             self._seq.pop(run_id, None)
+            for throttle_key in tuple(self._throttle_last):
+                if throttle_key[0] == run_id:
+                    self._throttle_last.pop(throttle_key, None)
