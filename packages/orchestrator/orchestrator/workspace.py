@@ -60,6 +60,17 @@ class Workspace:
         return self.root / name
 
 
+@dataclass(frozen=True)
+class PatchConflict:
+    """A patch rejected because an already-merged sibling touched its files."""
+
+    worktree: str
+    branch: str
+    sha: str
+    files: tuple[str, ...]
+    blocked_by: tuple[str, ...]
+
+
 async def run_git(cwd: Path, *args: str, check: bool = True) -> str:
     """Run one git command in ``cwd`` and return its stdout.
 
@@ -166,34 +177,85 @@ async def apply_patch(ws: Workspace, worktree: str, patch: str) -> None:
         raise GitError(f"patch did not apply in {worktree}: {err.decode().strip()}")
 
 
-async def merge_patches(ws: Workspace, worktrees: list[str], into: str) -> list[str]:
+async def merge_patches(
+    ws: Workspace,
+    worktrees: list[str],
+    into: str,
+    *,
+    landed_worktrees: list[str],
+) -> list[PatchConflict]:
     """Combine every Fixer's branch into the verify worktree.
 
-    Returns the list of worktree names that conflicted. Conflicts are a real
-    outcome, not an exception: two agents fixing overlapping code is exactly
-    what the Reviewer role exists to adjudicate.
+    Returns structured conflict records. Conflicts are a real outcome, not an
+    exception: two agents fixing overlapping code is exactly what the Reviewer
+    role exists to adjudicate.
     """
     target = ws.worktree(into)
     if not target.exists():
         await create_worktree(ws, into, f"robotci/verify-{ws.commit_sha[:7]}")
 
-    conflicted: list[str] = []
+    conflicted: list[PatchConflict] = []
+    merged_files = {name: await _changed_files(ws, name) for name in landed_worktrees}
     for name in worktrees:
-        branch = await run_git(ws.worktree(name), "rev-parse", "HEAD")
+        sha = (await run_git(ws.worktree(name), "rev-parse", "HEAD")).strip()
+        branch = (
+            await run_git(ws.worktree(name), "rev-parse", "--abbrev-ref", "HEAD")
+        ).strip()
+        patch_files = await _changed_files(ws, name)
         process = await asyncio.create_subprocess_exec(
             "git",
             "merge",
             "--no-edit",
-            branch.strip(),
+            sha,
             cwd=str(target),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         await process.communicate()
         if process.returncode != 0:
-            conflicted.append(name)
+            files = tuple(
+                line
+                for line in (
+                    await run_git(target, "diff", "--name-only", "--diff-filter=U")
+                ).splitlines()
+                if line
+            )
+            blocked_by = tuple(
+                sibling
+                for sibling, sibling_files in merged_files.items()
+                if patch_files & sibling_files
+            )
+            conflicted.append(
+                PatchConflict(
+                    worktree=name,
+                    branch=branch,
+                    sha=sha,
+                    files=files,
+                    blocked_by=blocked_by,
+                )
+            )
             await run_git(target, "merge", "--abort", check=False)
+            continue
+        merged_files[name] = patch_files
     return conflicted
+
+
+async def _changed_files(ws: Workspace, worktree: str) -> set[str]:
+    """Return only one patch's paths, independent of the verify tree state."""
+    sha = (await run_git(ws.worktree(worktree), "rev-parse", "HEAD")).strip()
+    return {
+        line
+        for line in (
+            await run_git(
+                ws.worktree(worktree),
+                "diff",
+                "--name-only",
+                ws.commit_sha,
+                sha,
+            )
+        ).splitlines()
+        if line
+    }
 
 
 async def cleanup(ws: Workspace, keep_artifacts: bool = True) -> None:
@@ -224,7 +286,7 @@ def _apply_defaults(config: dict) -> dict:
     config.setdefault("control", {}).setdefault("rate_hz", 100)
     config.setdefault("task", {}).setdefault("name", "task")
     scenarios = config.setdefault("scenarios", {})
-    scenarios.setdefault("count", 24)
+    scenarios.setdefault("count", 50)
     scenarios.setdefault("seed", 1337)
     scenarios.setdefault("randomize", {})
     policy = config.setdefault("policy", {})

@@ -27,6 +27,19 @@ MINIMAL_URDF = """<?xml version="1.0"?>
 </robot>
 """
 
+VALID_MJCF = """<mujoco model="repo_arm">
+  <worldbody>
+    <body name="arm">
+      <joint name="shoulder" type="hinge" axis="0 1 0" range="-1 1"/>
+      <geom type="capsule" fromto="0 0 0 0.2 0 0" size="0.03" mass="1"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="shoulder_act" joint="shoulder" kp="20" ctrlrange="-1 1"/>
+  </actuator>
+</mujoco>
+"""
+
 
 # -- menagerie index -------------------------------------------------------- #
 
@@ -152,6 +165,211 @@ def test_parse_urdf_and_find_urdf(tmp_path) -> None:
     assert parsed["dof"] == 2
     assert parsed["joint_names"] == ["shoulder_pan", "elbow"]
     assert parsed["robot_name"] == "two_link"
+
+
+def test_repo_mjcf_wins_and_rejects_scene_only_xml(tmp_path) -> None:
+    (tmp_path / "scene.xml").write_text(
+        "<mujoco><worldbody><geom type='plane' size='1 1 .1'/></worldbody></mujoco>"
+    )
+    robot = tmp_path / "robot.xml"
+    robot.write_text(VALID_MJCF)
+
+    resolution = resolver.resolve(tmp_path, {"robot": {}})
+
+    assert resolution.found
+    assert resolution.source == "repo"
+    assert Path(resolution.model_path) == robot
+    assert "scene.xml" not in resolution.provenance
+    assert resolution.approximate is False
+
+
+def test_scene_only_mjcf_is_rejected(tmp_path) -> None:
+    (tmp_path / "scene.xml").write_text(
+        "<mujoco><worldbody><geom type='plane' size='1 1 .1'/></worldbody></mujoco>"
+    )
+
+    resolution = resolver.resolve(tmp_path, {"robot": {}})
+
+    assert resolution.found is False
+    assert "contains no robot bodies" in resolution.report
+
+
+def test_mjcf_dof_counts_robot_joints_not_free_payload_dofs(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(generator, "validate", lambda _path: (True, "ok"))
+    model = tmp_path / "payload.xml"
+    model.write_text(
+        VALID_MJCF.replace(
+            "<worldbody>", '<option gravity="0 0 0"/>\n  <worldbody>'
+        ).replace(
+            "  </worldbody>",
+            """    <body name="payload">
+      <freejoint name="payload_free"/>
+      <geom type="sphere" size="0.05" mass="1"/>
+    </body>
+  </worldbody>""",
+        )
+    )
+
+    resolution = resolver.resolve(tmp_path, {"robot": {}})
+
+    assert resolution.found
+    assert resolution.dof == 1
+
+
+def test_resolve_converts_a_repo_urdf(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    urdf = repo / "arm.urdf"
+    urdf.write_text(MINIMAL_URDF)
+
+    resolution = resolver.resolve(repo, {"robot": {}}, tmp_path / "output")
+
+    assert resolution.found
+    assert resolution.source == "repo"
+    assert Path(resolution.model_path).is_file()
+    assert resolution.processing_steps == [
+        "URDF compile",
+        "MJCF output validation",
+    ]
+    assert resolution.approximate is False
+
+
+def test_failed_urdf_conversion_falls_through_honestly(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "broken.urdf").write_text("<robot name='broken'><link></robot>")
+
+    resolution = resolver.resolve(repo, {"robot": {}}, tmp_path / "output")
+
+    assert resolution.found is False
+    assert "URDF conversion" in resolution.report
+    assert "failed" in resolution.report
+
+
+def test_readme_match_is_low_confidence_and_approximate(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "This controller drives a Franka Panda robot.\n"
+    )
+
+    resolution = resolver.identify(tmp_path)
+
+    assert resolution.found
+    assert resolution.name == "franka_emika_panda"
+    assert resolution.confidence == 0.55
+    assert resolution.approximate is True
+    assert "README/docs" in resolution.report
+
+
+def test_dependency_match_is_low_confidence_and_approximate(tmp_path) -> None:
+    (tmp_path / "requirements.txt").write_text(
+        "franka @ https://example.invalid/franka\n"
+    )
+
+    resolution = resolver.identify(tmp_path)
+
+    assert resolution.found
+    assert resolution.name == "franka_emika_panda"
+    assert resolution.confidence == 0.55
+    assert resolution.approximate is True
+    assert "dependency manifest" in resolution.report
+
+
+def test_generic_readme_prose_does_not_identify_a_robot(tmp_path) -> None:
+    (tmp_path / "README.md").write_text(
+        "This robot arm has a mobile base and a gripper.\n"
+    )
+
+    resolution = resolver.identify(tmp_path)
+
+    assert resolution.found is False
+
+
+def test_menagerie_license_is_read_from_the_model_directory(menagerie_dir) -> None:
+    model = menagerie.get("franka_emika_panda", menagerie_dir)
+    assert model is not None
+
+    assert menagerie.read_license(model, menagerie_dir) == "Apache License 2.0"
+
+
+def test_license_parser_keeps_versions_and_rejects_unknown_text(tmp_path) -> None:
+    model = menagerie.MenagerieModel("example", "Example", "example.xml")
+    directory = tmp_path / "example"
+    directory.mkdir()
+    license_file = directory / "LICENSE"
+    license_file.write_text("GNU General Public License version 3, June 2007\n")
+    assert menagerie.read_license(model, tmp_path) == (
+        "GNU General Public License v3.0"
+    )
+
+    license_file.write_text("Copyright notice mentioning BSD as a trademark.\n")
+    assert menagerie.read_license(model, tmp_path) is None
+
+
+def test_resolution_cache_hit_and_fingerprint_change(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "arm.urdf").write_text(MINIMAL_URDF)
+    output = tmp_path / "output"
+    cache = tmp_path / "cache"
+
+    first = resolver.resolve(
+        repo, {"robot": {}}, output, cache, repo_identity="acme/arm"
+    )
+    second = resolver.resolve(
+        repo, {"robot": {}}, tmp_path / "other-output", cache, repo_identity="acme/arm"
+    )
+    assert first.found
+    assert second.cache_hit is True
+    assert Path(second.model_path).is_file()
+
+    (repo / "notes.txt").write_text("unrelated checkout change")
+    unrelated = resolver.resolve(
+        repo, {"robot": {}}, tmp_path / "unrelated-output", cache, "acme/arm"
+    )
+    assert unrelated.cache_hit is True
+
+    (repo / "arm.urdf").write_text(MINIMAL_URDF.replace("two_link", "changed"))
+    changed = resolver.resolve(
+        repo,
+        {"robot": {}},
+        tmp_path / "changed-output",
+        cache,
+        repo_identity="acme/arm",
+    )
+    assert changed.found
+    assert changed.cache_hit is False
+
+
+def test_stale_cached_model_path_is_a_miss(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "arm.urdf").write_text(MINIMAL_URDF)
+    cache = tmp_path / "cache"
+    resolver.resolve(repo, {"robot": {}}, tmp_path / "output", cache, "acme/arm")
+    entry = next(cache.glob("*.json"))
+    payload = json.loads(entry.read_text())
+    Path(payload["model_path"]).unlink()
+
+    resolution = resolver.resolve(
+        repo, {"robot": {}}, tmp_path / "new-output", cache, "acme/arm"
+    )
+
+    assert resolution.found
+    assert resolution.cache_hit is False
+
+
+def test_rejected_explicit_model_is_preserved_in_fallback_provenance(tmp_path) -> None:
+    (tmp_path / "bad.xml").write_text("<mujoco><broken></mujoco>")
+    (tmp_path / "README.md").write_text("This controller drives franka_emika_panda.\n")
+
+    resolution = resolver.resolve(tmp_path, {"robot": {"model_path": "bad.xml"}})
+
+    assert resolution.found
+    assert resolution.approximate is True
+    assert "model_path 'bad.xml' was rejected" in resolution.report
+    assert "model_path 'bad.xml' was rejected" in (resolution.provenance or "")
 
 
 def test_scan_joint_limits_reads_real_numbers(tmp_path) -> None:

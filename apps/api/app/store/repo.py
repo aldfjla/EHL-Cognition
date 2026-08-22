@@ -35,6 +35,7 @@ from orchestrator.schemas import (
     Cluster,
     Finding,
     Message,
+    Repo,
     Report,
     Run,
     Scenario,
@@ -47,6 +48,7 @@ from app.store.tables import (
     ClusterRow,
     FindingRow,
     MessageRow,
+    RepoRow,
     ReportRow,
     RunRow,
     ScenarioRow,
@@ -211,6 +213,115 @@ def update_run(db: Session, run: Run) -> Run:
     """Persist mutations, stamping ``updated_at``."""
     run = run.model_copy(update={"updated_at": datetime.now(UTC)})
     return row_to_run(_merge(db, run))
+
+
+# --------------------------------------------------------------------------- #
+# Connected repositories
+# --------------------------------------------------------------------------- #
+
+
+def _repo_to_row(repository: Repo) -> RepoRow:
+    """Flatten a connected repository for storage."""
+    return RepoRow(
+        id=repository.id,
+        full_name=repository.full_name,
+        branch=repository.branch,
+        suite_size=repository.suite_size,
+        branches_json=json.dumps(repository.branches),
+        path_include_json=json.dumps(repository.path_include),
+        path_exclude_json=json.dumps(repository.path_exclude),
+        filters_source=repository.filters_source,
+        created_at=repository.created_at,
+        last_push_at=repository.last_push_at,
+    )
+
+
+def _row_to_repo(row: RepoRow) -> Repo:
+    """Inflate a connected repository from storage."""
+    values: dict[str, Any] = {
+        "id": row.id,
+        "full_name": row.full_name,
+        "branch": row.branch,
+        "suite_size": row.suite_size,
+        "branches": json.loads(row.branches_json or "[]"),
+        # ``or "null"`` covers a legacy empty string, not a configured ``[]``.
+        "path_include": json.loads(row.path_include_json or "null"),
+        "path_exclude": json.loads(row.path_exclude_json or "null"),
+        "filters_source": row.filters_source,
+        "created_at": row.created_at,
+        "last_push_at": row.last_push_at,
+    }
+    for name, value in values.items():
+        if isinstance(value, datetime) and value.tzinfo is None:
+            values[name] = value.replace(tzinfo=UTC)
+    return Repo.model_validate(values)
+
+
+def create_repo(db: Session, repository: Repo) -> Repo:
+    """Insert a connected repository."""
+    row = _repo_to_row(repository)
+    db.add(row)
+    db.flush()
+    return _row_to_repo(row)
+
+
+def list_repos(db: Session) -> list[Repo]:
+    """Connected repositories, newest first."""
+    rows = db.exec(
+        select(RepoRow).order_by(RepoRow.created_at.desc())  # type: ignore[attr-defined]
+    ).all()
+    return [_row_to_repo(row) for row in rows]
+
+
+def get_repo(db: Session, repo_id: str) -> Repo | None:
+    """Fetch a connected repository by id."""
+    row = db.get(RepoRow, repo_id)
+    return _row_to_repo(row) if row else None
+
+
+def get_repo_by_full_name(db: Session, full_name: str) -> Repo | None:
+    """Fetch a connected repository by its GitHub ``owner/name``."""
+    row = db.exec(select(RepoRow).where(RepoRow.full_name == full_name)).first()
+    return _row_to_repo(row) if row else None
+
+
+def update_repo(db: Session, repository: Repo) -> Repo:
+    """Persist changes to a connected repository."""
+    row = db.get(RepoRow, repository.id)
+    if row is None:
+        raise KeyError(repository.id)
+    row.full_name = repository.full_name
+    row.branch = repository.branch
+    row.suite_size = repository.suite_size
+    row.branches_json = json.dumps(repository.branches)
+    row.path_include_json = json.dumps(repository.path_include)
+    row.path_exclude_json = json.dumps(repository.path_exclude)
+    row.filters_source = repository.filters_source
+    row.created_at = repository.created_at
+    row.last_push_at = repository.last_push_at
+    db.add(row)
+    db.flush()
+    return _row_to_repo(row)
+
+
+def delete_repo(db: Session, repo_id: str) -> bool:
+    """Delete a connected repository, returning whether it existed."""
+    row = db.get(RepoRow, repo_id)
+    if row is None:
+        return False
+    db.delete(row)
+    db.flush()
+    return True
+
+
+def list_runs_for_repo(db: Session, repo_name: str) -> list[Run]:
+    """Runs for one repository, newest first."""
+    rows = db.exec(
+        select(RunRow)
+        .where(RunRow.repo == repo_name)
+        .order_by(RunRow.created_at.desc())  # type: ignore[attr-defined]
+    ).all()
+    return [row_to_run(row) for row in rows]
 
 
 # --------------------------------------------------------------------------- #

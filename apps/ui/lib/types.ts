@@ -50,6 +50,13 @@ export interface RobotModel {
   model_path: string;
   dof?: number | null;
   confidence?: number | null;
+  /** The concrete file, Menagerie entry or signal behind the pick. */
+  provenance?: string | null;
+  /** Only set when the source model states a license we recognise. */
+  license?: string | null;
+  processing_steps?: string[];
+  approximate?: boolean;
+  cache_hit?: boolean;
 }
 
 export interface SuiteStats {
@@ -85,6 +92,28 @@ export interface Run {
 export interface RunDetail extends Run {
   scenarios: Scenario[];
   clusters: Cluster[];
+}
+
+// ---- repo.json ------------------------------------------------------------
+
+/** Derived from run history: "running" while any run is non-terminal. */
+export type RepoStatus = "dormant" | "running";
+
+export interface ConnectedRepo {
+  id: string;
+  full_name: string;
+  branch: string;
+  suite_size: number;
+  created_at: string;
+  last_push_at: string | null;
+  status: RepoStatus;
+  latest_run: { id: string; stage: Stage; created_at: string } | null;
+}
+
+/** POST /repos response: the repo plus what to paste into GitHub settings. */
+export interface ConnectRepoResponse {
+  repo: ConnectedRepo;
+  webhook: { url: string; secret_configured: boolean };
 }
 
 // ---- agent.json -----------------------------------------------------------
@@ -327,6 +356,8 @@ export interface EventPayloads {
     agent_id: string;
     status: AgentStatus;
     previous_status: AgentStatus | null;
+    /** Present when a terminal status is emitted. */
+    finished_at?: string | null;
   };
   "agent.updated": Partial<Agent> & { agent_id: string };
   "agent.activity": { agent_id: string; text: string; ts: string };

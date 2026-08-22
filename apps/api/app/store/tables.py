@@ -51,6 +51,29 @@ class RunRow(SQLModel, table=True):
     finished_at: datetime | None = None
 
 
+class RepoRow(SQLModel, table=True):
+    """A GitHub repository connected to Robot CI."""
+
+    __tablename__ = "repos"
+    __table_args__ = (UniqueConstraint("full_name", name="uq_repos_full_name"),)
+
+    id: str = Field(primary_key=True)
+    full_name: str = Field(index=True)
+    branch: str = "main"
+    suite_size: int = 50
+    # Trigger filters. Stored as JSON lists for the same reason as the run's
+    # nested objects: they are read as a unit and never queried into.
+    # ``"null"`` (unset) and ``"[]"`` (configured as empty) are different
+    # answers for the path filters, so the column keeps the JSON literal rather
+    # than collapsing both into a falsy string.
+    branches_json: str = "[]"
+    path_include_json: str = "null"
+    path_exclude_json: str = "null"
+    filters_source: str = "default"
+    created_at: datetime
+    last_push_at: datetime | None = None
+
+
 class AgentRow(SQLModel, table=True):
     """Mirrors ``agent.json``."""
 
@@ -110,6 +133,9 @@ class ScenarioRow(SQLModel, table=True):
     progress: float | None = None
     trace_path: str | None = None
     error: str | None = None
+    error_kind: str | None = None
+    retries: int = 0
+    retry_reason: str | None = None
 
 
 class MessageRow(SQLModel, table=True):
@@ -190,6 +216,10 @@ def _json_columns() -> dict[str, list[str]]:
     """
     return {
         "runs": ["robot_model_json", "suite_json"],
+        # ``repos`` is converted by hand in repo.py: Repo carries derived
+        # fields (status, latest_run) that have no column, so the generic
+        # mapping cannot own it. Listed here so the inventory stays complete.
+        "repos": ["branches_json", "path_include_json", "path_exclude_json"],
         "agents": ["scenario_ids_json", "finding_ids_json"],
         "scenarios": ["params_json", "criteria_json"],
         "messages": ["refs_json"],

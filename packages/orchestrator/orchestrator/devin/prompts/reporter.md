@@ -20,7 +20,7 @@ relative artifact path renders as a broken image inside a GitHub PR body.
 Write for the developer who pushed the commit and has thirty seconds. They want
 to know: what broke, why, what changed, and can they trust it.
 
-- **Lead with the finding, not the process.** Not "we ran 24 scenarios";
+- **Lead with the finding, not the process.** Not "we ran the suite";
   "your gripper drops the payload whenever the approach takes over 2 seconds".
 - **One incident per root cause.** Cite the seeds and the file:line.
 - **Show the evidence.** Reference the before/after clip for each incident —

@@ -31,6 +31,7 @@ from typing import Any, Self
 from simkit.runner import EpisodeResult, run_scenario
 
 DEFAULT_MP_CONTEXT = "spawn"
+PARENT_WATCHDOG_GRACE_S = 10.0
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ class Job:
     record: str | bool = False
     live: bool = False
     observe_hz: float = 2.0
-    max_wall_s: float = 120.0
+    max_wall_s: float = 60.0
     job_id: str = ""
 
 
@@ -169,6 +170,7 @@ class _Slot:
     queue: Any
     process: Any
     job: Job | None = None
+    job_started_at: float | None = None
     stopping: bool = False
     retiring: bool = False
 
@@ -399,6 +401,7 @@ class WorkerPool:
                 if self._shutting_down:
                     return
                 self._drain_events_locked()
+                self._poll_watchdogs_locked()
                 self._poll_deaths_locked()
                 self._dispatch_locked()
             time.sleep(0.02)
@@ -424,6 +427,7 @@ class WorkerPool:
         slot = self._slot_for(job_id)
         if slot is not None:
             slot.job = None
+            slot.job_started_at = None
             retiring = slot.retiring
         result = event["result"]
         batch._record_result(job, result)
@@ -455,10 +459,12 @@ class WorkerPool:
                         scenario_id=job.scenario_id,
                         seed=job.seed,
                         status="error",
+                        error_kind="infra",
                         error=f"worker died: exitcode {exitcode}",
                         worker_id=slot.worker_id,
                     )
                     slot.job = None
+                    slot.job_started_at = None
                     batch._record_result(job, result)
                     self._call_event(
                         {
@@ -479,6 +485,50 @@ class WorkerPool:
             )
             self._emit_state(self._last_reason)
 
+    def _poll_watchdogs_locked(self) -> None:
+        """Terminate a worker that cannot be interrupted by the in-worker guard."""
+        now = time.monotonic()
+        for slot in list(self._slots.values()):
+            job = slot.job
+            started = slot.job_started_at
+            if job is None or started is None:
+                continue
+            if now - started <= float(job.max_wall_s) + PARENT_WATCHDOG_GRACE_S:
+                continue
+            entry = self._jobs.pop(job.job_id, None)
+            if entry is None:
+                continue
+            batch, _ = entry
+            result = EpisodeResult(
+                scenario_id=job.scenario_id,
+                seed=job.seed,
+                status="error",
+                error_kind="timeout",
+                error=(
+                    "parent watchdog expired after "
+                    f"{float(job.max_wall_s) + PARENT_WATCHDOG_GRACE_S:.1f}s"
+                ),
+                worker_id=slot.worker_id,
+            )
+            self._terminate_slot(slot)
+            batch._record_result(job, result)
+            self._call_event(
+                {
+                    "kind": "scenario_finished",
+                    "scenario_id": job.scenario_id,
+                    "worker_id": slot.worker_id,
+                    "index": job.index,
+                    "job_id": job.job_id,
+                    "seed": job.seed,
+                    **_result_event_fields(result),
+                }
+            )
+            self._respawn_slot(slot.worker_id)
+            self._last_reason = (
+                f"worker {slot.worker_id} timed out, terminated and respawned"
+            )
+            self._emit_state(self._last_reason)
+
     def _dispatch_locked(self) -> None:
         idle = [
             slot
@@ -489,6 +539,7 @@ class WorkerPool:
             _, job = self._queued.popleft()
             slot = idle.pop(0)
             slot.job = job
+            slot.job_started_at = time.monotonic()
             slot.queue.put(job)
 
     def _slot_for(self, job_id: str) -> _Slot | None:
@@ -593,4 +644,7 @@ def _result_event_fields(result: EpisodeResult) -> dict[str, Any]:
         "diagnosis": result.diagnosis,
         "video_path": result.video_path,
         "error": result.error,
+        "error_kind": result.error_kind,
+        "retries": result.retries,
+        "retry_reason": result.retry_reason,
     }

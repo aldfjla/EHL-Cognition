@@ -11,6 +11,7 @@ import {
   type EventCursor,
   type ResyncTracker,
 } from "./useEventStream";
+import type { Agent } from "./types";
 
 function event(seq: number, type: string, data: Record<string, unknown>) {
   return {
@@ -20,6 +21,33 @@ function event(seq: number, type: string, data: Record<string, unknown>) {
     type,
     ts: new Date(0).toISOString(),
     data,
+  };
+}
+
+function agent(overrides: Partial<Agent> = {}): Agent {
+  return {
+    id: "agent-a",
+    run_id: "run-test",
+    session_id: "session-a",
+    session_url: "https://app.devin.ai/sessions/a",
+    role: "fixer",
+    title: "Fixer",
+    task: "Fix the failure",
+    status: "working",
+    iteration: 1,
+    max_iterations: 3,
+    cluster_id: "cluster-a",
+    scenario_ids: ["scenario-a"],
+    parent_agent_id: null,
+    finding_ids: [],
+    last_activity: "checking the patch",
+    desktop_url: "/mock/desktop/index.html",
+    issue: "grasp timeout",
+    step: "running verification",
+    created_at: "2025-01-01T00:00:00.000Z",
+    updated_at: "2025-01-01T00:01:00.000Z",
+    finished_at: null,
+    ...overrides,
   };
 }
 
@@ -105,5 +133,64 @@ describe("event stream sequencing", () => {
 
     expect(tracker).toEqual({ history: [], stormed: false });
     expect(recordResyncStart(tracker, 4)).toBe(true);
+  });
+
+  it("applies agent.updated fields without clobbering or leaking agent_id", () => {
+    const state = {
+      ...EMPTY_RUN_STATE,
+      agents: [agent()],
+    };
+    const next = applyEvent(
+      state,
+      event(1, "agent.updated", {
+        agent_id: "agent-a",
+        iteration: 3,
+        step: "at cap",
+        session_url: undefined,
+      }),
+    );
+
+    expect(next.agents[0]).toMatchObject({
+      id: "agent-a",
+      iteration: 3,
+      step: "at cap",
+      session_url: "https://app.devin.ai/sessions/a",
+    });
+    expect("agent_id" in next.agents[0]).toBe(false);
+  });
+
+  it("ignores agent.updated for an unknown agent", () => {
+    const state = {
+      ...EMPTY_RUN_STATE,
+      agents: [agent()],
+    };
+    const next = applyEvent(
+      state,
+      event(1, "agent.updated", {
+        agent_id: "agent-missing",
+        iteration: 3,
+      }),
+    );
+
+    expect(next.agents).toBe(state.agents);
+  });
+
+  it("sets finished_at when an agent reaches a terminal status", () => {
+    const state = {
+      ...EMPTY_RUN_STATE,
+      agents: [agent()],
+    };
+    const finishedAt = "2025-01-01T00:03:00.000Z";
+    const next = applyEvent(
+      state,
+      event(1, "agent.status_changed", {
+        agent_id: "agent-a",
+        status: "failed",
+        previous_status: "working",
+        finished_at: finishedAt,
+      }),
+    );
+
+    expect(next.agents[0].finished_at).toBe(finishedAt);
   });
 });

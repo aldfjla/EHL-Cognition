@@ -236,6 +236,8 @@ class AgentSession:
         }
         if detail:
             data["detail"] = detail
+        if status.is_terminal and self.agent.finished_at is not None:
+            data["finished_at"] = self.agent.finished_at.isoformat()
         await self.bus.emit(self.agent.run_id, EventType.AGENT_STATUS_CHANGED, data)
 
     async def output(self) -> dict[str, Any]:

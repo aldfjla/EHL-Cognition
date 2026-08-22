@@ -275,6 +275,7 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     agent_id: harness.id,
     status: "succeeded",
     previous_status: "working",
+    finished_at: new Date(clockMs).toISOString(),
   });
 
   // --- DESIGN_SCENARIOS ----------------------------------------------------
@@ -337,6 +338,7 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     agent_id: designer.id,
     status: "succeeded",
     previous_status: "working",
+    finished_at: new Date(clockMs).toISOString(),
   });
 
   // --- RUN_SUITE -----------------------------------------------------------
@@ -628,11 +630,13 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     agent_id: inv1.id,
     status: "succeeded",
     previous_status: "working",
+    finished_at: new Date(clockMs).toISOString(),
   });
   push(200, "agent.status_changed", {
     agent_id: inv2.id,
     status: "succeeded",
     previous_status: "working",
+    finished_at: new Date(clockMs).toISOString(),
   });
 
   // --- FIX -----------------------------------------------------------------
@@ -723,6 +727,7 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     agent_id: fix1Attempt.id,
     status: "failed",
     previous_status: "working",
+    finished_at: new Date(clockMs).toISOString(),
   });
   push(200, "agent.status_changed", {
     agent_id: fix1.id,
@@ -787,11 +792,13 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     agent_id: fix1.id,
     status: "succeeded",
     previous_status: "working",
+    finished_at: new Date(clockMs).toISOString(),
   });
   push(200, "agent.status_changed", {
     agent_id: fix2.id,
     status: "succeeded",
     previous_status: "working",
+    finished_at: new Date(clockMs).toISOString(),
   });
 
   // --- VERIFY --------------------------------------------------------------
@@ -867,6 +874,7 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
     agent_id: reviewer.id,
     status: "succeeded",
     previous_status: "working",
+    finished_at: new Date(clockMs).toISOString(),
   });
 
   // --- REPORT --------------------------------------------------------------
@@ -982,6 +990,7 @@ index 7c02e11..d9b3f45 100644
     agent_id: reporter.id,
     status: "succeeded",
     previous_status: "working",
+    finished_at: new Date(clockMs).toISOString(),
   });
   push(400, "run.stage_changed", { stage: "PR_OPENED", previous_stage: "REPORT" });
   push(300, "run.finished", {
@@ -993,6 +1002,11 @@ index 7c02e11..d9b3f45 100644
       model_path: "vendor/menagerie/franka_emika_panda/panda.xml",
       dof: 7,
       confidence: 0.97,
+      provenance: "Menagerie entry franka_emika_panda; robotci.yaml robot.menagerie",
+      license: "Apache License 2.0",
+      processing_steps: ["Menagerie lookup"],
+      approximate: false,
+      cache_hit: true,
     },
     suite: {
       total: 24,
@@ -1041,6 +1055,7 @@ export function mockAgents(runId: string = MOCK_RUN_ID): Agent[] {
         agents.set(event.data.agent_id, {
           ...current,
           status: event.data.status,
+          finished_at: event.data.finished_at ?? current.finished_at,
           updated_at: event.ts,
         });
         break;

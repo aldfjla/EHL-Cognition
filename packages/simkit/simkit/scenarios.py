@@ -45,6 +45,18 @@ _PRIMES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53)
 
 _MASK32 = 0xFFFFFFFF
 
+# Parameters understood by ``simkit.scene``. Keep this catalogue conservative:
+# an axis that the scene ignores would make a scenario look diverse while
+# exercising the same world.
+DEFAULT_AXES: dict[str, tuple[float, float]] = {
+    "friction": (0.2, 1.2),
+    "latency_steps": (0, 3),
+    "object_mass_kg": (0.1, 2.0),
+    "object_position.x": (-0.15, 0.15),
+    "object_position.y": (-0.15, 0.15),
+    "sensor_noise_std": (0.0, 0.05),
+}
+
 #: Words used by :func:`label` for the low/high end of an axis, matched against
 #: the axis name. First match wins, so order matters.
 _VOCAB: tuple[tuple[str, str, str], ...] = (

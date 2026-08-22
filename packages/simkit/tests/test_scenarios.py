@@ -74,6 +74,19 @@ def test_sampling_is_stratified_not_clustered() -> None:
         assert thirds == {0, 1, 2}, f"{axis} never left {thirds}"
 
 
+def test_default_axes_are_deterministic_and_diverse() -> None:
+    first = scenarios.generate("run", 2025, 50, scenarios.DEFAULT_AXES)
+    second = scenarios.generate("run", 2025, 50, scenarios.DEFAULT_AXES)
+    assert first == second
+    assert len({str(item["params"]) for item in first}) == 50
+    for axis, (low, high) in scenarios.DEFAULT_AXES.items():
+        values = [float(item["params"][axis]) for item in first]
+        fractions = [(value - low) / (high - low) for value in values]
+        assert {min(int(fraction * 3), 2) for fraction in fractions} == {0, 1, 2}
+        if not float(low).is_integer() or not float(high).is_integer():
+            assert len(set(values)) >= 20
+
+
 def test_replay_reproduces_generated_params() -> None:
     generated = scenarios.generate("run", 4242, 8, AXES)
     for scenario in generated:

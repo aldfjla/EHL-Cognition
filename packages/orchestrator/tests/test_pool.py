@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from orchestrator import pool as pool_mod
 from orchestrator.bus import EventBus
 from orchestrator.pool import SuitePool
 from orchestrator.schemas import EventType
@@ -370,3 +371,175 @@ async def test_saturation_events_only_announce_transition_edges(tmp_path: Path) 
         and event.data["reason"].startswith("saturated:")
     ]
     assert len(saturated_events) == 1
+
+
+def _result(
+    scenario_id: str, seed: int, status: str, **fields: object
+) -> SimpleNamespace:
+    error_kind = fields.pop("error_kind", None)
+    return SimpleNamespace(
+        scenario_id=scenario_id,
+        seed=seed,
+        status=status,
+        duration_s=0.0,
+        sim_time_s=0.0,
+        criteria=[],
+        diagnosis=None,
+        video_path=None,
+        trace_path=None,
+        error=None,
+        error_kind=error_kind,
+        **fields,
+    )
+
+
+async def test_queue_and_started_callback_reflect_real_slots(tmp_path: Path) -> None:
+    bus = EventBus()
+    observed: list[tuple[int, int]] = []
+    in_flight = 0
+    max_in_flight = 0
+
+    def runner(*, scenario_id: str, seed: int, **_: object) -> SimpleNamespace:
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.02)
+        in_flight -= 1
+        return _result(scenario_id, seed, "passed")
+
+    async def on_started(_scenario_id: str, _worker_id: str, _attempt: int) -> None:
+        snapshot = pool.snapshot()
+        observed.append((snapshot["busy"], snapshot["queued"]))
+
+    pool = SuitePool(
+        run_id="run",
+        bus=bus,
+        workers=2,
+        artifacts_dir=tmp_path,
+        runner=runner,
+    )
+    try:
+        task = asyncio.create_task(
+            pool.submit(
+                specs(6),
+                model_path="m",
+                harness_path="h",
+                task={},
+                on_started=on_started,
+            )
+        )
+        await asyncio.sleep(0.005)
+        assert pool.snapshot()["busy"] == 2
+        assert pool.snapshot()["queued"] >= 1
+        await task
+    finally:
+        await pool.aclose()
+    assert max_in_flight == 2
+    assert observed
+    assert pool.snapshot()["queued"] == 0
+    assert pool.snapshot()["busy"] == 0
+
+
+async def test_infrastructure_retries_are_visible_but_failures_are_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SCENARIO_INFRA_RETRIES", "2")
+    bus = EventBus()
+    calls = 0
+
+    def runner(*, scenario_id: str, seed: int, **_: object) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            return _result(
+                scenario_id, seed, "error", error="transient", error_kind="infra"
+            )
+        return _result(scenario_id, seed, "passed")
+
+    attempts: list[int] = []
+    pool = SuitePool(
+        run_id="run",
+        bus=bus,
+        workers=1,
+        artifacts_dir=tmp_path,
+        runner=runner,
+    )
+    try:
+        result = await pool.submit(
+            specs(1),
+            model_path="m",
+            harness_path="h",
+            task={},
+            on_started=lambda _id, _worker, attempt: attempts.append(attempt),
+        )
+    finally:
+        await pool.aclose()
+    assert result[0].status == "passed"
+    assert result[0].retries == 2
+    assert result[0].retry_reason == "infra"
+    assert attempts == [1, 2, 3]
+
+
+async def test_failed_result_is_not_retried(tmp_path: Path) -> None:
+    bus = EventBus()
+    calls = 0
+
+    def runner(*, scenario_id: str, seed: int, **_: object) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        return _result(scenario_id, seed, "failed", error_kind="infra")
+
+    pool = SuitePool(
+        run_id="run",
+        bus=bus,
+        workers=1,
+        artifacts_dir=tmp_path,
+        runner=runner,
+    )
+    try:
+        result = await pool.submit(
+            specs(1),
+            model_path="m",
+            harness_path="h",
+            task={},
+            record="none",
+        )
+    finally:
+        await pool.aclose()
+    assert result[0].status == "failed"
+    assert calls == 1
+    assert result[0].retries == 0
+
+
+async def test_timeout_is_not_retried_and_slot_is_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pool_mod, "PARENT_WATCHDOG_GRACE_S", 0.01)
+    bus = EventBus()
+
+    def runner(*, scenario_id: str, seed: int, **_: object) -> SimpleNamespace:
+        if scenario_id == "s0":
+            time.sleep(0.05)
+        return _result(scenario_id, seed, "passed")
+
+    pool = SuitePool(
+        run_id="run",
+        bus=bus,
+        workers=1,
+        artifacts_dir=tmp_path,
+        runner=runner,
+    )
+    try:
+        result = await pool.submit(
+            specs(2),
+            model_path="m",
+            harness_path="h",
+            task={},
+            max_wall_s=0.005,
+        )
+    finally:
+        await pool.aclose()
+    assert result[0].status == "error"
+    assert result[0].error_kind == "timeout"
+    assert result[0].retries == 0
+    assert result[1].status == "passed"

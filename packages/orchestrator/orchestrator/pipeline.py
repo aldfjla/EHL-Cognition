@@ -28,7 +28,9 @@ Flow
 -> REPORT -> PR_OPENED``
 
 with two early exits: a clean suite short-circuits to ``PASSED_CLEAN``, and
-exhausting the iteration budget lands on ``FAILED_UNRESOLVED``.
+red or regressed verification routes through ``REPORT`` to
+``FAILED_UNRESOLVED``. An infrastructure crash may transition directly to
+``FAILED_UNRESOLVED`` from any stage that permits it, including ``VERIFY``.
 """
 
 from __future__ import annotations
@@ -45,7 +47,9 @@ from typing import TYPE_CHECKING, Any
 
 from orchestrator import clustering, github
 from orchestrator import workspace as workspace_mod
+from orchestrator.devin.hierarchy import AgentTree
 from orchestrator.pool import SuitePool
+from orchestrator.roles.base import RoleAgent
 from orchestrator.roles.fixer import FixerAgent
 from orchestrator.roles.harness_builder import HarnessBuilderAgent
 from orchestrator.roles.investigator import InvestigatorAgent
@@ -99,8 +103,11 @@ TRANSITIONS: dict[Stage, tuple[Stage, ...]] = {
     Stage.CLUSTER_FAILURES: (Stage.INVESTIGATE, Stage.PASSED_CLEAN),
     Stage.INVESTIGATE: (Stage.FIX, Stage.FAILED_UNRESOLVED),
     Stage.FIX: (Stage.VERIFY, Stage.FAILED_UNRESOLVED),
-    # VERIFY loops back to FIX while the iteration budget holds.
+    # Only a full green VERIFY may proceed to REPORT and then PR_OPENED; a red
+    # suite also goes through REPORT, so FAILED_UNRESOLVED here means a crash.
     Stage.VERIFY: (Stage.REPORT, Stage.FIX, Stage.FAILED_UNRESOLVED),
+    # REPORT writes findings for both green and failed verification; only the
+    # former returns PR_OPENED.
     Stage.REPORT: (Stage.PR_OPENED, Stage.FAILED_UNRESOLVED),
     Stage.PR_OPENED: (),
     Stage.PASSED_CLEAN: (),
@@ -136,6 +143,22 @@ _CLUSTER_TERMINAL = {"resolved", "unresolved", "conflicted"}
 _AGENT_WATCH_INTERVAL_S = 0.01
 
 
+def _conflict_worktree(
+    conflict: workspace_mod.PatchConflict, worktree: str | None
+) -> bool:
+    """Match a structured conflict to its rejected worktree."""
+    if worktree is None:
+        return False
+    return conflict.worktree == worktree
+
+
+def _conflict_description(conflict: workspace_mod.PatchConflict) -> str:
+    """Render a conflict with the files and sibling that blocked it."""
+    files = ", ".join(conflict.files) or "unknown files"
+    blocked_by = ", ".join(conflict.blocked_by) or "unknown sibling"
+    return f"{conflict.worktree} ({files}; blocked by {blocked_by})"
+
+
 # --------------------------------------------------------------------------- #
 # Run context
 # --------------------------------------------------------------------------- #
@@ -154,6 +177,15 @@ class PipelineContext:
     blackboard: Blackboard
     devin: DevinClient
     config: dict = field(default_factory=dict)
+    sim_workers: int | None = None
+    #: Called once with the parsed ``robotci.yaml`` as soon as there is a
+    #: checkout. The transport layer uses it to cache the repo's trigger
+    #: filters, which the webhook cannot read (nothing is cloned yet). The
+    #: pipeline stays ignorant of the store; a failure here is logged, never
+    #: fatal — the run is already legitimately in flight.
+    on_config: Callable[[dict], Awaitable[None]] | None = None
+    suite_size: int | None = None
+    default_suite_size: int = 50
     scenarios: list[Scenario] = field(default_factory=list)
     clusters: list[Cluster] = field(default_factory=list)
     report: Report | None = None
@@ -180,6 +212,7 @@ class _ClusterWork:
     outcome: str | None = None
     error: str | None = None
     retry_count: int = 0
+    owner_agent_id: str | None = None
 
 
 class Pipeline:
@@ -197,8 +230,11 @@ class Pipeline:
         #: raw simkit results so ``simkit.suite.compare`` can diff them.
         self._before_results: list[Any] = []
         self._after_results: list[Any] = []
+        self._after_videos: dict[str, dict[str, str]] = {}
         self._fix_worktrees: list[str] = []
-        self._conflicts: list[str] = []
+        self._conflicts: list[workspace_mod.PatchConflict] = []
+        self._landed_worktrees: list[str] = []
+        self._agent_tree = AgentTree()
         self._pool: SuitePool | None = None
         self._agent_gate = asyncio.Semaphore(self._max_parallel_agents)
         self._cluster_work: dict[str, _ClusterWork] = {}
@@ -293,6 +329,11 @@ class Pipeline:
             run.repo, run.commit_sha, run.id, ctx.workspace.root.parent
         )
         ctx.config = await workspace_mod.read_config(ctx.workspace)
+        if ctx.on_config is not None:
+            try:
+                await ctx.on_config(ctx.config)
+            except Exception:
+                log.exception("caching robotci.yaml for %s failed", run.repo)
         policy = ctx.config.get("policy", {})
         self._max_parallel_agents = max(
             1,
@@ -327,17 +368,23 @@ class Pipeline:
         return Stage.RESOLVE_MODEL
 
     async def stage_resolve_model(self) -> Stage:
-        """Find a physical model for the robot the code drives.
+        """Find a physical model before spending an agent.
 
-        Library first: ask :mod:`simkit.models.resolver` for a Menagerie match
-        without spending an agent. Only when that misses do we dispatch the
-        Modeler role to synthesize MJCF from the repo's kinematics.
+        A durable cache hit follows the same resolved-model path and therefore
+        skips Modeler dispatch entirely.
         """
         from simkit.models import generator, resolver
 
         ctx = self.ctx
+        model_dir = self._artifacts / "model"
+        model_dir.mkdir(parents=True, exist_ok=True)
         resolution = await asyncio.to_thread(
-            resolver.resolve, ctx.workspace.base, ctx.config
+            resolver.resolve,
+            ctx.workspace.base,
+            ctx.config,
+            model_dir,
+            resolver.default_cache_dir(),
+            ctx.run.repo,
         )
         if resolution.found:
             ctx.run.robot_model = RobotModel(
@@ -346,11 +393,14 @@ class Pipeline:
                 model_path=resolution.model_path,
                 dof=resolution.dof,
                 confidence=resolution.confidence,
+                provenance=resolution.provenance,
+                license=resolution.license,
+                processing_steps=resolution.processing_steps,
+                approximate=resolution.approximate,
+                cache_hit=resolution.cache_hit,
             )
             return Stage.BUILD_HARNESS
 
-        model_dir = self._artifacts / "model"
-        model_dir.mkdir(parents=True, exist_ok=True)
         agent = await ModelerAgent(ctx).dispatch(
             resolver_report=resolution.report,
             model_out_dir=str(model_dir),
@@ -366,6 +416,9 @@ class Pipeline:
             source=ModelSource.GENERATED,
             name=agent.title or None,
             model_path=str(model_path),
+            provenance="Modeler agent synthesized the MJCF after automatic resolution missed",
+            processing_steps=["Modeler synthesis", "MJCF validation"],
+            approximate=True,
         )
         return Stage.BUILD_HARNESS
 
@@ -417,8 +470,15 @@ class Pipeline:
 
         ctx = self.ctx
         task = ctx.config.get("task", {})
+        configured_size = ctx.config.get("scenarios", {}).get("count")
         suite_size = int(
-            ctx.config.get("scenarios", {}).get("count", os.getenv("SUITE_SIZE", "24"))
+            ctx.suite_size
+            if ctx.suite_size is not None
+            else (
+                configured_size
+                if configured_size is not None
+                else ctx.default_suite_size
+            )
         )
         agent = await ScenarioDesignerAgent(ctx).dispatch(
             task_description=task.get("description", task.get("name", "")),
@@ -550,7 +610,7 @@ class Pipeline:
             before_stats=before.model_dump(mode="json"),
             after_stats=after.model_dump(mode="json"),
             regressions=comparison.get("newly_broken", []),
-            conflicts=self._conflicts,
+            conflicts=[_conflict_description(conflict) for conflict in self._conflicts],
             diff=await workspace_mod.diff(ctx.workspace, "verify"),
         )
 
@@ -562,15 +622,10 @@ class Pipeline:
             # The Reviewer's notes are on the board; the next FIX round reads
             # them through the relay policy.
             return Stage.FIX
-        if after.passed > before.passed:
-            # Partial progress still ships, with the unresolved incidents
-            # named honestly in the report.
-            return Stage.REPORT
-        ctx.run.error = (
-            f"fix budget exhausted after {ctx.fix_iteration} iterations with "
-            f"{after.failed} scenarios still failing"
-        )
-        return Stage.FAILED_UNRESOLVED
+        ctx.run.error = self._verification_failure_reason(after, comparison)
+        # REPORT is still required on an unsuccessful run so humans receive
+        # the incident summary, but stage_report will not push a branch.
+        return Stage.REPORT
 
     def _start_cluster_workflows(self) -> None:
         """Start one never-cancelling workflow per cluster."""
@@ -619,6 +674,8 @@ class Pipeline:
                 param_correlation=clustering.correlate_params(scenarios),
             )
         work.agent_ids.append(agent.id)
+        work.owner_agent_id = agent.id
+        self._agent_tree.register_root(agent.id)
         for finding in self._findings_of(agent):
             if finding.kind is FindingKind.OBSERVATION:
                 await role.relay(finding, Role.INVESTIGATOR, "finding")
@@ -646,6 +703,19 @@ class Pipeline:
             work.outcome = "unresolved"
             return
         ctx = self.ctx
+        if work.owner_agent_id is None:
+            work.owner_agent_id = work.cause.author_agent_id
+        if work.owner_agent_id and not self._agent_tree.has(work.owner_agent_id):
+            self._agent_tree.register_root(work.owner_agent_id)
+        parent_id = work.owner_agent_id
+        refusal = (
+            self._agent_tree.child_refusal(parent_id)
+            if parent_id is not None
+            else "agent tree parent unavailable for fixer"
+        )
+        if refusal is not None:
+            await self._refuse_cluster(work, refusal)
+            return
         name = f"fix-{work.cluster.id}"
         branch = f"robotci/{name}-{ctx.run.commit_sha[:7]}"
         path = await workspace_mod.create_worktree(ctx.workspace, name, branch)
@@ -664,12 +734,84 @@ class Pipeline:
                 worktree=str(path),
                 scenario_seeds=work.original_seeds,
                 iteration=ctx.fix_iteration,
+                parent_agent_id=parent_id,
             )
         work.agent_ids.append(agent.id)
+        self._agent_tree.register_child(parent_id, agent.id)
         if "patched" in role.output and not role.output["patched"]:
             work.outcome = "unresolved"
             self._set_cluster_phase(work, "unresolved")
             return
+        cluster_scenarios = self._cluster_scenarios(work)
+        seed_results = await self._execute_cluster_suite(
+            cluster_scenarios, repo_dir=path
+        )
+        results_by_seed = {
+            getattr(result, "seed", None): result for result in seed_results
+        }
+        still_red = [
+            str(scenario.seed)
+            for scenario in cluster_scenarios
+            if (
+                results_by_seed.get(scenario.seed) is None
+                or results_by_seed[scenario.seed].status != "passed"
+            )
+        ]
+        reviewer_error: str | None = None
+        reviewer = ReviewerAgent(ctx)
+        refusal = self._agent_tree.child_refusal(agent.id)
+        if refusal is not None:
+            await self._record_refusal(work, refusal)
+            reviewer_error = refusal
+        else:
+            try:
+                patch_diff = await workspace_mod.diff(ctx.workspace, name)
+            except Exception as exc:  # noqa: BLE001 - evidence is best effort
+                patch_diff = "(diff unavailable)"
+                await self._nonfatal(f"cluster {work.cluster.label} patch diff", exc)
+            try:
+                async with gate:
+                    reviewer_agent = await self._dispatch_with_agent_watch(
+                        reviewer,
+                        issue=work.cause.summary,
+                        step="verifying",
+                        root_cause=work.cause.summary,
+                        cluster_id=work.cluster.id,
+                        cluster_label=work.cluster.label,
+                        fix_summary=[work.cause.summary],
+                        before_stats=self._stats(cluster_scenarios),
+                        after_stats=self._result_stats(seed_results),
+                        regressions=still_red,
+                        conflicts=[
+                            _conflict_description(conflict)
+                            for conflict in self._conflicts
+                        ],
+                        diff=patch_diff,
+                        parent_agent_id=agent.id,
+                    )
+                work.agent_ids.append(reviewer_agent.id)
+                self._agent_tree.register_child(agent.id, reviewer_agent.id)
+                reviewer_claimed_success = reviewer.output.get("verdict") == "ship"
+                if reviewer_claimed_success and still_red:
+                    reviewer_error = (
+                        "Reviewer claimed success while originally red seeds stayed "
+                        f"red: {', '.join(still_red)}"
+                    )
+            except Exception as exc:  # noqa: BLE001 - reviewer telemetry is optional
+                reviewer_error = f"Reviewer unavailable: {exc}"
+                await self._nonfatal(f"cluster {work.cluster.label} reviewer", exc)
+        if still_red:
+            work.error = (
+                "originally red seeds still failing in fixer worktree: "
+                + ", ".join(still_red)
+            )
+            if reviewer_error:
+                work.error += f"; {reviewer_error}"
+            work.outcome = "unresolved"
+            self._set_cluster_phase(work, "unresolved")
+            return
+        if reviewer_error:
+            work.error = reviewer_error
         work.worktree = name
         self._fix_worktrees.append(name)
         self._set_cluster_phase(work, "ready_to_verify")
@@ -681,25 +823,77 @@ class Pipeline:
         async with self._merge_lock:
             self._set_cluster_phase(work, "verifying")
             conflicts = await workspace_mod.merge_patches(
-                self.ctx.workspace, [work.worktree], into="verify"
+                self.ctx.workspace,
+                [work.worktree],
+                into="verify",
+                landed_worktrees=self._landed_worktrees,
             )
             if conflicts:
                 self._conflicts.extend(
-                    name for name in conflicts if name not in self._conflicts
+                    conflict
+                    for conflict in conflicts
+                    if conflict not in self._conflicts
                 )
                 work.outcome = "unresolved"
                 self._set_cluster_phase(work, "conflicted")
                 return
+            if work.worktree not in self._landed_worktrees:
+                self._landed_worktrees.append(work.worktree)
             results = await self._execute_cluster_suite(
                 self._cluster_scenarios(work),
                 repo_dir=self.ctx.workspace.worktree("verify"),
             )
             if results and all(result.status == "passed" for result in results):
+                await self._record_cluster_after(work)
+                self._conflicts = [
+                    conflict
+                    for conflict in self._conflicts
+                    if not _conflict_worktree(conflict, work.worktree)
+                ]
                 work.outcome = "resolved"
                 self._set_cluster_phase(work, "resolved")
             else:
                 work.outcome = "unresolved"
                 self._set_cluster_phase(work, "unresolved")
+
+    async def _record_cluster_after(self, work: _ClusterWork) -> None:
+        """Record passing cluster seeds without changing authoritative records."""
+        ctx = self.ctx
+        scenarios = self._cluster_scenarios(work)
+        # A real cluster verification always creates the shared pool. Keeping
+        # this seam inert for pool-less unit fakes avoids turning a mocked
+        # verification into an unrelated MuJoCo execution.
+        if not scenarios or self._pool is None:
+            return
+        self._after_videos.pop(work.cluster.id, None)
+        record_dir = self._artifacts / "video" / "after"
+        results = await self._pool.submit(
+            [self._suite_spec(scenario) for scenario in scenarios],
+            model_path=self._model_path(),
+            harness_path=str(self._artifacts / HARNESS_FILENAME),
+            task=ctx.config.get("task", {}),
+            record="all",
+            record_dir=record_dir,
+            repo_dir=ctx.workspace.worktree("verify"),
+            reason=f"record after evidence: {work.cluster.label}",
+        )
+        videos: dict[str, str] = {}
+        before_paths = {
+            Path(scenario.video_path).resolve()
+            for scenario in scenarios
+            if scenario.video_path
+        }
+        for scenario, result in zip(scenarios, results):
+            path = getattr(result, "video_path", None)
+            if (
+                getattr(result, "status", None) == "passed"
+                and path
+                and Path(path).is_file()
+                and Path(path).resolve() not in before_paths
+            ):
+                videos[scenario.id] = str(path)
+        if videos:
+            self._after_videos[work.cluster.id] = videos
 
     async def _retry_conflicted_clusters(self) -> None:
         """Retry each conflict once after all non-conflicting patches landed."""
@@ -729,6 +923,32 @@ class Pipeline:
         work.phase = phase
         self._cluster_progress.set()
 
+    async def _refuse_cluster(self, work: _ClusterWork, reason: str) -> None:
+        """Record a cap refusal as an honest, non-fatal cluster failure."""
+        await self._record_refusal(work, reason)
+        work.outcome = "unresolved"
+        self._set_cluster_phase(work, "unresolved")
+
+    async def _record_refusal(self, work: _ClusterWork, reason: str) -> None:
+        """Record a cap refusal without deciding the cluster outcome."""
+        work.error = reason
+        await self.ctx.bus.emit(
+            self.ctx.run.id,
+            EventType.ERROR,
+            {
+                "stage": self.ctx.run.stage.value,
+                "message": f"cluster {work.cluster.label}: {reason}",
+                "fatal": False,
+            },
+        )
+
+    @staticmethod
+    def _result_stats(results: list[Any]) -> SuiteStats:
+        """Summarize private oracle evidence without mutating scenarios."""
+        passed = sum(1 for result in results if result.status == "passed")
+        failed = len(results) - passed
+        return SuiteStats.from_counts(passed=passed, failed=failed)
+
     async def _wait_for_cluster(
         self, predicate: Callable[[_ClusterWork], bool]
     ) -> bool:
@@ -753,7 +973,7 @@ class Pipeline:
 
     async def _dispatch_with_agent_watch(
         self,
-        role: InvestigatorAgent | FixerAgent,
+        role: RoleAgent,
         *,
         issue: str,
         step: str,
@@ -774,7 +994,7 @@ class Pipeline:
 
     async def _watch_agent(
         self,
-        role: InvestigatorAgent | FixerAgent,
+        role: RoleAgent,
         *,
         issue: str,
         step: str,
@@ -790,7 +1010,7 @@ class Pipeline:
 
     async def _safe_emit_agent_update(
         self,
-        role: InvestigatorAgent | FixerAgent,
+        role: RoleAgent,
         *,
         issue: str,
         step: str,
@@ -841,6 +1061,7 @@ class Pipeline:
         after = self._stats(ctx.scenarios)
         before = ctx.run.suite or after
         diff = await workspace_mod.diff(ctx.workspace, "verify")
+        incidents = [self._incident(cluster) for cluster in ctx.clusters]
 
         await ReporterAgent(ctx).dispatch(
             confirmed_findings=[
@@ -850,16 +1071,11 @@ class Pipeline:
             before_stats=before.model_dump(mode="json"),
             after_stats=after.model_dump(mode="json"),
             diff=diff,
-            video_pairs=self._video_pairs(),
+            video_pairs=self._video_pairs(incidents),
         )
 
-        incidents = [self._incident(cluster) for cluster in ctx.clusters]
         verdict = (
-            Verdict.FIXED
-            if after.failed == 0
-            else Verdict.UNRESOLVED
-            if after.failed >= before.failed
-            else Verdict.FIXED
+            Verdict.FIXED if self._verification_is_green(after) else Verdict.UNRESOLVED
         )
         report = Report(
             run_id=ctx.run.id,
@@ -871,6 +1087,7 @@ class Pipeline:
             before=before,
             after=after,
         )
+        self._artifacts.mkdir(parents=True, exist_ok=True)
         markdown = self._artifacts / "report.md"
         markdown.write_text(github.render_pr_body(report))
         report.markdown_path = str(markdown)
@@ -880,6 +1097,21 @@ class Pipeline:
         await ctx.bus.emit(
             ctx.run.id, EventType.REPORT_CREATED, report.model_dump(mode="json")
         )
+        if verdict is Verdict.UNRESOLVED:
+            if not ctx.run.error:
+                ctx.run.error = self._verification_failure_reason(
+                    after, {"newly_broken": []}
+                )
+            body = github.render_pr_body(report)
+            await github.comment_on_commit(ctx.run.repo, ctx.run.commit_sha, body)
+            await github.set_commit_status(
+                ctx.run.repo,
+                ctx.run.commit_sha,
+                "failure",
+                f"Robot CI unresolved: {ctx.run.error}",
+                target_url=ctx.run.pull_request_url,
+            )
+            return Stage.FAILED_UNRESOLVED
         return Stage.PR_OPENED
 
     async def stage_pr_opened(self) -> Stage:
@@ -934,13 +1166,24 @@ class Pipeline:
             self._pool = SuitePool(
                 run_id=ctx.run.id,
                 bus=ctx.bus,
-                workers=self._max_parallel,
+                workers=self._worker_count(),
                 artifacts_dir=self._artifacts,
             )
+        policy = ctx.config.get("policy", {})
+        max_wall_s = float(
+            policy.get("scenario_timeout_s", os.getenv("SCENARIO_TIMEOUT_S", "60"))
+        )
         completed = 0
         passed = 0
         failed = 0
         by_id = {scenario.id: scenario for scenario in scenarios}
+
+        async def on_started(scenario_id: str, worker_id: str, _attempt: int) -> None:
+            scenario = by_id.get(scenario_id)
+            if scenario is None:
+                return
+            scenario.status = ScenarioStatus.RUNNING
+            scenario.worker_id = worker_id
 
         async def on_result(result: Any) -> None:
             nonlocal completed, passed, failed
@@ -969,6 +1212,7 @@ class Pipeline:
                         "passed": passed,
                         "failed": failed,
                         "running": snapshot["busy"],
+                        "queued": snapshot["queued"],
                         "workers": snapshot["workers"],
                     },
                 )
@@ -981,7 +1225,9 @@ class Pipeline:
             record=ctx.config.get("policy", {}).get("record_video", "failures"),
             repo_dir=repo_dir,
             on_result=on_result,
+            on_started=on_started,
             reason=f"{ctx.run.stage.value.lower()}: {len(scenarios)} scenarios",
+            max_wall_s=max_wall_s,
         )
 
     async def _execute_cluster_suite(
@@ -998,9 +1244,13 @@ class Pipeline:
             self._pool = SuitePool(
                 run_id=ctx.run.id,
                 bus=ctx.bus,
-                workers=self._max_parallel,
+                workers=self._worker_count(),
                 artifacts_dir=self._artifacts,
             )
+        policy = ctx.config.get("policy", {})
+        max_wall_s = float(
+            policy.get("scenario_timeout_s", os.getenv("SCENARIO_TIMEOUT_S", "60"))
+        )
         return await self._pool.submit(
             [self._suite_spec(scenario) for scenario in scenarios],
             model_path=self._model_path(),
@@ -1008,6 +1258,7 @@ class Pipeline:
             task=ctx.config.get("task", {}),
             record="none",
             repo_dir=repo_dir,
+            max_wall_s=max_wall_s,
         )
 
     def _apply_results(
@@ -1032,6 +1283,9 @@ class Pipeline:
         scenario.video_path = result.video_path
         scenario.trace_path = result.trace_path
         scenario.error = result.error
+        scenario.error_kind = getattr(result, "error_kind", None)
+        scenario.retries = int(getattr(result, "retries", 0) or 0)
+        scenario.retry_reason = getattr(result, "retry_reason", None)
         scenario.worker_id = getattr(result, "worker_id", scenario.worker_id)
         scenario.criteria = [
             CriterionResult(**criterion) for criterion in result.criteria
@@ -1078,7 +1332,22 @@ class Pipeline:
         still_failing = any(
             s.status in (ScenarioStatus.FAILED, ScenarioStatus.ERROR) for s in scenarios
         )
-        before_video = next((s.video_path for s in scenarios if s.video_path), None)
+        before_video = next(
+            (
+                s.video_path
+                for s in scenarios
+                if s.video_path and Path(s.video_path).is_file()
+            ),
+            None,
+        )
+        after_video = next(
+            (
+                path
+                for scenario_id, path in self._after_videos.get(cluster.id, {}).items()
+                if scenario_id in {s.id for s in scenarios} and Path(path).is_file()
+            ),
+            None,
+        )
         return Incident(
             cluster_id=cluster.id,
             title=cluster.label,
@@ -1087,26 +1356,68 @@ class Pipeline:
             resolution=patch.summary if patch else "no patch accepted",
             files_changed=patch.files if patch else [],
             before_video=before_video,
-            after_video=None if still_failing else before_video,
-            status="unresolved" if still_failing or patch is None else "fixed",
+            after_video=after_video,
+            status=("unresolved" if still_failing or patch is None else "fixed"),
         )
 
-    def _video_pairs(self) -> list[dict[str, Any]]:
+    def _video_pairs(
+        self, incidents: list[Incident] | None = None
+    ) -> list[dict[str, Any]]:
+        if incidents is None:
+            incidents = [self._incident(cluster) for cluster in self.ctx.clusters]
+        labels = {cluster.id: cluster.label for cluster in self.ctx.clusters}
         return [
             {
-                "cluster_id": cluster.id,
-                "label": cluster.label,
-                "video": next(
-                    (
-                        s.video_path
-                        for s in self.ctx.scenarios
-                        if s.cluster_id == cluster.id and s.video_path
-                    ),
-                    None,
+                "cluster_id": incident.cluster_id,
+                "label": labels.get(incident.cluster_id, incident.title),
+                "before": incident.before_video,
+                "after": incident.after_video,
+                "after_note": (
+                    "verified after-video"
+                    if incident.after_video
+                    else "no verified after-video; proof is unavailable"
                 ),
             }
-            for cluster in self.ctx.clusters
+            for incident in incidents
         ]
+
+    def _verification_is_green(self, after: SuiteStats) -> bool:
+        """Return whether the current full-suite verification may ship."""
+        if after.failed != 0 or self._conflicts:
+            return False
+        if self._before_results and self._after_results:
+            from simkit import suite as suite_mod
+
+            comparison = suite_mod.compare(self._before_results, self._after_results)
+            return not comparison.get("newly_broken")
+        return True
+
+    def _verification_failure_reason(
+        self, after: SuiteStats, comparison: dict[str, Any]
+    ) -> str:
+        reasons: list[str] = []
+        if after.failed:
+            reasons.append(f"{after.failed} scenarios still failing")
+        regressions = comparison.get("newly_broken", [])
+        if regressions:
+            reasons.append(f"newly broken seeds: {', '.join(map(str, regressions))}")
+        if self._conflicts:
+            reasons.append(
+                "unresolved patch conflicts: "
+                + "; ".join(
+                    _conflict_description(conflict) for conflict in self._conflicts
+                )
+            )
+        cluster_errors = [
+            f"{work.cluster.label}: {work.error}"
+            for work in self._cluster_work.values()
+            if work.error and work.outcome != "resolved"
+        ]
+        if cluster_errors:
+            reasons.append("cluster errors: " + "; ".join(cluster_errors))
+        return "verification unresolved: " + (
+            "; ".join(reasons) if reasons else "suite did not pass"
+        )
 
     def _report_title(self, before: SuiteStats, after: SuiteStats) -> str:
         fixed = after.passed - before.passed
@@ -1138,7 +1449,13 @@ class Pipeline:
                 + ", ".join(f"{i.title} ({i.affected_scenarios})" for i in unresolved),
             ]
         if self._conflicts:
-            lines += ["", "Conflicting patches: " + ", ".join(self._conflicts)]
+            lines += [
+                "",
+                "Conflicting patches: "
+                + "; ".join(
+                    _conflict_description(conflict) for conflict in self._conflicts
+                ),
+            ]
         return "\n".join(lines)
 
     # -- misc helpers ------------------------------------------------------ #
@@ -1159,16 +1476,35 @@ class Pipeline:
         finding's ``detail`` — the role API hands the pipeline an ``Agent``, not
         the session's structured output, so the board is the only channel.
         """
+        axes: dict[str, tuple[float, float]] = {}
         for finding in reversed(self._findings_of(agent)):
             axes = _parse_axes(finding.detail)
             if axes:
-                return axes
-        configured = self.ctx.config.get("scenarios", {}).get("randomize", {})
-        return {
-            name: (float(bounds[0]), float(bounds[1]))
-            for name, bounds in configured.items()
-            if isinstance(bounds, (list, tuple)) and len(bounds) == 2
-        }
+                break
+        if not axes:
+            configured = self.ctx.config.get("scenarios", {}).get("randomize", {})
+            axes = {
+                name: (float(bounds[0]), float(bounds[1]))
+                for name, bounds in configured.items()
+                if isinstance(bounds, (list, tuple)) and len(bounds) == 2
+            }
+        if len(axes) < 3:
+            from simkit.scenarios import DEFAULT_AXES
+
+            for name, bounds in DEFAULT_AXES.items():
+                if len(axes) >= 3:
+                    break
+                axes.setdefault(name, bounds)
+        return axes
+
+    def _worker_count(self) -> int:
+        """Resolve the shared simulation-worker count once for every suite."""
+        configured = (
+            self.ctx.sim_workers
+            if self.ctx.sim_workers is not None
+            else int(os.getenv("SIM_WORKERS", "4"))
+        )
+        return max(1, min(int(configured), os.cpu_count() or 1))
 
     def _findings_of(self, agent: Agent) -> list[Finding]:
         ids = set(agent.finding_ids)
@@ -1274,6 +1610,7 @@ async def run_headless(repo: str, sha: str, branch: str = "main") -> Run:
             api_base=os.getenv("DEVIN_API_BASE", "https://api.devin.ai/v1"),
             max_parallel=int(os.getenv("MAX_PARALLEL_AGENTS", "6")),
         ),
+        default_suite_size=int(os.getenv("SUITE_SIZE", "50")),
     )
     return await Pipeline(ctx).run()
 

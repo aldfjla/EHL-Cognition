@@ -18,24 +18,45 @@ the WebSocket, not the HTTP response.
 
 Filtering
 ---------
-Only pushes to ``TARGET_BRANCH`` of ``TARGET_REPO`` start a run. Everything else
-gets a 200 with ``{"ignored": reason}`` — returning an error for events we
-deliberately skip makes the customer's webhook page look broken.
+A push starts a run only when it matches the target repository's *own* trigger
+configuration: the pushed ref must match a watched branch pattern and at least
+one changed path must match the path filters, so a README-only push does not
+burn a run. Everything else gets a 200 with ``{"ignored": reason,
+"reason_code": ...}`` — returning an error for events we deliberately skip
+makes the customer's webhook page look broken.
+
+Where the filters come from, honestly
+-------------------------------------
+The filters are declared in the customer's ``robotci.yaml`` under ``ci:``, and
+that file **cannot be read here**: the repo is not cloned until stage
+TRIGGERED, and cloning inside a webhook handler would blow GitHub's delivery
+timeout. So the decision is made from the connected-repository registry, which
+caches those keys, and stage TRIGGERED writes the checked-out ``ci:`` section
+back into the registry (:mod:`orchestrator.triggers`). Consequence, stated
+rather than hidden: a change to ``ci:`` takes effect from the *next* push, and
+``Repo.filters_source`` says whether the filters used were the registry
+defaults or the repo's committed config.
+
+Every decision — start or ignore — is logged with the reason code, and every
+ignore returns it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from orchestrator import triggers
 from orchestrator.blackboard import Blackboard
 from orchestrator.bus import EventBus
 from orchestrator.pipeline import Pipeline, PipelineContext
-from orchestrator.schemas import EventType, Run, Stage
+from orchestrator.schemas import EventType, Run, Scenario, ScenarioStatus, Stage
 from orchestrator.workspace import Workspace
 from sqlmodel import Session
 
@@ -66,7 +87,25 @@ def _dashboard_url(settings: Settings, run_id: str) -> str:
     return f"{settings.ui_origin.rstrip('/')}/runs/{run_id}"
 
 
-async def _drive_pipeline(run_id: str, bus: EventBus, settings: Settings) -> None:
+def _ignored(
+    reason: str, code: str, *, filters: triggers.Filters | None = None
+) -> dict[str, Any]:
+    """The body of a deliberate skip: 200, a sentence, and a stable code.
+
+    ``filters`` is echoed when the skip was a filter decision, so the customer
+    can see on GitHub's delivery page which patterns were applied instead of
+    having to guess what Robot CI thinks it is watching.
+    """
+    log.info("ignored push: %s (%s)", reason, code)
+    body: dict[str, Any] = {"ignored": reason, "reason_code": code}
+    if filters is not None:
+        body["filters"] = filters.as_dict()
+    return body
+
+
+async def _drive_pipeline(
+    run_id: str, bus: EventBus, settings: Settings, suite_size: int | None = None
+) -> None:
     """Run the pipeline for ``run_id`` to a terminal stage.
 
     Any failure here is *our* failure, never a robot failure: it is recorded on
@@ -81,6 +120,7 @@ async def _drive_pipeline(run_id: str, bus: EventBus, settings: Settings) -> Non
 
     # Construction is inside the try: a Workspace that cannot clone, or a
     # missing Devin key, is the same class of failure as a stage that throws.
+    persistence: asyncio.Task[None] | None = None
     try:
         workspace = Workspace(
             run_id=run.id,
@@ -94,8 +134,15 @@ async def _drive_pipeline(run_id: str, bus: EventBus, settings: Settings) -> Non
             bus=bus,
             blackboard=Blackboard(run.id),
             devin=_devin_or_none(),
+            on_config=_filter_cache(run.repo),
             max_fix_iterations=settings.max_agent_iterations,
+            sim_workers=settings.sim_workers,
+            suite_size=suite_size,
+            default_suite_size=settings.suite_size,
         )
+        persistence = asyncio.create_task(_persist_scenario_events(run.id, bus))
+        # Let persistence subscribe before a synchronously failing pipeline emits.
+        await asyncio.sleep(0)
         await Pipeline(ctx).run()
     except Exception as exc:
         log.exception("run %s failed", run.id)
@@ -114,6 +161,85 @@ async def _drive_pipeline(run_id: str, bus: EventBus, settings: Settings) -> Non
                         update={"stage": Stage.FAILED_UNRESOLVED, "error": str(exc)}
                     ),
                 )
+    finally:
+        if persistence is not None:
+            await bus.close(run.id)
+            driver = asyncio.current_task()
+            if driver is not None and driver.cancelling():
+                persistence.cancel()
+            await persistence
+
+
+def _filter_cache(repo_name: str) -> Any:
+    """Callback that caches a checkout's ``ci:`` filters on the registry row.
+
+    This is the only place the repo's *own* ``robotci.yaml`` can be read, so it
+    is where the registry learns what the customer actually committed. The push
+    that carried the change has already started; the cached filters apply from
+    the next one.
+    """
+
+    async def cache(config: dict) -> None:
+        filters = triggers.parse(config)
+        if filters is None:
+            log.info("%s has no robotci.yaml ci: section; filters unchanged", repo_name)
+            return
+        with session_scope() as db:
+            connected = repo.get_repo_by_full_name(db, repo_name)
+            if connected is None:
+                log.info(
+                    "%s is not a connected repository; ci: filters %s not cached",
+                    repo_name,
+                    filters.as_dict(),
+                )
+                return
+            branches = list(filters.branches)
+            repo.update_repo(
+                db,
+                connected.model_copy(
+                    update={
+                        "branch": branches[0],
+                        "branches": branches[1:],
+                        "path_include": list(filters.path_include),
+                        "path_exclude": list(filters.path_exclude),
+                        "filters_source": "robotci.yaml",
+                    }
+                ),
+            )
+        log.info("cached %s trigger filters from robotci.yaml: %s", repo_name, filters)
+
+    return cache
+
+
+async def _persist_scenario_events(run_id: str, bus: EventBus) -> None:
+    """Mirror live Scenario transitions into the API store.
+
+    The orchestrator owns the event stream and cannot import the API store.
+    Consuming the same stream here keeps REST's database-derived worker counts
+    correct while a suite is running, including the transition to ``running``.
+    """
+    async for event in bus.subscribe(run_id):
+        if event.type is EventType.SCENARIO_CREATED:
+            scenario = Scenario(**event.data)
+        elif event.type is EventType.SCENARIO_STARTED:
+            with session_scope() as db:
+                scenario = repo.get_scenario(db, str(event.data.get("scenario_id")))
+                if scenario is None:
+                    continue
+                scenario = scenario.model_copy(
+                    update={
+                        "status": ScenarioStatus.RUNNING,
+                        "worker_id": event.data.get("worker_id"),
+                    }
+                )
+                repo.upsert_scenario(db, scenario)
+            continue
+        elif event.type is EventType.SCENARIO_FINISHED:
+            scenario = Scenario(**event.data)
+        else:
+            continue
+        with session_scope() as db:
+            repo.upsert_scenario(db, scenario)
 
 
 def _devin_or_none() -> Any:
@@ -140,6 +266,7 @@ async def _start_run(
     bus: EventBus,
     settings: Settings,
     background: BackgroundTasks,
+    suite_size: int | None = None,
 ) -> dict[str, Any]:
     """Create the run, announce it, and hand the pipeline to a background task."""
     existing = repo.find_active_run(db, repo_name, sha)
@@ -147,6 +274,7 @@ async def _start_run(
         # GitHub redelivers; two pipelines racing on one repo fight over branches.
         return {
             "ignored": "a run for this commit is already in flight",
+            "reason_code": "already_in_flight",
             "run_id": existing.id,
             "dashboard_url": _dashboard_url(settings, existing.id),
         }
@@ -164,7 +292,7 @@ async def _start_run(
     db.commit()
 
     await events.emit(bus, run.id, EventType.RUN_CREATED, run.model_dump(mode="json"))
-    background.add_task(_drive_pipeline, run.id, bus, settings)
+    background.add_task(_drive_pipeline, run.id, bus, settings, suite_size=suite_size)
 
     return {"run_id": run.id, "dashboard_url": _dashboard_url(settings, run.id)}
 
@@ -194,25 +322,64 @@ async def github_push(
 
     event = request.headers.get("X-GitHub-Event", "push")
     if event != "push":
-        return {"ignored": f"event {event} is not a push"}
+        return _ignored(f"event {event} is not a push", "not_a_push")
 
     repo_name = str(payload.get("repository", {}).get("full_name") or "")
     ref = str(payload.get("ref") or "")
     branch = ref.removeprefix("refs/heads/")
 
-    if settings.target_repo and repo_name != settings.target_repo:
-        return {"ignored": f"{repo_name} is not TARGET_REPO"}
-    if branch != settings.target_branch:
-        return {"ignored": f"{ref} is not TARGET_BRANCH"}
     if payload.get("deleted"):
-        return {"ignored": "branch deletion"}
+        return _ignored("branch deletion", "branch_deleted")
 
     head = payload.get("head_commit") or {}
     sha = str(payload.get("after") or head.get("id") or "")
     if not sha or set(sha) == {"0"}:
-        return {"ignored": "no head commit"}
+        return _ignored("no head commit", "no_head_commit")
 
-    return await _start_run(
+    connected = repo.get_repo_by_full_name(db, repo_name)
+    if connected is not None:
+        filters = triggers.from_registry(
+            branch=connected.branch,
+            branches=connected.branches,
+            path_include=connected.path_include,
+            path_exclude=connected.path_exclude,
+        )
+        filters_source = connected.filters_source
+        suite_size = connected.suite_size
+    else:
+        if settings.target_repo and repo_name != settings.target_repo:
+            return _ignored(
+                f"{repo_name} is not a connected repository and is not TARGET_REPO",
+                "repo_not_connected",
+            )
+        # No registry row: fall back to the single-repo env configuration,
+        # which is the demo/self-hosted path.
+        filters = triggers.from_registry(branch=settings.target_branch)
+        filters_source = "settings"
+        suite_size = None
+
+    paths = triggers.changed_paths(payload)
+    decision = triggers.evaluate(filters, branch=branch, paths=paths)
+    log.info(
+        "push %s@%s ref=%s filters=%s source=%s -> %s: %s",
+        repo_name,
+        sha[:7],
+        ref or "(none)",
+        filters.as_dict(),
+        filters_source,
+        decision.code,
+        decision.reason,
+    )
+    if not decision.start:
+        return _ignored(decision.reason, decision.code, filters=filters)
+
+    if connected is not None:
+        repo.update_repo(
+            db,
+            connected.model_copy(update={"last_push_at": datetime.now(UTC)}),
+        )
+
+    started = await _start_run(
         repo_name=repo_name,
         sha=sha,
         branch=branch or settings.target_branch,
@@ -226,7 +393,9 @@ async def github_push(
         bus=bus,
         settings=settings,
         background=background,
+        suite_size=suite_size,
     )
+    return {**decision.as_dict(), **started}
 
 
 @router.post("/manual")

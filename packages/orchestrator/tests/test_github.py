@@ -87,5 +87,13 @@ def test_render_pr_body_contains_the_before_after_evidence() -> None:
     assert body.endswith("\n")
 
 
+def test_render_pr_body_marks_missing_after_video_as_unverified() -> None:
+    report = make_report()
+    report.incidents[0].after_video = None
+    body = github.render_pr_body(report)
+    assert "no verified after-video; proof is unavailable" in body
+    assert "artifacts/before.mp4" in body
+
+
 def test_coauthor_trailer_credits_the_agents() -> None:
     assert github.COAUTHOR_TRAILER.startswith("Co-Authored-By:")

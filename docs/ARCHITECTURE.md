@@ -70,8 +70,11 @@ process:
                                             └──────────────────┘
 ```
 
-Four things run: uvicorn, `npm run dev`, a pool of MuJoCo worker processes, and
-N Devin sessions in the cloud. State lives in SQLite (WAL mode, so the pipeline
+Four things run *during a run*: uvicorn, `npm run dev`, a pool of MuJoCo worker
+processes, and N Devin sessions in the cloud. Between runs only the first two
+exist — the worker pool is constructed per run and the sessions are created and
+released by the pipeline. Measured idle cost and cold-start latency are in
+[`DORMANCY.md`](DORMANCY.md). State lives in SQLite (WAL mode, so the pipeline
 writes while the dashboard reads) and files under `ARTIFACTS_DIR`.
 
 The pipeline runs **in-process** with the API rather than as a worker queue.
@@ -87,7 +90,7 @@ pipeline can move to its own process without touching a router.
 TRIGGERED
    ↓  clone repo @ sha, read robotci.yaml                    [no agent]
 RESOLVE_MODEL
-   ↓  Menagerie lookup; Modeler agent only on a miss         [oracle-first]
+   ↓  shipped/converted model or Menagerie lookup; Modeler only on a miss [oracle-first]
 BUILD_HARNESS
    ↓  Harness Builder binds pushed code to MuJoCo            [agent + smoke test]
 DESIGN_SCENARIOS
@@ -104,10 +107,11 @@ FIX          ⋯ fan-out, one Fixer per confirmed cause        [agents + oracle]
 VERIFY
    ↓  merge all patches, re-run the FULL suite               [oracle + Tech Lead]
    ├── still failing, budget left ───────────────────────▶  back to FIX
-   ├── budget exhausted ─────────────────────────────────▶  FAILED_UNRESOLVED
+   ├── red/regressed/conflicted ─────────────────────────▶  REPORT
+   ├── infrastructure crash ────────────────────────────▶  FAILED_UNRESOLVED
 REPORT
-   ↓  incident report from confirmed findings                [agent]
-PR_OPENED                                                    [terminal]
+   ├── full suite green, no regressions/conflicts ─────────▶ PR_OPENED [terminal]
+   └── unresolved findings ────────────────────────────────▶ FAILED_UNRESOLVED [terminal]
 ```
 
 Terminal states: `PASSED_CLEAN`, `PR_OPENED`, `FAILED_UNRESOLVED`.
@@ -161,7 +165,7 @@ QA Lead agent ┘                                                  │
                                         │
                                      VERIFY (full suite, merged)
                                         │
-                                     Reporter ──▶ Report ──▶ PR
+                                     Reporter ──▶ Report ──▶ PR (green only)
 ```
 
 The `diagnosis` string is the hinge of the entire system. It is where the
@@ -189,5 +193,6 @@ for the sync rules and the codegen escape hatch.
   orchestrator mediates every exchange. See `AGENT_ROLES.md` — this constraint
   turned out to be the most interesting part of the design.
 * **No retry-until-green.** The iteration budget is finite and
-  `FAILED_UNRESOLVED` is a legitimate outcome. A system that always reports
-  success is a system whose success means nothing.
+  `FAILED_UNRESOLVED` is a legitimate outcome. A red or regressed verification
+  writes its report as a commit comment and failure status; it never pushes a
+  branch or opens a PR.

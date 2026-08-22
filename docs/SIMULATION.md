@@ -13,14 +13,17 @@ follows from it.
 
 ## Model resolution
 
-Library first, always. Resolution order:
+Library and repository evidence first. Resolution order:
 
 1. `robotci.yaml` names `robot.menagerie` → use it.
 2. `robotci.yaml` names `robot.model_path` → use it.
-3. Automatic identification against the local Menagerie index → use it.
-4. Nothing matched → the **Modeler agent** synthesizes MJCF.
+3. A compiling, actuated MJCF shipped by the repo → use it.
+4. A repo URDF/xacro converted to MJCF and validated by MuJoCo → use it.
+5. Automatic identification against the local Menagerie index → use it.
+6. Nothing matched → the **Modeler agent** synthesizes MJCF.
 
-Steps 1–3 cost no agent time and produce a physically curated model. Step 4 is
+Steps 1–5 cost no agent time. Steps 1 and 5 use curated Menagerie models;
+steps 3 and 4 use the repo's own model evidence. Step 6 is
 the more impressive demo and the worse engineering outcome, which is why it is
 genuinely last rather than nominally last.
 
@@ -29,11 +32,17 @@ genuinely last rather than nominally last.
 In descending reliability, implemented in `models/resolver.py`:
 
 1. An explicit config entry.
-2. A URDF/xacro in the repo — joint counts and link names usually name the
-   vendor outright.
-3. Driver imports and package names (`franka`, `ur_rtde`, `pymycobot`).
-4. Joint limit tables and DH/calibration constants — a 7-DOF arm with a
-   specific limit set is identifiable even when nothing is named.
+2. A compiling, actuated in-repo MJCF.
+3. A validated URDF/xacro conversion.
+4. Driver imports and dependency/readme names matched to Menagerie.
+5. Joint limit tables and kinematic similarity.
+
+Dependency and prose matches are explicitly approximate name guesses and carry
+lower confidence than a shipped or converted model. Every resolution records
+its concrete provenance, processing steps, and known source license. Resolved
+models are cached outside per-run artifacts using the repository identity,
+model-input fingerprint, and robot config; a missing or unloadable cached path
+is a cache miss.
 
 ### The Menagerie index
 
@@ -193,8 +202,12 @@ and these clips end up in a PR body where nobody has context.
 
 The **before/after pair** is the closing argument of the demo: identical seed,
 identical world, robot failing on the left and succeeding on the right, with
-nothing between them but an agent's patch. Same seed on both sides or the
-comparison means nothing.
+nothing between them but an agent's patch. The before clip is the failing
+episode; the after clip is a separate post-fix simkit run of that same seed,
+written under a distinct artifact path. Same seed on both sides or the
+comparison means nothing. If the post-fix run fails or recording is unavailable,
+the report says that no verified after-video exists instead of reusing the
+failure clip.
 
 ## The CLI is the agent-facing API
 

@@ -86,17 +86,26 @@ and the client already holds the run. The UI drives `PipelineTimeline` from it.
 |---|---|---|
 | `agent.created` | before the Devin session is requested | full `Agent` |
 | `agent.updated` | any non-status field changes | `{agent_id, ...changed fields}` |
-| `agent.status_changed` | any status transition | `{agent_id, status, previous_status}` |
+| `agent.status_changed` | any status transition | `{agent_id, status, previous_status, finished_at?}` |
 | `agent.activity` | new transcript line | `{agent_id, text, ts}` |
 
 `agent.created` is emitted **before** the API call, with `status: "starting"`
 and a null `session_id`. A card appearing instantly and then filling in reads as
 alive; a five-second blank grid reads as hung.
 
+`agent.created` carries `parent_agent_id`. These parent links are the
+queryable source of the agent tree (including the children of each cluster
+owner); the tree is no longer inferred from timing or role names.
+
 `agent.updated` is a **partial patch**, keyed by `agent_id`, and carries only the
 fields that changed. It is how `session_url`, `desktop_url`, `issue` and `step`
 arrive after the card is already on screen — the session id and any live view of
 the agent's machine do not exist at `agent.created` time.
+
+Terminal `agent.status_changed` events also carry the agent's authoritative
+`finished_at`. Non-terminal status changes omit it; clients must not invent a
+finish time for those transitions. For compatibility with older events, a
+terminal status without `finished_at` may use the event timestamp as a fallback.
 
 `desktop_url` is populated only when the session actually exposes an embeddable
 view of its machine; otherwise it stays null and the card shows the activity
@@ -126,10 +135,10 @@ recipient's prompt, not before. `TeamChat` and `AgentGraph` both consume this.
 | type | when | `data` |
 |---|---|---|
 | `scenario.created` | matrix generated | full `Scenario` (status `pending`) |
-| `scenario.started` | worker picks it up | `{scenario_id, worker_id}` |
+| `scenario.started` | worker picks it up | `{scenario_id, worker_id, attempt}` |
 | `scenario.progress` | while simulating, throttled | `{scenario_id, progress, sim_time_s, live_frame_path}` |
 | `scenario.finished` | result available | full `Scenario` |
-| `suite.progress` | every N completions | `{total, completed, passed, failed, running, workers}` |
+| `suite.progress` | every N completions | `{total, completed, passed, failed, running, queued, workers}` |
 | `worker.pool_changed` | pool resized or saturation changes | `{workers, busy, queued, reason}` |
 
 The whole matrix is emitted as `scenario.created` up front, so
@@ -140,6 +149,13 @@ the things worth showing.
 `suite.progress` is redundant with counting `scenario.finished` events. It
 exists so the index page and any late subscriber get a summary without
 replaying the whole matrix.
+
+Infrastructure errors may be retried after a worker is reacquired. Intermediate
+attempts emit another `scenario.started` with an incremented `attempt`; only
+the final attempt emits `scenario.finished`. A timeout remains a scenario
+`error` with `error_kind: "timeout"` and is never retried. Other worker or
+harness errors use `error_kind: "infra"` and report their retry count and
+`retry_reason` on the final `Scenario`.
 
 ## Live simulation feeds
 

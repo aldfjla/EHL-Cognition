@@ -7,21 +7,25 @@ model path plus provenance, or an honest miss that tells the Modeler agent what
 was already tried.
 
 Inputs:  the customer checkout path, the parsed ``robotci.yaml``.
-Outputs: a :class:`Resolution` — source, path, confidence, and a report string.
+Outputs: a :class:`Resolution` — source, path, provenance, and a report string.
 
 Identification signals, in order of reliability
 -----------------------------------------------
 1. An explicit ``robot.menagerie`` or ``robot.model_path`` in the config.
-2. A URDF/xacro in the repo — parse it for joint count and link names, which
-   usually name the vendor outright.
-3. Driver imports and package names (``franka``, ``ur_rtde``, ``pymycobot``).
-4. Joint limit tables and DH/calibration constants — a 7-DOF arm with these
-   specific limits is identifiable even when nothing is named.
+2. A compiling, actuated MJCF shipped by the repo.
+3. A repo URDF/xacro converted to MJCF and validated by MuJoCo.
+4. Vendor imports, dependency manifests and documentation matched to Menagerie.
+5. Kinematic similarity against Menagerie.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -71,12 +75,52 @@ _SKIP_DIRS = {
     "__pycache__",
     ".mypy_cache",
     ".pytest_cache",
+    ".robotci",
+    "artifacts",
+    "fixtures",
+    "test",
+    "tests",
 }
 
 _IMPORT_RE = re.compile(
     r"^\s*(?:from\s+([A-Za-z_][A-Za-z0-9_.]*)|import\s+([A-Za-z_][A-Za-z0-9_.]*))",
     re.MULTILINE,
 )
+_NAME_TOKENS_RE = re.compile(r"[a-z0-9]+")
+_GENERIC_NAME_TOKENS = {
+    "arm",
+    "base",
+    "cart",
+    "cartpole",
+    "gripper",
+    "hand",
+    "mobile",
+    "robot",
+    "robotics",
+    "ros",
+    "vehicle",
+    "wheel",
+}
+_PROSE_MATCH_SCORE = 0.55
+# This keeps a lone prose/name guess below kinematic and SDK evidence.
+_IDENTIFICATION_ACCEPTANCE_THRESHOLD = 0.5
+_MODEL_MANIFESTS = {
+    "package.xml",
+    "pyproject.toml",
+    "requirements.txt",
+    "setup.py",
+}
+_MODEL_MESH_SUFFIXES = {
+    ".3ds",
+    ".dae",
+    ".fbx",
+    ".glb",
+    ".gltf",
+    ".obj",
+    ".off",
+    ".ply",
+    ".stl",
+}
 
 
 @dataclass
@@ -93,32 +137,55 @@ class Resolution:
     #: the Modeler agent verbatim so it does not repeat the same searches.
     report: str = ""
     candidates: list[str] = field(default_factory=list)
+    provenance: str | None = None
+    license: str | None = None
+    processing_steps: list[str] = field(default_factory=list)
+    approximate: bool = False
+    cache_hit: bool = False
 
 
-def resolve(repo_dir: Path, config: dict) -> Resolution:
+def resolve(
+    repo_dir: Path,
+    config: dict,
+    output_dir: Path | None = None,
+    cache_dir: Path | None = None,
+    repo_identity: str | None = None,
+) -> Resolution:
     """Run the full resolution order. Never raises — a miss is a valid result."""
-    repo_dir = Path(repo_dir)
+    repo_dir = Path(repo_dir).resolve()
     robot = (config or {}).get("robot") or {}
     library = menagerie.default_dir()
     tried: list[str] = []
+    rejected_explicit: str | None = None
+    identity = repo_identity or str(repo_dir.resolve())
+    fingerprint = fingerprint_inputs(repo_dir, robot)
+
+    if cache_dir is not None:
+        cached = _load_cache(Path(cache_dir), identity, fingerprint)
+        if cached is not None:
+            return cached
 
     name = robot.get("menagerie")
     if name:
         model = menagerie.get(str(name), library)
         if model is not None:
             path = menagerie.resolve_model_path(model, library)
-            return Resolution(
+            result = Resolution(
                 found=True,
                 source="menagerie",
                 name=model.name,
                 model_path=str(path),
                 dof=model.dof,
                 confidence=1.0,
+                provenance=f"robotci.yaml robot.menagerie={model.name}",
+                license=menagerie.read_license(model, library),
+                processing_steps=["Menagerie lookup"],
                 report=(
                     f"robotci.yaml named Menagerie model {model.name!r} "
                     f"({model.vendor}, {model.dof} dof); used as-is."
                 ),
             )
+            return _store_cache(result, cache_dir, identity, fingerprint)
         near = [m.name for m in menagerie.search(str(name), library)]
         tried.append(
             f"robotci.yaml named Menagerie model {name!r}, which is not in the "
@@ -130,21 +197,72 @@ def resolve(repo_dir: Path, config: dict) -> Resolution:
     if explicit:
         candidate = (repo_dir / str(explicit)).resolve()
         if candidate.is_file():
-            return Resolution(
-                found=True,
-                source="repo",
-                name=candidate.stem,
-                model_path=str(candidate),
-                dof=menagerie.count_joints(candidate),
-                confidence=1.0,
-                report=f"robotci.yaml named in-repo model {explicit!r}; used as-is.",
+            valid, detail, dof = _validate_mjcf(candidate, require_actuators=False)
+            if valid:
+                result = Resolution(
+                    found=True,
+                    source="repo",
+                    name=candidate.stem,
+                    model_path=str(candidate),
+                    dof=dof,
+                    confidence=1.0,
+                    provenance=f"robotci.yaml robot.model_path={explicit}",
+                    processing_steps=["MJCF compile", "MJCF validation"],
+                    report=f"robotci.yaml named in-repo model {explicit!r}; used as-is.",
+                )
+                return _store_cache(result, cache_dir, identity, fingerprint)
+            rejected_explicit = (
+                f"robotci.yaml model_path {explicit!r} was rejected: {detail}"
             )
-        tried.append(f"robotci.yaml named robot.model_path {explicit!r}, absent")
+            tried.append(rejected_explicit)
+        else:
+            tried.append(f"robotci.yaml named robot.model_path {explicit!r}, absent")
+
+    for candidate in find_mjcf(repo_dir):
+        valid, detail, dof = _validate_mjcf(candidate, require_actuators=True)
+        if not valid:
+            tried.append(
+                f"rejected repo MJCF {candidate.relative_to(repo_dir)}: {detail}"
+            )
+            continue
+        result = Resolution(
+            found=True,
+            source="repo",
+            name=candidate.stem,
+            model_path=str(candidate),
+            dof=dof,
+            confidence=0.98,
+            provenance=f"repo MJCF {candidate.relative_to(repo_dir)}",
+            processing_steps=["MJCF compile", "MJCF validation"],
+            report=(
+                f"selected repo MJCF {candidate.relative_to(repo_dir)}; "
+                "it compiled, contains bodies and actuators, and passed validation."
+            ),
+        )
+        if rejected_explicit:
+            result.provenance = f"{rejected_explicit}; {result.provenance}"
+            result.report = f"{rejected_explicit}\n{result.report}"
+        return _store_cache(result, cache_dir, identity, fingerprint)
+
+    if output_dir is not None:
+        converted, conversion_notes = _convert_urdfs(
+            repo_dir, find_urdfs(repo_dir), Path(output_dir)
+        )
+        tried.extend(conversion_notes)
+        if converted is not None:
+            if rejected_explicit:
+                converted.provenance = f"{rejected_explicit}; {converted.provenance}"
+                converted.report = f"{rejected_explicit}\n{converted.report}"
+            return _store_cache(converted, cache_dir, identity, fingerprint)
+    elif find_urdfs(repo_dir):
+        tried.append("URDF/xacro found but no output_dir was supplied for conversion")
 
     identified = identify(repo_dir)
     if identified.found:
         identified.report = "\n".join([*tried, identified.report]).strip()
-        return identified
+        if rejected_explicit:
+            identified.provenance = f"{rejected_explicit}; {identified.provenance}"
+        return _store_cache(identified, cache_dir, identity, fingerprint)
 
     tried.append(identified.report)
     fallback = robot.get("fallback") or {}
@@ -164,7 +282,7 @@ def resolve(repo_dir: Path, config: dict) -> Resolution:
 
 def identify(repo_dir: Path) -> Resolution:
     """Infer the robot from repo contents without any config help."""
-    repo_dir = Path(repo_dir)
+    repo_dir = Path(repo_dir).resolve()
     library = menagerie.default_dir()
     notes: list[str] = []
     scored: dict[str, float] = {}
@@ -172,7 +290,13 @@ def identify(repo_dir: Path) -> Resolution:
 
     urdf = find_urdf(repo_dir)
     if urdf is not None:
-        kinematics = parse_urdf(urdf)
+        try:
+            kinematics = parse_urdf(urdf)
+        except (OSError, ET.ParseError, ValueError) as exc:
+            notes.append(
+                f"URDF {urdf.relative_to(repo_dir)} could not be parsed: {exc}"
+            )
+            kinematics = {}
         notes.append(
             f"found URDF {urdf.relative_to(repo_dir)}: {kinematics.get('dof', 0)} "
             f"joints, links {', '.join(kinematics.get('link_names', [])[:4])}"
@@ -193,8 +317,7 @@ def identify(repo_dir: Path) -> Resolution:
         for sdk in sdks:
             target = VENDOR_SDKS[sdk]
             if menagerie.get(target, library) is not None:
-                # An imported vendor SDK is a stronger signal than joint counts:
-                # nobody imports ur_rtde to drive a Panda.
+                # Imports name a vendor, but do not measure the hardware.
                 scored[target] = max(scored.get(target, 0.0), 0.85)
     else:
         notes.append("no known vendor SDK imported")
@@ -205,9 +328,13 @@ def identify(repo_dir: Path) -> Resolution:
         for model, score in menagerie.match_kinematics(len(limits), [], library):
             scored[model.name] = max(scored.get(model.name, 0.0), score * 0.7)
 
+    for model, source, matched in scan_name_matches(repo_dir, library):
+        notes.append(f"{source} mentions {matched!r}")
+        scored[model.name] = max(scored.get(model.name, 0.0), _PROSE_MATCH_SCORE)
+
     ranked = sorted(scored.items(), key=lambda item: (-item[1], item[0]))
     candidates = [name for name, _ in ranked[:5]]
-    if ranked and ranked[0][1] >= 0.6:
+    if ranked and ranked[0][1] >= _IDENTIFICATION_ACCEPTANCE_THRESHOLD:
         best = menagerie.get(ranked[0][0], library)
         if best is not None:
             return Resolution(
@@ -217,6 +344,10 @@ def identify(repo_dir: Path) -> Resolution:
                 model_path=str(menagerie.resolve_model_path(best, library)),
                 dof=best.dof,
                 confidence=round(min(ranked[0][1], 0.95), 3),
+                provenance=f"Menagerie entry {best.name}; inferred from repo signals",
+                license=menagerie.read_license(best, library),
+                processing_steps=["Menagerie lookup"],
+                approximate=True,
                 report="identified from repo contents: "
                 + "; ".join(notes)
                 + f" -> {best.name}",
@@ -237,15 +368,292 @@ def identify(repo_dir: Path) -> Resolution:
 
 def find_urdf(repo_dir: Path) -> Path | None:
     """The most likely robot description file in a checkout, if any."""
-    found: list[Path] = []
-    for path in _walk(repo_dir):
-        if path.suffix in {".urdf", ".xacro"}:
-            found.append(path)
+    found = find_urdfs(repo_dir)
     if not found:
         return None
     # Prefer a plain URDF over a xacro (no macro expansion needed) and a
     # shallower path over a deeper one.
     return min(found, key=lambda p: (p.suffix != ".urdf", len(p.parts), p.name))
+
+
+def find_urdfs(repo_dir: Path) -> list[Path]:
+    """Return all candidate URDF/xacro files in deterministic order."""
+    found = [path for path in _walk(repo_dir) if path.suffix in {".urdf", ".xacro"}]
+    return sorted(found, key=lambda p: (p.suffix != ".urdf", len(p.parts), p.name))
+
+
+def find_mjcf(repo_dir: Path) -> list[Path]:
+    """Find repo MJCF roots, excluding tests, fixtures and vendored trees."""
+    candidates: list[Path] = []
+    for path in _walk(repo_dir):
+        if path.suffix.lower() != ".xml":
+            continue
+        try:
+            root = ET.parse(path).getroot()
+        except (OSError, ET.ParseError):
+            continue
+        if root.tag.rsplit("}", 1)[-1] == "mujoco":
+            candidates.append(path)
+    return sorted(candidates, key=lambda p: (len(p.parts), p.name))
+
+
+def fingerprint_inputs(repo_dir: Path, robot_config: dict) -> str:
+    """Hash model-relevant checkout inputs and the robot config block."""
+    repo_dir = Path(repo_dir).resolve()
+    digest = hashlib.sha256()
+    digest.update(
+        json.dumps(robot_config or {}, sort_keys=True, separators=(",", ":")).encode()
+    )
+    for path in _walk(repo_dir):
+        suffix = path.suffix.lower()
+        is_mesh = suffix in _MODEL_MESH_SUFFIXES
+        is_mjcf = False
+        if suffix == ".xml":
+            try:
+                is_mjcf = ET.parse(path).getroot().tag.rsplit("}", 1)[-1] == "mujoco"
+            except (OSError, ET.ParseError):
+                continue
+        is_content_input = (
+            suffix in {".py", ".urdf", ".xacro"}
+            or is_mjcf
+            or _is_name_signal_file(path, repo_dir)
+        )
+        if not is_content_input and not is_mesh:
+            continue
+        try:
+            relative = path.relative_to(repo_dir).as_posix()
+            if is_mesh:
+                stat = path.stat()
+                payload = f"metadata:{stat.st_size}:{stat.st_mtime_ns}".encode()
+            else:
+                payload = path.read_bytes()
+        except (OSError, ValueError):
+            continue
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        digest.update(payload)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def default_cache_dir() -> Path:
+    """Durable cache location, outside per-run artifact directories."""
+    configured = os.environ.get("MODEL_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return (
+        Path(os.environ.get("ARTIFACTS_DIR", "artifacts")).expanduser() / "model-cache"
+    )
+
+
+def scan_name_matches(
+    repo_dir: Path, menagerie_dir: Path
+) -> list[tuple[menagerie.MenagerieModel, str, str]]:
+    """Match distinctive model/vendor names in manifests and prose."""
+    files = [path for path in _walk(repo_dir) if _is_name_signal_file(path, repo_dir)]
+    matches: list[tuple[menagerie.MenagerieModel, str, str]] = []
+    for path in files:
+        try:
+            text = path.read_text(errors="replace").lower()
+        except OSError:
+            continue
+        is_prose = path.name.lower().startswith("readme") or path.suffix.lower() in {
+            ".md",
+            ".rst",
+        }
+        source = "README/docs" if is_prose else "dependency manifest"
+        for model in menagerie.index(menagerie_dir):
+            matched = _distinctive_name_match(text, model.name)
+            if matched is not None:
+                matches.append((model, source, matched))
+    return matches
+
+
+def _is_name_signal_file(path: Path, repo_dir: Path) -> bool:
+    """Whether a manifest or prose file participates in model identification."""
+    name = path.name.lower()
+    return (
+        name in {"readme", "readme.md", "readme.rst"}
+        or name.startswith("readme.")
+        or name in _MODEL_MANIFESTS
+        or (
+            path.suffix.lower() in {".md", ".rst"}
+            and "docs" in {part.lower() for part in path.relative_to(repo_dir).parts}
+        )
+    )
+
+
+def _distinctive_name_match(text: str, model_name: str) -> str | None:
+    """Return a distinctive model-name match, ignoring generic robotics words."""
+    name_tokens = _NAME_TOKENS_RE.findall(model_name.lower())
+    distinctive = [
+        token
+        for token in name_tokens
+        if len(token) >= 4 and token not in _GENERIC_NAME_TOKENS
+    ]
+    if not distinctive:
+        return None
+    text_tokens = set(_NAME_TOKENS_RE.findall(text.lower()))
+    if re.search(
+        rf"(?<![a-z0-9]){re.escape(model_name.lower())}(?![a-z0-9])",
+        text.lower(),
+    ):
+        return model_name
+    hits = [token for token in distinctive if token in text_tokens]
+    if len(hits) >= 2:
+        return "+".join(hits)
+    if hits:
+        return hits[0]
+    return None
+
+
+def _convert_urdfs(
+    repo_dir: Path, candidates: list[Path], output_dir: Path
+) -> tuple[Resolution | None, list[str]]:
+    """Convert the first valid URDF/xacro, retaining honest failure notes."""
+    from simkit.models import generator
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    notes: list[str] = []
+    for source in candidates:
+        urdf = source
+        steps: list[str] = []
+        if source.suffix == ".xacro":
+            executable = shutil.which("xacro")
+            if executable is None:
+                notes.append(
+                    f"xacro {source.relative_to(repo_dir)} skipped: xacro is unavailable"
+                )
+                continue
+            expanded = output_dir / f"{source.stem}_expanded.urdf"
+            try:
+                completed = subprocess.run(
+                    [executable, str(source)],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except OSError as exc:
+                notes.append(f"xacro {source.relative_to(repo_dir)} failed: {exc}")
+                continue
+            if completed.returncode != 0 or not completed.stdout.strip():
+                detail = completed.stderr.strip() or "xacro produced no XML"
+                notes.append(f"xacro {source.relative_to(repo_dir)} failed: {detail}")
+                continue
+            try:
+                expanded.write_text(completed.stdout)
+            except OSError as exc:
+                notes.append(f"xacro {source.relative_to(repo_dir)} failed: {exc}")
+                continue
+            urdf = expanded
+            steps.append("xacro expansion")
+        try:
+            generated = generator.from_urdf(urdf, output_dir)
+            valid, detail, dof = _validate_mjcf(
+                Path(generated.model_path), require_actuators=True
+            )
+        except (OSError, ET.ParseError, ValueError) as exc:
+            notes.append(
+                f"URDF conversion {source.relative_to(repo_dir)} failed: {exc}"
+            )
+            continue
+        if not valid:
+            notes.append(
+                f"URDF conversion {source.relative_to(repo_dir)} failed validation: {detail}"
+            )
+            continue
+        steps.extend(["URDF compile", "MJCF output validation"])
+        return (
+            Resolution(
+                found=True,
+                source="repo",
+                name=Path(generated.model_path).stem,
+                model_path=generated.model_path,
+                dof=dof,
+                confidence=0.92,
+                provenance=f"converted repo {source.relative_to(repo_dir)}",
+                processing_steps=steps,
+                report=(
+                    f"converted {source.relative_to(repo_dir)} to MJCF and validated "
+                    "the compiled model with actuators."
+                ),
+            ),
+            notes,
+        )
+    return None, notes
+
+
+def _validate_mjcf(path: Path, require_actuators: bool) -> tuple[bool, str, int | None]:
+    """Validate an MJCF through the shared generator gate."""
+    import mujoco
+
+    from simkit.models import generator
+
+    try:
+        model = mujoco.MjModel.from_xml_path(str(path))
+    except (ValueError, FileNotFoundError) as exc:
+        return False, f"does not compile: {exc}", None
+    if model.nbody <= 1:
+        return False, "contains no robot bodies", None
+    if require_actuators and model.nu == 0:
+        return False, "contains no actuators", None
+    ok, detail = generator.validate(path)
+    if not ok:
+        return False, detail, None
+    dof = menagerie.count_joints(path)
+    return True, detail, dof if dof is not None else int(model.nv)
+
+
+def _cache_path(cache_dir: Path, identity: str, fingerprint: str) -> Path:
+    key = hashlib.sha256(f"{identity}\0{fingerprint}".encode()).hexdigest()
+    return cache_dir / f"{key}.json"
+
+
+def _load_cache(cache_dir: Path, identity: str, fingerprint: str) -> Resolution | None:
+    path = _cache_path(cache_dir, identity, fingerprint)
+    try:
+        payload = json.loads(path.read_text())
+        model_path = Path(payload["model_path"])
+        if not model_path.is_file():
+            return None
+        import mujoco
+
+        mujoco.MjModel.from_xml_path(str(model_path))
+        payload["cache_hit"] = True
+        payload["report"] = f"cache hit; {payload.get('report', '')}".strip()
+        payload["provenance"] = (
+            f"{payload.get('provenance')}; cache hit"
+            if payload.get("provenance")
+            else "cache hit"
+        )
+        return Resolution(**payload)
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _store_cache(
+    result: Resolution,
+    cache_dir: Path | None,
+    identity: str,
+    fingerprint: str,
+) -> Resolution:
+    if cache_dir is None or not result.found:
+        return result
+    path = _cache_path(Path(cache_dir), identity, fingerprint)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = dict(result.__dict__)
+        source_path = Path(result.model_path)
+        if source_path.is_file():
+            durable_path = path.parent / "models" / f"{path.stem}{source_path.suffix}"
+            durable_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, durable_path)
+            payload["model_path"] = str(durable_path)
+        path.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    except OSError:
+        pass
+    return result
 
 
 def parse_urdf(path: Path) -> dict:
