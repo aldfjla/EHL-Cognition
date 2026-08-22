@@ -7,15 +7,16 @@ must not reach the store at all.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 from typing import Any
 
 from fastapi.testclient import TestClient
-from orchestrator.schemas import Repo, Run, Stage
+from orchestrator.schemas import EventType, Repo, Run, Stage
 
-from app.routers.webhooks import verify_signature
+from app.routers.webhooks import _drive_pipeline, verify_signature
 from app.store import repo
 from app.store.db import session_scope
 
@@ -179,6 +180,41 @@ def test_run_created_is_published(client: TestClient, bus: Any) -> None:
     assert types[0] == "run.created"
     # The index topic mirrors run-level events for the dashboard's home page.
     assert "run.created" in [event.type.value for event in bus.history("*")]
+
+
+async def test_pipeline_error_reaches_existing_subscriber(
+    run: Run, bus: Any, settings: Any, monkeypatch: Any
+) -> None:
+    """Fatal errors publish before the run stream is closed."""
+
+    class FailingPipeline:
+        def __init__(self, _ctx: Any) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise RuntimeError("pipeline exploded")
+
+    seen: list[Any] = []
+
+    async def collect() -> None:
+        async for event in bus.subscribe(run.id):
+            seen.append(event)
+            if event.type is EventType.ERROR:
+                return
+
+    subscriber = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+    monkeypatch.setattr("app.routers.webhooks.Pipeline", FailingPipeline)
+
+    await _drive_pipeline(run.id, bus, settings)
+    await asyncio.wait_for(subscriber, timeout=1)
+
+    assert any(
+        event.type is EventType.ERROR
+        and event.data["message"] == "pipeline exploded"
+        and event.data["fatal"] is True
+        for event in seen
+    )
 
 
 def test_connected_repo_push_uses_branch_and_suite_size(
