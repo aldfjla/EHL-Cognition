@@ -478,6 +478,7 @@ __all__ = [
     "Verdict",
 ]
 
-# TODO(build): add a contract test that walks packages/contracts/schemas/*.json
-# and asserts every property name and enum member appears in the model above —
+# The models above are hand-mirrored from packages/contracts/schemas/*.json,
+# which is the source of truth the dashboard parses. tests/test_contracts.py
+# walks those files and asserts every property name and enum member lines up —
 # hand-mirroring only stays honest if something checks it.
