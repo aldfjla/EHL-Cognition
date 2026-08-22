@@ -5,6 +5,10 @@
   --muted: #9aa1ac;
   --accent: #6ea8fe;
   --border: #262b34;
+  --space-sm: 8px;
+  --space-md: 20px;
+  --space-lg: 32px;
+  --hairline: 1px solid var(--border);
 }
 
 * {
@@ -17,25 +21,38 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 32px 16px;
+  padding: var(--space-lg) 16px;
   background: var(--bg);
   color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   line-height: 1.5;
 }
 
+/* Horizontal, wrapping list with no bullets or default spacing. */
+.list-inline {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.muted {
+  color: var(--muted);
+}
+
 .card {
   width: 100%;
   max-width: 640px;
   background: var(--card);
-  border: 1px solid var(--border);
+  border: var(--hairline);
   border-radius: 16px;
-  padding: 32px;
+  padding: var(--space-lg);
 }
 
 .card__header {
   display: flex;
-  gap: 20px;
+  gap: var(--space-md);
   align-items: center;
   flex-wrap: wrap;
 }
@@ -60,19 +77,17 @@ body {
 
 .title {
   margin: 0;
-  color: var(--muted);
 }
 
 .section {
-  margin-top: 32px;
+  margin-top: var(--space-lg);
 }
 
 .section h2 {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-sm);
   font-size: 0.8rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--muted);
 }
 
 .section p {
@@ -80,12 +95,7 @@ body {
 }
 
 .stats {
-  display: flex;
-  gap: 32px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  flex-wrap: wrap;
+  gap: var(--space-lg);
 }
 
 .stats li {
@@ -100,32 +110,25 @@ body {
 
 .stats__label {
   font-size: 0.85rem;
-  color: var(--muted);
 }
 
 .tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
+  gap: var(--space-sm);
 }
 
 .tags li {
   padding: 4px 12px;
-  border: 1px solid var(--border);
+  border: var(--hairline);
   border-radius: 999px;
   font-size: 0.875rem;
-  color: var(--muted);
 }
 
 .links {
-  margin-top: 32px;
-  padding-top: 20px;
-  border-top: 1px solid var(--border);
+  margin-top: var(--space-lg);
+  padding-top: var(--space-md);
+  border-top: var(--hairline);
   display: flex;
-  gap: 20px;
+  gap: var(--space-md);
 }
 
 .links a {
