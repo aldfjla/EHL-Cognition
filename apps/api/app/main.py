@@ -18,6 +18,8 @@ Routes
 ``GET  /runs/{id}/agents``          the team
 ``GET  /agents/{id}/messages``      one agent's relayed traffic
 ``GET  /artifacts/...``             videos, reports, diffs
+``GET  /internal/db/tables``       internal database inventory and rows
+``PATCH/DELETE /internal/db/...``  internal database maintenance
 ``WS   /ws/runs/{id}``              the live event feed
 """
 
@@ -30,7 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import deps
 from app.config import get_settings, validate_paths
-from app.routers import agents, artifacts, live, repos, runs, stream, webhooks
+from app.routers import agents, artifacts, internal, live, repos, runs, stream, webhooks
 from app.store.db import get_engine
 
 
@@ -79,7 +81,7 @@ def create_app() -> FastAPI:
         }
         return {"status": "ok" if checks["database"] else "degraded", "checks": checks}
 
-    for module in (repos, webhooks, runs, agents, artifacts, live, stream):
+    for module in (repos, webhooks, runs, agents, artifacts, live, stream, internal):
         app.include_router(module.router)
 
     return app

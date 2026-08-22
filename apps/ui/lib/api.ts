@@ -14,6 +14,10 @@ import type {
   ConnectedRepo,
   ConnectRepoResponse,
   Finding,
+  InternalDbRow,
+  InternalDbRows,
+  InternalDbTable,
+  InternalDbValue,
   Message,
   Report,
   Run,
@@ -48,8 +52,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       signal: controller.signal,
     });
     if (!res.ok) {
+      let detail = "";
+      try {
+        const body = (await res.clone().json()) as { detail?: unknown };
+        if (typeof body.detail === "string") detail = `: ${body.detail}`;
+      } catch {
+        // Non-JSON error responses still retain their status and status text.
+      }
       throw new ApiError(
-        `${init?.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText}`,
+        `${init?.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText}${detail}`,
         res.status,
       );
     }
@@ -164,6 +175,49 @@ export async function updateRepo(
 /** Disconnect a repo. Past runs are kept; future pushes are ignored. */
 export async function disconnectRepo(repoId: string): Promise<void> {
   await request<unknown>(`/repos/${repoId}`, { method: "DELETE" });
+}
+
+/** Registered SQLModel tables for the local database browser. */
+export async function listInternalDbTables(): Promise<InternalDbTable[]> {
+  return request<InternalDbTable[]>("/internal/db/tables");
+}
+
+/** A page of raw stored values from one internal database table. */
+export async function listInternalDbRows(
+  table: string,
+  limit = 50,
+  offset = 0,
+): Promise<InternalDbRows> {
+  return request<InternalDbRows>(
+    `/internal/db/tables/${encodeURIComponent(table)}/rows?limit=${limit}&offset=${offset}`,
+  );
+}
+
+/** Update existing fields in one internal database row. */
+export async function updateInternalDbRow(
+  table: string,
+  primaryKey: string,
+  values: Record<string, InternalDbValue>,
+): Promise<InternalDbRow> {
+  return request<InternalDbRow>(
+    `/internal/db/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(primaryKey)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ values }),
+    },
+  );
+}
+
+/** Delete one internal database row. */
+export async function deleteInternalDbRow(
+  table: string,
+  primaryKey: string,
+): Promise<void> {
+  await request<unknown>(
+    `/internal/db/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(primaryKey)}`,
+    { method: "DELETE" },
+  );
 }
 
 /** Start a run without GitHub. The demo trigger. */
