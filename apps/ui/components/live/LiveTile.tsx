@@ -15,10 +15,10 @@
 import clsx from "clsx";
 import { useEffect, useRef } from "react";
 
-import * as api from "@/lib/api";
 import type { Scenario, ScenarioStatus } from "@/lib/types";
 
 import LiveFeed from "./LiveFeed";
+import RecordedVideo from "./RecordedVideo";
 
 const STATUS_TONE: Record<ScenarioStatus, string> = {
   pending: "text-status-pending",
@@ -92,13 +92,10 @@ export default function LiveTile({
     >
       <div className="relative aspect-video w-full overflow-hidden bg-slate-950">
         {finished && scenario.video_path ? (
-          <video
-            src={api.artifactUrl(scenario.video_path)}
+          <RecordedVideo
+            scenario={scenario}
+            videoPath={scenario.video_path}
             className="h-full w-full object-cover"
-            muted
-            loop
-            playsInline
-            autoPlay
           />
         ) : finished ? (
           <div className="flex h-full w-full items-center justify-center">
