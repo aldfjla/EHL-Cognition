@@ -99,6 +99,18 @@ async def test_failed_wait_marks_the_agent_failed(bus: FakeBus) -> None:
     assert session.agent.finished_at is not None
 
 
+async def test_terminal_status_includes_finished_at(bus: FakeBus) -> None:
+    session = await start(bus, FakeClient())
+    await session.set_status(AgentStatus.SUCCEEDED)
+
+    status_event = next(
+        data
+        for _, type_, data in bus.events
+        if type_ == "agent.status_changed" and data["status"] == "succeeded"
+    )
+    assert status_event["finished_at"] == session.agent.finished_at.isoformat()
+
+
 async def test_ask_relays_and_records_the_message(bus: FakeBus) -> None:
     client = FakeClient()
     session = await start(bus, client)

@@ -86,7 +86,7 @@ and the client already holds the run. The UI drives `PipelineTimeline` from it.
 |---|---|---|
 | `agent.created` | before the Devin session is requested | full `Agent` |
 | `agent.updated` | any non-status field changes | `{agent_id, ...changed fields}` |
-| `agent.status_changed` | any status transition | `{agent_id, status, previous_status}` |
+| `agent.status_changed` | any status transition | `{agent_id, status, previous_status, finished_at?}` |
 | `agent.activity` | new transcript line | `{agent_id, text, ts}` |
 
 `agent.created` is emitted **before** the API call, with `status: "starting"`
@@ -97,6 +97,11 @@ alive; a five-second blank grid reads as hung.
 fields that changed. It is how `session_url`, `desktop_url`, `issue` and `step`
 arrive after the card is already on screen — the session id and any live view of
 the agent's machine do not exist at `agent.created` time.
+
+Terminal `agent.status_changed` events also carry the agent's authoritative
+`finished_at`. Non-terminal status changes omit it; clients must not invent a
+finish time for those transitions. For compatibility with older events, a
+terminal status without `finished_at` may use the event timestamp as a fallback.
 
 `desktop_url` is populated only when the session actually exposes an embeddable
 view of its machine; otherwise it stays null and the card shows the activity
