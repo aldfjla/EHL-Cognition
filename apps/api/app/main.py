@@ -12,6 +12,8 @@ Routes
 ------
 ``GET  /health``                    liveness, used by scripts/dev.sh and tests
 ``POST /webhooks/github``           push trigger
+``GET  /repos``, ``POST /repos``    connected repository management
+``PATCH/DELETE /repos/{id}``        update or disconnect a repository
 ``GET  /runs``, ``/runs/{id}``      run list and detail
 ``GET  /runs/{id}/agents``          the team
 ``GET  /agents/{id}/messages``      one agent's relayed traffic
@@ -28,7 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import deps
 from app.config import get_settings, validate_paths
-from app.routers import agents, artifacts, live, runs, stream, webhooks
+from app.routers import agents, artifacts, live, repos, runs, stream, webhooks
 from app.store.db import get_engine
 
 
@@ -77,7 +79,7 @@ def create_app() -> FastAPI:
         }
         return {"status": "ok" if checks["database"] else "degraded", "checks": checks}
 
-    for module in (webhooks, runs, agents, artifacts, live, stream):
+    for module in (repos, webhooks, runs, agents, artifacts, live, stream):
         app.include_router(module.router)
 
     return app

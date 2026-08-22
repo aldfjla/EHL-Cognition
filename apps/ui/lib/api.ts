@@ -11,6 +11,8 @@
 
 import type {
   Agent,
+  ConnectedRepo,
+  ConnectRepoResponse,
   Finding,
   Message,
   Report,
@@ -51,6 +53,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         res.status,
       );
     }
+    if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
   } catch (err) {
     if (err instanceof ApiError) throw err;
@@ -126,6 +129,41 @@ export function artifactUrl(path: string): string {
     return `${API_BASE}/artifacts/video/${segments.join("/")}`;
   }
   return `${API_BASE}/artifacts/${segments.join("/")}`;
+}
+
+/** Connected repos — the ones a push will wake the system for. */
+export async function listRepos(): Promise<ConnectedRepo[]> {
+  return request<ConnectedRepo[]>("/repos");
+}
+
+/** Connect a repo. Returns the repo plus webhook setup instructions. */
+export async function connectRepo(body: {
+  full_name: string;
+  branch?: string;
+  suite_size?: number;
+}): Promise<ConnectRepoResponse> {
+  return request<ConnectRepoResponse>("/repos", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Update a connected repo's branch or suite size. */
+export async function updateRepo(
+  repoId: string,
+  body: { branch?: string; suite_size?: number },
+): Promise<ConnectedRepo> {
+  return request<ConnectedRepo>(`/repos/${repoId}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Disconnect a repo. Past runs are kept; future pushes are ignored. */
+export async function disconnectRepo(repoId: string): Promise<void> {
+  await request<unknown>(`/repos/${repoId}`, { method: "DELETE" });
 }
 
 /** Start a run without GitHub. The demo trigger. */

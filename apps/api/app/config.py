@@ -52,10 +52,11 @@ class Settings(BaseSettings):
     # -- Server ------------------------------------------------------------ #
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    api_origin: str = "http://localhost:8000"
     ui_origin: str = "http://localhost:3000"
 
     # -- Pipeline tuning --------------------------------------------------- #
-    suite_size: int = 24
+    suite_size: int = 50
     max_parallel_agents: int = 6
     max_agent_iterations: int = 3
     sim_workers: int = 4

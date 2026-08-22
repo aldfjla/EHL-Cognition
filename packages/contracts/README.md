@@ -14,6 +14,7 @@ Robot CI. Three consumers read these definitions, and all three must agree:
 | File | What it is |
 |---|---|
 | `run.json` | One CI run — a push taken from trigger to terminal state |
+| `repo.json` | One GitHub repository connected to Robot CI |
 | `agent.json` | One Devin session wrapped in a team role |
 | `message.json` | One orchestrator-mediated relay between agents |
 | `scenario.json` | One randomized world + its pass/fail result |

@@ -47,7 +47,7 @@ class ScenarioDesignerAgent(RoleAgent):
             or task.get("name")
             or "inferred from the repo",
             "success_criteria": kwargs.get("success_criteria") or task.get("success"),
-            "suite_size": kwargs.get("suite_size", 24),
+            "suite_size": kwargs.get("suite_size", 50),
             "max_axes": self.max_axes,
         }
 

@@ -290,6 +290,27 @@ class Run(_Base):
     finished_at: datetime | None = None
 
 
+class RepoRunSummary(_Base):
+    """The latest run shown alongside a connected repository."""
+
+    id: str
+    stage: Stage
+    created_at: datetime
+
+
+class Repo(_Base):
+    """A GitHub repository connected to Robot CI."""
+
+    id: str = Field(default_factory=lambda: _new_id("repo"))
+    full_name: str
+    branch: str = "main"
+    suite_size: int = Field(default=50, ge=1)
+    created_at: datetime = Field(default_factory=_now)
+    last_push_at: datetime | None = None
+    status: Literal["dormant", "running"] = "dormant"
+    latest_run: RepoRunSummary | None = None
+
+
 class Agent(_Base):
     """One Devin session wrapped in a role. A card in the dashboard grid."""
 
@@ -497,6 +518,8 @@ __all__ = [
     "MessageKind",
     "ModelSource",
     "Ref",
+    "Repo",
+    "RepoRunSummary",
     "Report",
     "RobotModel",
     "Role",

@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
 
+import AppShell from "@/components/shell/AppShell";
+
 export const metadata: Metadata = {
   title: "Robot CI",
   description:
@@ -8,15 +10,17 @@ export const metadata: Metadata = {
 };
 
 /**
- * Root layout. Deliberately minimal: the mission control page owns its own
- * grid, and a shared chrome would only fight it for vertical space.
+ * Root layout: one slim shared bar (navigation, ⌘K palette, shortcut sheet).
+ * Everything else belongs to the page — mission control owns its own grid.
  */
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className="min-h-screen">{children}</body>
+      <body className="min-h-screen">
+        <AppShell>{children}</AppShell>
+      </body>
     </html>
   );
 }

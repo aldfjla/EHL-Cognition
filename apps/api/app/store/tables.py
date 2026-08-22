@@ -51,6 +51,20 @@ class RunRow(SQLModel, table=True):
     finished_at: datetime | None = None
 
 
+class RepoRow(SQLModel, table=True):
+    """A GitHub repository connected to Robot CI."""
+
+    __tablename__ = "repos"
+    __table_args__ = (UniqueConstraint("full_name", name="uq_repos_full_name"),)
+
+    id: str = Field(primary_key=True)
+    full_name: str = Field(index=True)
+    branch: str = "main"
+    suite_size: int = 50
+    created_at: datetime
+    last_push_at: datetime | None = None
+
+
 class AgentRow(SQLModel, table=True):
     """Mirrors ``agent.json``."""
 

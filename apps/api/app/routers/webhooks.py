@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +67,9 @@ def _dashboard_url(settings: Settings, run_id: str) -> str:
     return f"{settings.ui_origin.rstrip('/')}/runs/{run_id}"
 
 
-async def _drive_pipeline(run_id: str, bus: EventBus, settings: Settings) -> None:
+async def _drive_pipeline(
+    run_id: str, bus: EventBus, settings: Settings, suite_size: int | None = None
+) -> None:
     """Run the pipeline for ``run_id`` to a terminal stage.
 
     Any failure here is *our* failure, never a robot failure: it is recorded on
@@ -95,6 +98,8 @@ async def _drive_pipeline(run_id: str, bus: EventBus, settings: Settings) -> Non
             blackboard=Blackboard(run.id),
             devin=_devin_or_none(),
             max_fix_iterations=settings.max_agent_iterations,
+            suite_size=suite_size,
+            default_suite_size=settings.suite_size,
         )
         await Pipeline(ctx).run()
     except Exception as exc:
@@ -140,6 +145,7 @@ async def _start_run(
     bus: EventBus,
     settings: Settings,
     background: BackgroundTasks,
+    suite_size: int | None = None,
 ) -> dict[str, Any]:
     """Create the run, announce it, and hand the pipeline to a background task."""
     existing = repo.find_active_run(db, repo_name, sha)
@@ -164,7 +170,7 @@ async def _start_run(
     db.commit()
 
     await events.emit(bus, run.id, EventType.RUN_CREATED, run.model_dump(mode="json"))
-    background.add_task(_drive_pipeline, run.id, bus, settings)
+    background.add_task(_drive_pipeline, run.id, bus, settings, suite_size=suite_size)
 
     return {"run_id": run.id, "dashboard_url": _dashboard_url(settings, run.id)}
 
@@ -200,10 +206,6 @@ async def github_push(
     ref = str(payload.get("ref") or "")
     branch = ref.removeprefix("refs/heads/")
 
-    if settings.target_repo and repo_name != settings.target_repo:
-        return {"ignored": f"{repo_name} is not TARGET_REPO"}
-    if branch != settings.target_branch:
-        return {"ignored": f"{ref} is not TARGET_BRANCH"}
     if payload.get("deleted"):
         return {"ignored": "branch deletion"}
 
@@ -211,6 +213,22 @@ async def github_push(
     sha = str(payload.get("after") or head.get("id") or "")
     if not sha or set(sha) == {"0"}:
         return {"ignored": "no head commit"}
+
+    connected = repo.get_repo_by_full_name(db, repo_name)
+    if connected is not None:
+        if branch != connected.branch:
+            return {"ignored": f"{ref} is not connected branch {connected.branch}"}
+        suite_size = connected.suite_size
+        repo.update_repo(
+            db,
+            connected.model_copy(update={"last_push_at": datetime.now(UTC)}),
+        )
+    else:
+        if settings.target_repo and repo_name != settings.target_repo:
+            return {"ignored": f"{repo_name} is not TARGET_REPO"}
+        if branch != settings.target_branch:
+            return {"ignored": f"{ref} is not TARGET_BRANCH"}
+        suite_size = None
 
     return await _start_run(
         repo_name=repo_name,
@@ -226,6 +244,7 @@ async def github_push(
         bus=bus,
         settings=settings,
         background=background,
+        suite_size=suite_size,
     )
 
 
