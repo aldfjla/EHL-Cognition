@@ -241,6 +241,7 @@ export function mockLiveScript(runId: string = LIVE_MOCK_RUN_ID): ScriptedLiveEv
     agent_id: designer.id,
     status: "succeeded",
     previous_status: "working",
+    finished_at: new Date(clockMs).toISOString(),
   });
   for (const scenario of scenarios) {
     push(30, "scenario.created", scenario);

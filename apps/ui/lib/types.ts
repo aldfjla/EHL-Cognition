@@ -349,6 +349,8 @@ export interface EventPayloads {
     agent_id: string;
     status: AgentStatus;
     previous_status: AgentStatus | null;
+    /** Present when a terminal status is emitted. */
+    finished_at?: string | null;
   };
   "agent.updated": Partial<Agent> & { agent_id: string };
   "agent.activity": { agent_id: string; text: string; ts: string };
