@@ -105,6 +105,7 @@ async def _drive_pipeline(
             default_suite_size=settings.suite_size,
         )
         persistence = asyncio.create_task(_persist_scenario_events(run.id, bus))
+        # Let persistence subscribe before a synchronously failing pipeline emits.
         await asyncio.sleep(0)
         await Pipeline(ctx).run()
     except Exception as exc:
@@ -126,14 +127,10 @@ async def _drive_pipeline(
                 )
     finally:
         if persistence is not None:
-            if not persistence.done():
-                await bus.close(run.id)
-            try:
-                await asyncio.shield(persistence)
-            except asyncio.CancelledError:
+            await bus.close(run.id)
+            if asyncio.current_task().cancelling():
                 persistence.cancel()
-                await asyncio.gather(persistence, return_exceptions=True)
-                raise
+            await persistence
 
 
 async def _persist_scenario_events(run_id: str, bus: EventBus) -> None:

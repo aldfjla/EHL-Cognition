@@ -131,6 +131,8 @@ def test_shipping_a_fix_must_pass_through_verify() -> None:
 
 def test_a_clean_suite_exits_without_agents() -> None:
     assert Stage.PASSED_CLEAN in TRANSITIONS[Stage.RUN_SUITE]
+    assert can_transition(Stage.RUN_SUITE, Stage.PASSED_CLEAN)
+    assert not can_transition(Stage.RUN_SUITE, Stage.INVESTIGATE)
 
 
 def test_empty_config_gets_default_axes_and_diverse_parameters(
@@ -156,8 +158,6 @@ def test_worker_count_uses_context_setting(
     ctx.sim_workers = 2
 
     assert Pipeline(ctx)._worker_count() == min(2, os.cpu_count() or 1)
-    assert can_transition(Stage.RUN_SUITE, Stage.PASSED_CLEAN)
-    assert not can_transition(Stage.RUN_SUITE, Stage.INVESTIGATE)
 
 
 def test_every_stage_can_reach_a_terminal_stage() -> None:
