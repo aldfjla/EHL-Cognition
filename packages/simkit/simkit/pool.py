@@ -1,8 +1,22 @@
-"""A small process pool with explicit worker slots and crash recovery."""
+"""A crash-tolerant process pool for deterministic simulation work.
+
+``ProcessPoolExecutor`` is the wrong primitive here: one segfault poisons the
+executor, and it has no stable worker identity, resize operation, or per-job
+cancellation. Processes isolate arbitrary customer control code and avoid the
+GIL that would make threads a poor fit for CPU-heavy harnesses. They also let
+MuJoCo use separate GL contexts; ``spawn`` is used instead of ``fork`` because
+forking after EGL/GL state has been touched can hang or corrupt contexts.
+
+Scheduling state lives in the parent, which owns one task queue per worker slot
+and dispatches only to known idle slots. Events are drained by one dispatcher
+thread, and ``on_event`` callbacks run there while the pool lock is held. They
+must therefore be cheap and non-blocking.
+"""
 
 from __future__ import annotations
 
 import atexit
+import multiprocessing
 import os
 import queue
 import threading
@@ -108,6 +122,13 @@ class Batch:
 
     def results(self, timeout: float | None = None) -> list[EpisodeResult]:
         """Block until all jobs are terminal and return jobs that ran."""
+        indexed = self.results_by_index(timeout=timeout)
+        return [indexed[index] for index in sorted(indexed)]
+
+    def results_by_index(
+        self, timeout: float | None = None
+    ) -> dict[int, EpisodeResult]:
+        """Block until terminal and return results keyed by scenario index."""
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._condition:
             while len(self._results) + len(self._cancelled) < len(self.jobs):
@@ -117,7 +138,7 @@ class Batch:
                 if remaining == 0:
                     raise TimeoutError(f"batch {self.id} did not finish")
                 self._condition.wait(remaining)
-            return [self._results[index] for index in sorted(self._results)]
+            return dict(self._results)
 
     def done(self) -> bool:
         with self._condition:
@@ -149,6 +170,7 @@ class _Slot:
     process: Any
     job: Job | None = None
     stopping: bool = False
+    retiring: bool = False
 
 
 class WorkerPool:
@@ -168,9 +190,7 @@ class WorkerPool:
         self._target_workers = max(1, int(configured))
         self._on_event = on_event
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
-        self._context: BaseContext = __import__("multiprocessing").get_context(
-            mp_context
-        )
+        self._context: BaseContext = multiprocessing.get_context(mp_context)
         self._event_queue = self._context.Queue()
         self._slots: dict[str, _Slot] = {}
         self._queued: deque[tuple[Batch, Job]] = deque()
@@ -180,7 +200,8 @@ class WorkerPool:
         self._shutting_down = False
         self._dispatcher: threading.Thread | None = None
         self._last_reason = ""
-        atexit.register(self.shutdown, wait=False)
+        self._shutdown_hook = self.shutdown
+        atexit.register(self._shutdown_hook, wait=False)
 
     @property
     def workers(self) -> int:
@@ -189,6 +210,8 @@ class WorkerPool:
 
     def start(self) -> Self:
         with self._lock:
+            if self._shutting_down:
+                raise RuntimeError("worker pool has been shut down")
             if self._started:
                 return self
             self._started = True
@@ -204,6 +227,8 @@ class WorkerPool:
         return self
 
     def submit(self, jobs: list[Job], *, reason: str = "") -> Batch:
+        if self._shutting_down:
+            raise RuntimeError("worker pool has been shut down")
         self.start()
         normalized: list[Job] = []
         batch_id = uuid.uuid4().hex
@@ -267,8 +292,13 @@ class WorkerPool:
     def resize(self, workers: int, *, reason: str = "") -> None:
         target = max(1, int(workers))
         with self._lock:
+            if self._shutting_down:
+                raise RuntimeError("worker pool has been shut down")
             self.start()
             self._target_workers = target
+            for slot in self._slots.values():
+                if int(slot.worker_id[1:]) < target:
+                    slot.retiring = False
             while len(self._slots) < target:
                 next_index = next(
                     index for index in range(target) if f"w{index}" not in self._slots
@@ -282,6 +312,11 @@ class WorkerPool:
                 slot = self._slots[worker_id]
                 if slot.job is None:
                     self._stop_slot(slot)
+                else:
+                    slot.retiring = True
+            if len(self._slots) <= target:
+                for slot in self._slots.values():
+                    slot.retiring = False
             self._last_reason = reason
             self._emit_state(reason or "pool resized")
             self._dispatch_locked()
@@ -297,9 +332,12 @@ class WorkerPool:
 
     def shutdown(self, *, wait: bool = True) -> None:
         with self._lock:
-            if not self._started or self._shutting_down:
+            atexit.unregister(self._shutdown_hook)
+            if self._shutting_down:
                 return
             self._shutting_down = True
+            if not self._started:
+                return
             slots = list(self._slots.values())
             for slot in slots:
                 if not slot.stopping:
@@ -386,11 +424,18 @@ class WorkerPool:
         slot = self._slot_for(job_id)
         if slot is not None:
             slot.job = None
+            retiring = slot.retiring
         result = event["result"]
         batch._record_result(job, result)
         public = {key: value for key, value in event.items() if key != "result"}
         public.update(_result_event_fields(result))
         self._call_event(public)
+        if slot is not None and retiring:
+            if len(self._slots) > self._target_workers:
+                self._stop_slot(slot)
+                self._emit_state("retired worker after resize")
+            else:
+                slot.retiring = False
 
     def _poll_deaths_locked(self) -> None:
         for slot in list(self._slots.values()):
@@ -438,7 +483,7 @@ class WorkerPool:
         idle = [
             slot
             for slot in sorted(self._slots.values(), key=lambda item: item.worker_id)
-            if slot.job is None and not slot.stopping
+            if slot.job is None and not slot.stopping and not slot.retiring
         ]
         while idle and self._queued:
             _, job = self._queued.popleft()

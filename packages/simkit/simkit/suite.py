@@ -1,4 +1,23 @@
-"""Run a deterministic scenario matrix on the explicit simkit worker pool."""
+"""Run deterministic scenario matrices on the explicit simkit worker pool.
+
+Responsibility
+--------------
+Turn scenario specifications into jobs, own suite ordering and recording
+policy, and aggregate results. The suite is the boundary between a scenario
+matrix and the oracle's one-scenario runner.
+
+Parallelism
+-----------
+Parallelism belongs to the parent-side :class:`~simkit.pool.WorkerPool`;
+workers only execute one deterministic scenario at a time. Scheduling state,
+callbacks, cancellation, and recovery stay outside the simulation process.
+
+Determinism-under-parallelism
+-----------------------------
+Keeping scheduling outside the simulation means a run has the same
+``(model, harness, seed)`` result regardless of pool width, worker replacement,
+or live-feed observers.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +46,11 @@ def run_suite(
     observe_hz: float = 2.0,
     pool: WorkerPool | None = None,
 ) -> list[EpisodeResult]:
-    """Execute scenarios, returning results ordered by their input index."""
+    """Execute scenarios, returning results ordered by their input index.
+
+    Progress is emitted from pool events so caller-owned pools and internally
+    owned pools share one notification path.
+    """
     scenarios = list(scenarios or [])
     if not scenarios:
         return []
@@ -61,39 +84,23 @@ def run_suite(
     )
     try:
         batch = event_pool.submit(jobs)
-        results = batch.results()
+        results_by_index = batch.results_by_index()
 
         if policy == "failures":
             replay_jobs = [
                 _replay_job(job, result)
-                for job, result in zip(
-                    jobs, _results_by_index(jobs, results), strict=False
-                )
+                for job in jobs
+                if (result := results_by_index.get(job.index)) is not None
                 if result.status == "failed"
             ]
             if replay_jobs:
                 replay = event_pool.submit(
                     replay_jobs, reason="record failing scenarios"
                 )
-                replay_results = replay.results()
-                for job, replay_result in zip(
-                    replay_jobs, replay_results, strict=False
-                ):
+                for index, replay_result in replay.results_by_index().items():
                     if replay_result.video_path:
-                        results_by_index = {
-                            job.index: value
-                            for job, value in zip(jobs, results, strict=False)
-                        }
-                        results_by_index[
-                            job.index
-                        ].video_path = replay_result.video_path
-                        _notify(
-                            on_progress,
-                            results_by_index[job.index],
-                            job.index,
-                            len(scenarios),
-                        )
-        return _results_by_index(jobs, results)
+                        results_by_index[index].video_path = replay_result.video_path
+        return _results_by_index(results_by_index)
     finally:
         if remove_listener is not None:
             remove_listener()
@@ -132,7 +139,12 @@ def run_seeds(
 
 
 def summarize(results: list[Any]) -> dict[str, Any]:
-    """Aggregate into ``{total, passed, failed, errored, pass_rate}``."""
+    """Aggregate suite outcomes without conflating robot and system failures.
+
+    ``errored`` is counted separately everywhere it surfaces: conflating our
+    breakage with the robot's is how you lose a user's trust. The pass rate
+    therefore excludes infrastructure errors from its denominator.
+    """
     results = list(results or [])
     passed = sum(1 for r in results if getattr(r, "status", "") == "passed")
     failed = sum(1 for r in results if getattr(r, "status", "") == "failed")
@@ -148,7 +160,12 @@ def summarize(results: list[Any]) -> dict[str, Any]:
 
 
 def compare(before: list[Any], after: list[Any]) -> dict[str, Any]:
-    """Diff two suite runs into fixed, unchanged, and newly broken seeds."""
+    """Diff runs into fixed, unchanged, and newly broken seeds.
+
+    ``newly_broken`` is the one that matters: a regression can hide behind a
+    better aggregate pass rate, but a seed that was good and is now bad needs
+    attention regardless of other improvements.
+    """
     old = {int(getattr(r, "seed", 0)): r for r in before or []}
     new = {int(getattr(r, "seed", 0)): r for r in after or []}
 
@@ -288,15 +305,8 @@ def _notify(
         return
 
 
-def _results_by_index(
-    jobs: list[Job], results: list[EpisodeResult]
-) -> list[EpisodeResult]:
-    values = {job.index: result for job, result in zip(jobs, results, strict=False)}
-    return [values[index] for index in sorted(values)]
-
-
-def _index_for_result(jobs: list[Job], result: EpisodeResult) -> int:
-    return next(job.index for job in jobs if job.scenario_id == result.scenario_id)
+def _results_by_index(results: dict[int, EpisodeResult]) -> list[EpisodeResult]:
+    return [results[index] for index in sorted(results)]
 
 
 def _video_path(scenario: dict[str, Any], index: int) -> str:

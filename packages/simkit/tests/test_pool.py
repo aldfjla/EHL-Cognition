@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import threading
+import time
 from pathlib import Path
 
+import pytest
 from simkit.pool import Job, WorkerPool
 
 
@@ -124,3 +127,113 @@ def test_batch_cancellation_replaces_running_worker(
         assert batch.results(timeout=10) == []
         follow_up = pool.submit(make_jobs(toy_arm, sweep_harness, task, 1))
         assert follow_up.results(timeout=30)[0].status in {"passed", "failed"}
+
+    assert not [
+        child for child in multiprocessing.active_children() if child.is_alive()
+    ]
+
+
+def test_submit_and_resize_reject_shutdown_pool() -> None:
+    pool = WorkerPool(workers=1)
+    pool.shutdown()
+    with pytest.raises(RuntimeError, match="shut down"):
+        pool.submit([])
+    with pytest.raises(RuntimeError, match="shut down"):
+        pool.resize(2)
+
+
+def test_busy_resize_retires_slot_after_job_finishes(
+    toy_arm, sweep_harness, task, tmp_path
+) -> None:
+    slow = tmp_path / "slow.py"
+    slow.write_text(
+        "import time\n\n"
+        "def run_episode(model, data, params):\n"
+        "    for _ in range(8):\n"
+        "        params['step']()\n"
+        "        time.sleep(0.05)\n"
+    )
+    started = threading.Event()
+    started_count = 0
+    started_lock = threading.Lock()
+    events: list[dict] = []
+
+    def observe(event: dict) -> None:
+        nonlocal started_count
+        events.append(event)
+        if event["kind"] != "scenario_started":
+            return
+        with started_lock:
+            started_count += 1
+            if started_count == 2:
+                started.set()
+
+    jobs = make_jobs(toy_arm, sweep_harness, task, 2)
+    jobs = [
+        Job(
+            index=job.index,
+            scenario_id=job.scenario_id,
+            seed=job.seed,
+            params=job.params,
+            model_path=job.model_path,
+            harness_path=str(slow),
+            task=job.task,
+        )
+        for job in jobs
+    ]
+    pool = WorkerPool(workers=2, on_event=observe)
+    try:
+        batch = pool.submit(jobs)
+        assert started.wait(10)
+        pool.resize(1, reason="busy shrink")
+        assert pool.state()["workers"] == 2
+        results = batch.results(timeout=30)
+        assert all(result.status in {"passed", "failed"} for result in results)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and pool.state()["workers"] != 1:
+            time.sleep(0.05)
+        assert pool.state()["workers"] == 1
+        assert any(
+            event.get("reason") == "retired worker after resize" for event in events
+        )
+    finally:
+        pool.shutdown()
+
+
+def test_cancelled_batch_results_keep_their_indexes(
+    toy_arm, sweep_harness, task, tmp_path
+) -> None:
+    hang = tmp_path / "hang_one.py"
+    hang.write_text(
+        "import time\n\n"
+        "def run_episode(model, data, params):\n"
+        "    while True:\n"
+        "        time.sleep(0.01)\n"
+    )
+    jobs = make_jobs(toy_arm, sweep_harness, task, 3)
+    jobs[0] = Job(
+        index=0,
+        scenario_id="cancelled",
+        seed=jobs[0].seed,
+        params=jobs[0].params,
+        model_path=jobs[0].model_path,
+        harness_path=str(hang),
+        task=jobs[0].task,
+    )
+    started = threading.Event()
+
+    def observe(event: dict) -> None:
+        if event["kind"] == "scenario_started" and event["scenario_id"] == "cancelled":
+            started.set()
+
+    with WorkerPool(workers=2, on_event=observe) as pool:
+        batch = pool.submit(jobs)
+        assert started.wait(10)
+        assert pool.cancel_job(batch.jobs[0].job_id)
+        indexed = batch.results_by_index(timeout=30)
+
+    assert sorted(indexed) == [1, 2]
+    assert {result.scenario_id for result in indexed.values()} == {
+        "pool-1",
+        "pool-2",
+    }

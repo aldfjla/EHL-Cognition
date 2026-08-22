@@ -1,9 +1,12 @@
 """Live simulation frame side channel.
 
-Frames are deliberately kept out of the event stream.  A single JPEG is
+Frames are deliberately kept out of the event stream. A single JPEG is
 overwritten in place for each scenario, allowing a browser to fetch the latest
 state without retaining a video history or feeding rendering back into the
-physics loop.
+physics loop. Atomic publication uses a same-directory temporary file and
+``os.replace``. Any rendering, encoding, or filesystem failure disables the
+feed entirely: it never becomes a scenario error and never perturbs physics.
+That is also why visual compilation remains driven by ``record`` alone.
 """
 
 from __future__ import annotations
@@ -76,6 +79,7 @@ class LiveFrameWriter:
         self._last_capture: float | None = None
         self._disabled = not _enabled_from_environment() or self.fps <= 0
         self._closed = False
+        self._frames = 0
         self.drops = 0
 
     @staticmethod
@@ -101,6 +105,11 @@ class LiveFrameWriter:
     @property
     def rel_path(self) -> str:
         return live_frame_path(self.scenario_id)
+
+    @property
+    def has_frame(self) -> bool:
+        """Whether at least one frame has been atomically published."""
+        return self._frames > 0
 
     def maybe_capture(self, scene: Any, *, force: bool = False) -> bool:
         """Write a frame when due, degrading permanently on any failure."""
@@ -133,6 +142,7 @@ class LiveFrameWriter:
                 quality=85,
             )
             os.replace(temporary, destination)
+            self._frames += 1
             return True
         except Exception:  # noqa: BLE001 - live rendering is best effort
             self.drops += 1

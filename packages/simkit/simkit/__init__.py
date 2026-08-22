@@ -14,7 +14,16 @@ Two invariants hold everywhere in this package:
 
 __version__ = "0.1.0"
 
-from simkit.pool import Job, WorkerPool
-from simkit.suite import run_seeds
-
 __all__ = ["Job", "WorkerPool", "run_seeds"]
+
+
+def __getattr__(name: str) -> object:
+    if name in {"Job", "WorkerPool"}:
+        from simkit.pool import Job, WorkerPool
+
+        return {"Job": Job, "WorkerPool": WorkerPool}[name]
+    if name == "run_seeds":
+        from simkit.suite import run_seeds
+
+        return run_seeds
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

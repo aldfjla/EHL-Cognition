@@ -359,6 +359,7 @@ class _EpisodeLoop:
             1, round((1.0 / rate_hz) / float(scene.model.opt.timestep))
         )
         self._frame_every = max(1, round(rate_hz / 30))
+        self._last_observe: float | None = None
         collect_trace(scene, 0, trace)
         self._capture(force=True)
         self._observe(force=True)
@@ -381,6 +382,7 @@ class _EpisodeLoop:
         self.steps += 1
         collect_trace(self.scene, self.steps, self.trace)
         self._capture()
+        self._observe()
         return float(self.scene.data.time)
 
     def finish(self) -> None:
@@ -413,7 +415,7 @@ class _EpisodeLoop:
             return
         now = time.monotonic()
         interval = 1.0 / self.observe_hz if self.observe_hz > 0 else float("inf")
-        last = getattr(self, "_last_observe", None)
+        last = self._last_observe
         if not force and last is not None and now - last < interval:
             return
         self._last_observe = now
@@ -433,7 +435,7 @@ class _EpisodeLoop:
                     "sim_time_s": float(self.scene.data.time),
                     "live_frame_path": (
                         self.live_writer.rel_path
-                        if self.live_writer is not None and self.live_writer.enabled
+                        if self.live_writer is not None and self.live_writer.has_frame
                         else None
                     ),
                 }

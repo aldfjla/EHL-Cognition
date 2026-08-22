@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import mujoco
 import numpy as np
+import pytest
 from simkit import live, runner, suite
 from simkit import scenarios as scenarios_mod
 
@@ -35,6 +38,7 @@ def test_live_frame_is_atomic_and_removed_on_close(tmp_path, monkeypatch) -> Non
     scene = SimpleNamespace(data=object())
 
     assert writer.maybe_capture(scene, force=True)
+    assert writer.has_frame
     path = live.live_frame_file("run/unsafe scenario")
     assert path == tmp_path / live.live_frame_path("run/unsafe scenario")
     first = path.read_bytes()
@@ -97,6 +101,7 @@ def test_runner_observations_are_throttled_and_observer_errors_swallowed(
     toy_arm: Path, sweep_harness: Path, task: dict
 ) -> None:
     observations: list[dict] = []
+    started = time.monotonic()
 
     def observe(payload: dict) -> None:
         observations.append(payload)
@@ -112,13 +117,18 @@ def test_runner_observations_are_throttled_and_observer_errors_swallowed(
         on_observe=observe,
         observe_hz=2.0,
     )
+    elapsed = time.monotonic() - started
 
     assert result.status in {"passed", "failed"}
     assert len(observations) >= 2
+    assert len(observations) <= 2.0 * elapsed + 3.0
     assert observations[0]["kind"] == "scenario_progress"
     assert observations[0]["scenario_id"] == "progress"
     assert observations[0]["seed"] == 11
     assert all(0.0 <= event["progress"] <= 1.0 for event in observations)
+    assert [event["progress"] for event in observations] == sorted(
+        event["progress"] for event in observations
+    )
     assert all(
         set(event)
         == {
@@ -132,6 +142,101 @@ def test_runner_observations_are_throttled_and_observer_errors_swallowed(
         }
         for event in observations
     )
+
+
+def test_on_step_harness_reports_progress(
+    toy_arm: Path, task: dict, tmp_path: Path
+) -> None:
+    harness = tmp_path / "on_step_harness.py"
+    harness.write_text(
+        "import time\n"
+        "import mujoco\n\n"
+        "def run_episode(model, data, params):\n"
+        "    for _ in range(25):\n"
+        "        mujoco.mj_step(model, data)\n"
+        "        params['on_step']()\n"
+        "        time.sleep(0.01)\n"
+    )
+    observations: list[dict] = []
+
+    result = runner.run_scenario(
+        scenario_id="on-step",
+        model_path=str(toy_arm),
+        harness_path=str(harness),
+        params={},
+        seed=4,
+        task=task,
+        on_observe=observations.append,
+        observe_hz=10.0,
+    )
+
+    assert result.status in {"passed", "failed"}
+    assert len(observations) > 2
+    assert any(event["sim_time_s"] > 0 for event in observations[1:-1])
+
+
+def test_renderer_failure_does_not_make_scenario_error(
+    toy_arm: Path, sweep_harness: Path, task: dict, monkeypatch
+) -> None:
+    def explode(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("renderer unavailable")
+
+    monkeypatch.setattr(runner.mujoco, "Renderer", explode)
+    result = runner.run_scenario(
+        scenario_id="renderer-failure",
+        model_path=str(toy_arm),
+        harness_path=str(sweep_harness),
+        params={"object_mass_kg": 0.4},
+        seed=8,
+        task=task,
+        live=True,
+    )
+
+    assert result.status in {"passed", "failed"}
+
+
+def test_real_live_frame_is_published_during_run_and_removed_afterwards(
+    toy_arm: Path,
+    sweep_harness: Path,
+    task: dict,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path))
+    try:
+        model = mujoco.MjModel.from_xml_path(str(toy_arm))
+        renderer = mujoco.Renderer(model, height=32, width=32)
+        renderer.close()
+    except (mujoco.FatalError, OSError, RuntimeError, ValueError) as exc:
+        pytest.skip(f"headless renderer unavailable: {exc}")
+
+    frame = live.live_frame_file("real-live")
+    observed_paths: list[Path] = []
+
+    def observe(payload: dict) -> None:
+        path = payload["live_frame_path"]
+        if path is not None:
+            absolute = tmp_path / path
+            observed_paths.append(absolute)
+            assert absolute.exists()
+
+    result = runner.run_scenario(
+        scenario_id="real-live",
+        model_path=str(toy_arm),
+        harness_path=str(sweep_harness),
+        params={"object_mass_kg": 0.4},
+        seed=12,
+        task=task,
+        live=True,
+        on_observe=observe,
+        observe_hz=20.0,
+    )
+
+    assert result.status in {"passed", "failed"}
+    assert observed_paths
+    assert frame in observed_paths
+    assert not frame.exists()
 
 
 def test_suite_is_deterministic_across_pool_width_and_live(
