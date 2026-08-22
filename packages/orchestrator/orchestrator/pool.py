@@ -22,17 +22,20 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+import logging
 import os
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from orchestrator.bus import EventBus
 from orchestrator.schemas import EventType
+
+log = logging.getLogger(__name__)
 
 Runner = Callable[..., Any]
 ResultCallback = Callable[[Any], Awaitable[None] | None]
@@ -47,29 +50,15 @@ class _Spec:
 
 
 def _error_result(spec: _Spec, message: str) -> Any:
-    """Create the same shape as simkit's result without importing it eagerly."""
-    try:
-        from simkit.runner import EpisodeResult
+    """Create the same result shape as simkit for infrastructure failures."""
+    from simkit.runner import EpisodeResult
 
-        return EpisodeResult(
-            scenario_id=spec.scenario_id,
-            seed=spec.seed,
-            status="error",
-            error=message,
-        )
-    except Exception:  # noqa: BLE001 - fallback keeps errors representable
-        return SimpleNamespace(
-            scenario_id=spec.scenario_id,
-            seed=spec.seed,
-            status="error",
-            duration_s=0.0,
-            sim_time_s=0.0,
-            criteria=[],
-            diagnosis=None,
-            error=message,
-            video_path=None,
-            trace_path=None,
-        )
+    return EpisodeResult(
+        scenario_id=spec.scenario_id,
+        seed=spec.seed,
+        status="error",
+        error=message,
+    )
 
 
 def _run_simkit(kwargs: dict[str, Any]) -> Any:
@@ -98,7 +87,6 @@ class SuitePool:
         self.artifacts_dir = Path(artifacts_dir)
         self._runner = runner
         self._workers = workers
-        self._semaphore = asyncio.Semaphore(workers)
         self._available: deque[str] = deque(f"w{i}" for i in range(workers))
         self._busy: dict[str, str] = {}
         self._slot_lock = asyncio.Lock()
@@ -107,8 +95,10 @@ class SuitePool:
         self._batch_order: deque[int] = deque()
         self._queued = 0
         self._executor = ProcessPoolExecutor(max_workers=workers)
+        self._executor_shutdowns: set[asyncio.Task[None]] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._closed = False
+        self._saturated = False
         self._progress_interval = float(
             os.environ.get("SCENARIO_PROGRESS_INTERVAL_S", "0.5")
         )
@@ -179,7 +169,6 @@ class SuitePool:
                     slot = f"w{index}"
                     if slot not in self._busy and slot not in self._available:
                         self._available.append(slot)
-                        self._semaphore.release()
             elif workers < old:
                 removable = sorted(
                     (slot for slot in self._available if int(slot[1:]) >= workers),
@@ -188,11 +177,21 @@ class SuitePool:
                 )
                 for slot in removable:
                     self._available.remove(slot)
-                    self._semaphore._value -= 1
             self._workers = workers
             if workers > old:
-                self._executor._max_workers = workers
+                # Keep executor resizing off-loop; each generation drains its
+                # in-flight work while the new high-water executor takes over.
+                old_executor = self._executor
+                self._executor = ProcessPoolExecutor(max_workers=workers)
+                shutdown = asyncio.create_task(
+                    asyncio.to_thread(
+                        old_executor.shutdown, wait=True, cancel_futures=True
+                    )
+                )
+                self._executor_shutdowns.add(shutdown)
+                shutdown.add_done_callback(self._executor_shutdowns.discard)
             self._dispatch_waiters()
+            self._set_saturation_locked()
         await self._emit_pool_changed(reason)
 
     def snapshot(self) -> dict[str, int]:
@@ -213,13 +212,18 @@ class SuitePool:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        shutdown = asyncio.create_task(
-            asyncio.to_thread(self._executor.shutdown, wait=True, cancel_futures=True)
+        shutdowns = tuple(self._executor_shutdowns)
+        shutdowns += (
+            asyncio.create_task(
+                asyncio.to_thread(
+                    self._executor.shutdown, wait=True, cancel_futures=True
+                )
+            ),
         )
         try:
-            await asyncio.shield(shutdown)
+            await asyncio.shield(asyncio.gather(*shutdowns, return_exceptions=True))
         except asyncio.CancelledError:
-            await asyncio.shield(shutdown)
+            await asyncio.shield(asyncio.gather(*shutdowns, return_exceptions=True))
             raise
 
     def _track(self, coroutine: Awaitable[Any]) -> asyncio.Task[Any]:
@@ -297,8 +301,12 @@ class SuitePool:
                 callback_result = on_result(result)
                 if inspect.isawaitable(callback_result):
                     await callback_result
-            except Exception:  # noqa: BLE001 - callbacks must not fail a scenario
-                return result
+            except Exception as exc:  # noqa: BLE001 - callback is best effort
+                log.warning(
+                    "result callback failed for %s: %s",
+                    spec.scenario_id,
+                    exc,
+                )
         return result
 
     async def _execute_with_slot(
@@ -345,26 +353,22 @@ class SuitePool:
             if record
             else False,
         }
-        if self._runner is not None:
-            live_dir = self.artifacts_dir / "live"
-            kwargs.update(
-                {
-                    "live_frame_path": str(live_dir / f"{spec.scenario_id}.jpg"),
-                    "progress_path": str(
-                        live_dir / f"{spec.scenario_id}.progress.json"
-                    ),
-                    "progress_sidecar_path": str(
-                        live_dir / f"{spec.scenario_id}.progress.json"
-                    ),
-                    "sidecar_path": str(live_dir / f"{spec.scenario_id}.progress.json"),
-                }
-            )
-            if repo_dir is not None:
-                kwargs["repo_dir"] = str(repo_dir)
+        live_dir = self.artifacts_dir / "live"
+        kwargs.update(
+            {
+                "live_frame_path": str(live_dir / f"{spec.scenario_id}.jpg"),
+                "progress_path": str(live_dir / f"{spec.scenario_id}.progress.json"),
+            }
+        )
+        if repo_dir is not None:
+            kwargs["repo_dir"] = str(repo_dir)
         try:
             if self._runner is None:
+                from simkit.runner import run_scenario
+
+                call_kwargs = _supported_kwargs(run_scenario, kwargs)
                 return await asyncio.get_running_loop().run_in_executor(
-                    self._executor, _run_simkit, kwargs
+                    self._executor, _run_simkit, call_kwargs
                 )
             return await self._invoke_runner(kwargs)
         except Exception as exc:  # noqa: BLE001 - infrastructure stays a result
@@ -389,9 +393,9 @@ class SuitePool:
                 self._batch_order.append(batch_id)
             self._queued += 1
             self._dispatch_waiters()
-            saturated = self._queued and len(self._busy) >= self._workers
-        if saturated:
-            await self._emit_pool_changed(f"saturated: {self._queued} queued")
+            saturation_reason = self._set_saturation_locked()
+        if saturation_reason:
+            await self._emit_pool_changed(saturation_reason)
         try:
             return await waiter
         except asyncio.CancelledError:
@@ -414,16 +418,14 @@ class SuitePool:
             active = int(slot[1:]) < self._workers
             if active:
                 self._available.append(slot)
-                self._semaphore.release()
             self._dispatch_waiters()
-        if self._queued:
-            await self._emit_pool_changed(
-                f"capacity free: {max(0, self._workers - len(self._busy))} idle workers"
-            )
+            saturation_reason = self._set_saturation_locked()
+        if saturation_reason:
+            await self._emit_pool_changed(saturation_reason)
 
     def _dispatch_waiters(self) -> None:
         """Assign available slots round-robin so batches cannot starve each other."""
-        while self._available and self._semaphore._value:
+        while self._available:
             while self._batch_order:
                 batch_id = self._batch_order.popleft()
                 waiters = self._waiters.get(batch_id)
@@ -441,10 +443,18 @@ class SuitePool:
                 self._queued -= 1
                 continue
             slot = self._available.popleft()
-            self._semaphore._value -= 1
             self._busy[slot] = scenario_id
             self._queued -= 1
             waiter.set_result(slot)
+
+    def _set_saturation_locked(self) -> str | None:
+        saturated = self._queued > 0 and len(self._busy) >= self._workers
+        if saturated == self._saturated:
+            return None
+        self._saturated = saturated
+        if saturated:
+            return f"saturated: {self._queued} queued"
+        return f"capacity free: {max(0, self._workers - len(self._busy))} idle workers"
 
     def _cleanup_batch(self, batch_id: int) -> None:
         if not self._waiters.get(batch_id):
@@ -469,7 +479,7 @@ class SuitePool:
         frame = self.artifacts_dir / "live" / f"{scenario_id}.jpg"
         sidecar = self.artifacts_dir / "live" / f"{scenario_id}.progress.json"
         last_mtime: int | None = None
-        interval = min(0.05, max(0.001, self._progress_interval / 2))
+        interval = max(0.001, self._progress_interval / 2)
         while True:
             try:
                 mtime = frame.stat().st_mtime_ns
@@ -477,9 +487,6 @@ class SuitePool:
                 mtime = None
             if mtime is not None and mtime != last_mtime:
                 last_mtime = mtime
-                await asyncio.sleep(0)
-                if not sidecar.exists():
-                    await asyncio.sleep(interval)
                 progress, sim_time = _read_progress(sidecar)
                 await self.bus.emit_throttled(
                     self.run_id,
@@ -540,8 +547,6 @@ def _relative_artifact(path: str | Path, artifacts_dir: Path) -> str:
 
 def _read_progress(path: Path) -> tuple[float | None, float | None]:
     try:
-        import json
-
         payload = json.loads(path.read_text())
         return payload.get("progress"), payload.get("sim_time_s")
     except (FileNotFoundError, OSError, ValueError, TypeError, AttributeError):

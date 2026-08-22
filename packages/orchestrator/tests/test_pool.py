@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import threading
 import time
 from pathlib import Path
@@ -200,7 +199,9 @@ async def test_failure_recording_replays_once_and_emits_artifact(
     assert artifacts[0].data["path"] == "s1.mp4"
 
 
-async def test_progress_watcher_emits_only_changed_frames(tmp_path: Path) -> None:
+async def test_progress_watcher_emits_only_changed_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     bus = EventBus()
     live = tmp_path / "live"
     live.mkdir()
@@ -227,8 +228,7 @@ async def test_progress_watcher_emits_only_changed_frames(tmp_path: Path) -> Non
             error=None,
         )
 
-    old = os.environ.get("SCENARIO_PROGRESS_INTERVAL_S")
-    os.environ["SCENARIO_PROGRESS_INTERVAL_S"] = progress_interval
+    monkeypatch.setenv("SCENARIO_PROGRESS_INTERVAL_S", progress_interval)
     pool = SuitePool(
         run_id="run",
         bus=bus,
@@ -245,10 +245,6 @@ async def test_progress_watcher_emits_only_changed_frames(tmp_path: Path) -> Non
         )
     finally:
         await pool.aclose()
-        if old is None:
-            os.environ.pop("SCENARIO_PROGRESS_INTERVAL_S", None)
-        else:
-            os.environ["SCENARIO_PROGRESS_INTERVAL_S"] = old
 
     events = [
         event
