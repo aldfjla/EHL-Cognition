@@ -92,6 +92,8 @@ def run_scenario(
 ) -> EpisodeResult:
     """Execute one scenario end to end.
 
+    ``record`` turns video on; pass a path string to choose the output file.
+
     Deterministic: the same arguments always produce the same result. Any source
     of nondeterminism introduced here (thread scheduling, unseeded RNG, wall
     clock leaking into control) breaks reproducibility for every agent above.
@@ -124,9 +126,13 @@ def run_scenario(
         if record:
             from simkit.recorder import Recorder
 
-            recorder = Recorder()
+            recorder = Recorder(fps=min(30, rate_hz))
+            # `record` may name the output file directly (the record CLI and
+            # recorder.record_scenario do); otherwise it lands in ARTIFACTS_DIR.
             video_path = (
-                Path(os.environ.get("ARTIFACTS_DIR", "artifacts"))
+                Path(record)
+                if isinstance(record, str)
+                else Path(os.environ.get("ARTIFACTS_DIR", "artifacts"))
                 / f"{scenario_id}.mp4"
             )
 
