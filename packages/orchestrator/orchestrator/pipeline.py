@@ -99,8 +99,10 @@ TRANSITIONS: dict[Stage, tuple[Stage, ...]] = {
     Stage.CLUSTER_FAILURES: (Stage.INVESTIGATE, Stage.PASSED_CLEAN),
     Stage.INVESTIGATE: (Stage.FIX, Stage.FAILED_UNRESOLVED),
     Stage.FIX: (Stage.VERIFY, Stage.FAILED_UNRESOLVED),
-    # VERIFY loops back to FIX while the iteration budget holds.
-    Stage.VERIFY: (Stage.REPORT, Stage.FIX, Stage.FAILED_UNRESOLVED),
+    # Only a full green VERIFY may proceed to REPORT and then PR_OPENED.
+    Stage.VERIFY: (Stage.REPORT, Stage.FIX),
+    # REPORT writes findings for both green and failed verification; only the
+    # former returns PR_OPENED.
     Stage.REPORT: (Stage.PR_OPENED, Stage.FAILED_UNRESOLVED),
     Stage.PR_OPENED: (),
     Stage.PASSED_CLEAN: (),
@@ -199,6 +201,7 @@ class Pipeline:
         #: raw simkit results so ``simkit.suite.compare`` can diff them.
         self._before_results: list[Any] = []
         self._after_results: list[Any] = []
+        self._after_videos: dict[str, dict[str, str]] = {}
         self._fix_worktrees: list[str] = []
         self._conflicts: list[str] = []
         self._pool: SuitePool | None = None
@@ -571,15 +574,10 @@ class Pipeline:
             # The Reviewer's notes are on the board; the next FIX round reads
             # them through the relay policy.
             return Stage.FIX
-        if after.passed > before.passed:
-            # Partial progress still ships, with the unresolved incidents
-            # named honestly in the report.
-            return Stage.REPORT
-        ctx.run.error = (
-            f"fix budget exhausted after {ctx.fix_iteration} iterations with "
-            f"{after.failed} scenarios still failing"
-        )
-        return Stage.FAILED_UNRESOLVED
+        ctx.run.error = self._verification_failure_reason(after, comparison)
+        # REPORT is still required on an unsuccessful run so humans receive
+        # the incident summary, but stage_report will not push a branch.
+        return Stage.REPORT
 
     def _start_cluster_workflows(self) -> None:
         """Start one never-cancelling workflow per cluster."""
@@ -704,11 +702,53 @@ class Pipeline:
                 repo_dir=self.ctx.workspace.worktree("verify"),
             )
             if results and all(result.status == "passed" for result in results):
+                await self._record_cluster_after(work)
+                if work.worktree in self._conflicts:
+                    self._conflicts.remove(work.worktree)
                 work.outcome = "resolved"
                 self._set_cluster_phase(work, "resolved")
             else:
                 work.outcome = "unresolved"
                 self._set_cluster_phase(work, "unresolved")
+
+    async def _record_cluster_after(self, work: _ClusterWork) -> None:
+        """Record passing cluster seeds without changing authoritative records."""
+        ctx = self.ctx
+        scenarios = self._cluster_scenarios(work)
+        # A real cluster verification always creates the shared pool. Keeping
+        # this seam inert for pool-less unit fakes avoids turning a mocked
+        # verification into an unrelated MuJoCo execution.
+        if not scenarios or self._pool is None:
+            return
+        self._after_videos.pop(work.cluster.id, None)
+        record_dir = self._artifacts / "video" / "after"
+        results = await self._pool.submit(
+            [self._suite_spec(scenario) for scenario in scenarios],
+            model_path=self._model_path(),
+            harness_path=str(self._artifacts / HARNESS_FILENAME),
+            task=ctx.config.get("task", {}),
+            record="all",
+            record_dir=record_dir,
+            repo_dir=ctx.workspace.worktree("verify"),
+            reason=f"record after evidence: {work.cluster.label}",
+        )
+        videos: dict[str, str] = {}
+        before_paths = {
+            Path(scenario.video_path).resolve()
+            for scenario in scenarios
+            if scenario.video_path
+        }
+        for scenario, result in zip(scenarios, results):
+            path = getattr(result, "video_path", None)
+            if (
+                getattr(result, "status", None) == "passed"
+                and path
+                and Path(path).is_file()
+                and Path(path).resolve() not in before_paths
+            ):
+                videos[scenario.id] = str(path)
+        if videos:
+            self._after_videos[work.cluster.id] = videos
 
     async def _retry_conflicted_clusters(self) -> None:
         """Retry each conflict once after all non-conflicting patches landed."""
@@ -864,11 +904,7 @@ class Pipeline:
 
         incidents = [self._incident(cluster) for cluster in ctx.clusters]
         verdict = (
-            Verdict.FIXED
-            if after.failed == 0
-            else Verdict.UNRESOLVED
-            if after.failed >= before.failed
-            else Verdict.FIXED
+            Verdict.FIXED if self._verification_is_green(after) else Verdict.UNRESOLVED
         )
         report = Report(
             run_id=ctx.run.id,
@@ -880,6 +916,7 @@ class Pipeline:
             before=before,
             after=after,
         )
+        self._artifacts.mkdir(parents=True, exist_ok=True)
         markdown = self._artifacts / "report.md"
         markdown.write_text(github.render_pr_body(report))
         report.markdown_path = str(markdown)
@@ -889,6 +926,21 @@ class Pipeline:
         await ctx.bus.emit(
             ctx.run.id, EventType.REPORT_CREATED, report.model_dump(mode="json")
         )
+        if verdict is Verdict.UNRESOLVED:
+            if not ctx.run.error:
+                ctx.run.error = self._verification_failure_reason(
+                    after, {"newly_broken": []}
+                )
+            body = github.render_pr_body(report)
+            await github.comment_on_commit(ctx.run.repo, ctx.run.commit_sha, body)
+            await github.set_commit_status(
+                ctx.run.repo,
+                ctx.run.commit_sha,
+                "failure",
+                f"Robot CI unresolved: {ctx.run.error}",
+                target_url=ctx.run.pull_request_url,
+            )
+            return Stage.FAILED_UNRESOLVED
         return Stage.PR_OPENED
 
     async def stage_pr_opened(self) -> Stage:
@@ -1087,7 +1139,22 @@ class Pipeline:
         still_failing = any(
             s.status in (ScenarioStatus.FAILED, ScenarioStatus.ERROR) for s in scenarios
         )
-        before_video = next((s.video_path for s in scenarios if s.video_path), None)
+        before_video = next(
+            (
+                s.video_path
+                for s in scenarios
+                if s.video_path and Path(s.video_path).is_file()
+            ),
+            None,
+        )
+        after_video = next(
+            (
+                path
+                for scenario_id, path in self._after_videos.get(cluster.id, {}).items()
+                if scenario_id in {s.id for s in scenarios} and Path(path).is_file()
+            ),
+            None,
+        )
         return Incident(
             cluster_id=cluster.id,
             title=cluster.label,
@@ -1096,8 +1163,8 @@ class Pipeline:
             resolution=patch.summary if patch else "no patch accepted",
             files_changed=patch.files if patch else [],
             before_video=before_video,
-            after_video=None if still_failing else before_video,
-            status="unresolved" if still_failing or patch is None else "fixed",
+            after_video=after_video,
+            status=("unresolved" if still_failing or patch is None else "fixed"),
         )
 
     def _video_pairs(self) -> list[dict[str, Any]]:
@@ -1105,17 +1172,42 @@ class Pipeline:
             {
                 "cluster_id": cluster.id,
                 "label": cluster.label,
-                "video": next(
-                    (
-                        s.video_path
-                        for s in self.ctx.scenarios
-                        if s.cluster_id == cluster.id and s.video_path
-                    ),
-                    None,
+                "before": self._incident(cluster).before_video,
+                "after": self._incident(cluster).after_video,
+                "after_note": (
+                    "verified after-video"
+                    if self._incident(cluster).after_video
+                    else "no verified after-video; proof is unavailable"
                 ),
             }
             for cluster in self.ctx.clusters
         ]
+
+    def _verification_is_green(self, after: SuiteStats) -> bool:
+        """Return whether the current full-suite verification may ship."""
+        if after.failed != 0 or self._conflicts:
+            return False
+        if self._before_results and self._after_results:
+            from simkit import suite as suite_mod
+
+            comparison = suite_mod.compare(self._before_results, self._after_results)
+            return not comparison.get("newly_broken")
+        return True
+
+    def _verification_failure_reason(
+        self, after: SuiteStats, comparison: dict[str, Any]
+    ) -> str:
+        reasons: list[str] = []
+        if after.failed:
+            reasons.append(f"{after.failed} scenarios still failing")
+        regressions = comparison.get("newly_broken", [])
+        if regressions:
+            reasons.append(f"newly broken seeds: {', '.join(map(str, regressions))}")
+        if self._conflicts:
+            reasons.append(f"unresolved patch conflicts: {', '.join(self._conflicts)}")
+        return "verification unresolved: " + (
+            "; ".join(reasons) if reasons else "suite did not pass"
+        )
 
     def _report_title(self, before: SuiteStats, after: SuiteStats) -> str:
         fixed = after.passed - before.passed

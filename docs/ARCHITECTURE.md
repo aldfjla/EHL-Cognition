@@ -106,8 +106,8 @@ VERIFY
    ├── still failing, budget left ───────────────────────▶  back to FIX
    ├── budget exhausted ─────────────────────────────────▶  FAILED_UNRESOLVED
 REPORT
-   ↓  incident report from confirmed findings                [agent]
-PR_OPENED                                                    [terminal]
+   ├── full suite green, no regressions/conflicts ─────────▶ PR_OPENED [terminal]
+   └── anything still red ─────────────────────────────────▶ FAILED_UNRESOLVED [terminal]
 ```
 
 Terminal states: `PASSED_CLEAN`, `PR_OPENED`, `FAILED_UNRESOLVED`.
@@ -161,7 +161,7 @@ QA Lead agent ┘                                                  │
                                         │
                                      VERIFY (full suite, merged)
                                         │
-                                     Reporter ──▶ Report ──▶ PR
+                                     Reporter ──▶ Report ──▶ PR (green only)
 ```
 
 The `diagnosis` string is the hinge of the entire system. It is where the
@@ -189,5 +189,6 @@ for the sync rules and the codegen escape hatch.
   orchestrator mediates every exchange. See `AGENT_ROLES.md` — this constraint
   turned out to be the most interesting part of the design.
 * **No retry-until-green.** The iteration budget is finite and
-  `FAILED_UNRESOLVED` is a legitimate outcome. A system that always reports
-  success is a system whose success means nothing.
+  `FAILED_UNRESOLVED` is a legitimate outcome. A red or regressed verification
+  writes its report as a commit comment and failure status; it never pushes a
+  branch or opens a PR.

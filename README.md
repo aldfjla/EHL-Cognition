@@ -38,7 +38,8 @@ A developer pushes to their robot control repo. With no human in the loop:
 | `INVESTIGATE` | Fan out one debugging agent per cluster — reproduce, explain, evidence |
 | `FIX` | Fan out one fixer per confirmed cause, each self-verifying |
 | `VERIFY` | Re-run the **full** suite against all patches merged |
-| `REPORT` → `PR_OPENED` | Incident report, diff, and before/after video, as a pull request |
+| `REPORT` → `PR_OPENED` | Open a pull request only when the full re-run is green, with the incident report, diff, and verified before/after video pairs |
+| `REPORT` → `FAILED_UNRESOLVED` | Publish the incident report as a commit comment and failure status when scenarios, regressions, conflicts, or evidence remain unresolved |
 
 A React dashboard shows it live: which agents exist, what each is working on,
 and how they communicate.
