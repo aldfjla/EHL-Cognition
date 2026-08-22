@@ -356,7 +356,7 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
   let failed = 0;
   for (const scenario of scenarios) {
     const workerId = WORKER_POOL[scenario.index % WORKER_POOL.length];
-    const liveFramePath = `${runId}/${scenario.id}_live.jpg`;
+    const liveFramePath = `live/${scenario.id}.jpg`;
     const queued = scenarios.length - scenario.index - 1;
     push(40, "worker.pool_changed", {
       workers: WORKER_POOL.length,
