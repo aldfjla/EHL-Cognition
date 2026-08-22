@@ -23,8 +23,8 @@ Conversion between the two lives in :mod:`app.store.repo`, in one place.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
+from sqlalchemy import Index, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -32,6 +32,7 @@ class RunRow(SQLModel, table=True):
     """Mirrors ``run.json``. See :class:`orchestrator.schemas.Run`."""
 
     __tablename__ = "runs"
+    __table_args__ = (Index("ix_runs_repo_created_at", "repo", "created_at"),)
 
     id: str = Field(primary_key=True)
     stage: str = Field(index=True)
@@ -48,9 +49,6 @@ class RunRow(SQLModel, table=True):
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None = None
-
-    # TODO(build): add __table_args__ index on (repo, created_at desc) for the
-    # index page query.
 
 
 class AgentRow(SQLModel, table=True):
@@ -82,6 +80,13 @@ class ScenarioRow(SQLModel, table=True):
     """Mirrors ``scenario.json``."""
 
     __tablename__ = "scenarios"
+    # VERIFY re-runs the same seeds and must not silently overwrite the
+    # baseline row: the before/after comparison depends on both existing.
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id", "seed", "attempt", name="uq_scenarios_run_seed_attempt"
+        ),
+    )
 
     id: str = Field(primary_key=True)
     run_id: str = Field(index=True, foreign_key="runs.id")
@@ -99,10 +104,6 @@ class ScenarioRow(SQLModel, table=True):
     video_path: str | None = None
     trace_path: str | None = None
     error: str | None = None
-
-    # TODO(build): (run_id, seed, attempt) should be unique — VERIFY re-runs
-    # the same seeds and must not silently overwrite the baseline row, because
-    # the before/after comparison depends on both existing.
 
 
 class MessageRow(SQLModel, table=True):
@@ -175,12 +176,18 @@ class ClusterRow(SQLModel, table=True):
     scenario_ids_json: str = "[]"
 
 
-def _json_columns() -> dict[str, Any]:
+def _json_columns() -> dict[str, list[str]]:
     """Documentation hook: which columns hold JSON blobs, for repo.py.
 
     Kept as a function rather than a comment so the conversion layer can assert
     against it instead of drifting.
     """
-    raise NotImplementedError
-    # TODO(build): return {table: [column names]} and use it in repo.py's
-    # to_model/from_model helpers.
+    return {
+        "runs": ["robot_model_json", "suite_json"],
+        "agents": ["scenario_ids_json", "finding_ids_json"],
+        "scenarios": ["params_json", "criteria_json"],
+        "messages": ["refs_json"],
+        "findings": ["scenario_ids_json", "files_json"],
+        "reports": ["incidents_json", "before_json", "after_json"],
+        "clusters": ["scenario_ids_json"],
+    }

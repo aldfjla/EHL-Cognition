@@ -20,10 +20,24 @@ Lifetime rules
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
-from app.config import Settings, get_settings
+from fastapi import Depends, HTTPException
+from orchestrator.bus import EventBus
+from orchestrator.devin.client import DevinClient
+from orchestrator.schemas import Run
+from sqlmodel import Session
+
+from app.config import Settings, get_settings, validate_paths
+from app.store import repo
+from app.store.db import init_db, session_scope
+
+log = logging.getLogger("robotci.api")
+
+_bus: EventBus | None = None
+_devin: DevinClient | None = None
 
 
 def get_config() -> Settings:
@@ -31,33 +45,67 @@ def get_config() -> Settings:
     return get_settings()
 
 
-def get_db() -> Iterator[Any]:
+def get_db() -> Iterator[Session]:
     """Yield a database session for one request, closing it afterwards."""
-    raise NotImplementedError
-    # TODO(build): yield from app.store.db.session_scope().
+    with session_scope() as session:
+        yield session
 
 
-def get_bus() -> Any:
-    """The process-wide :class:`~orchestrator.bus.EventBus`."""
-    raise NotImplementedError
-    # TODO(build): return the singleton created in main.py's lifespan.
+def get_bus() -> EventBus:
+    """The process-wide :class:`~orchestrator.bus.EventBus`.
+
+    Created lazily so the seed script and the tests get the same bus the app
+    uses without having to run the lifespan.
+    """
+    global _bus
+    if _bus is None:
+        _bus = EventBus()
+    return _bus
 
 
-def get_devin() -> Any:
+def get_devin() -> DevinClient:
     """The shared :class:`~orchestrator.devin.client.DevinClient`."""
-    raise NotImplementedError
-    # TODO(build): return the singleton; raise a clear error if the API key
-    # is unset rather than failing at the first session create.
+    global _devin
+    if _devin is None:
+        settings = get_settings()
+        # Fail here, naming the fix, rather than at the first session create
+        # halfway through a run.
+        api_key = settings.require_devin()
+        _devin = DevinClient(
+            api_key=api_key,
+            api_base=settings.devin_api_base,
+            max_parallel=settings.max_parallel_agents,
+        )
+    return _devin
 
 
-async def get_run_or_404(run_id: str, db: Any = None) -> Any:
+async def get_run_or_404(run_id: str, db: Session = Depends(get_db)) -> Run:
     """Fetch a run by id or raise ``HTTPException(404)``."""
-    raise NotImplementedError
-    # TODO(build): repo.get_run, raise HTTPException(404, "run not found").
+    run = repo.get_run(db, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return run
 
 
 async def lifespan(app: Any) -> AsyncIterator[None]:
     """Startup/shutdown: create singletons, init the DB, close cleanly."""
-    raise NotImplementedError
-    # TODO(build): init_db(), construct EventBus + DevinClient, yield,
-    # then await devin.close().
+    global _bus, _devin
+    settings = get_settings()
+    validate_paths(settings)
+    init_db()
+
+    _bus = get_bus()
+    if settings.devin_api_key.strip():
+        _devin = get_devin()
+    else:
+        log.warning("DEVIN_API_KEY unset; agent stages will fail until it is set")
+
+    try:
+        yield
+    finally:
+        if _devin is not None:
+            try:
+                await _devin.close()
+            except Exception:  # shutdown must not raise out of the lifespan
+                log.exception("closing the Devin client failed")
+        _devin = None

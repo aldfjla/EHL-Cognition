@@ -13,10 +13,13 @@ Outputs: a cached :class:`Settings` singleton via :func:`get_settings`.
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+log = logging.getLogger("robotci.config")
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -57,9 +60,9 @@ class Settings(BaseSettings):
 
     def require_devin(self) -> str:
         """Return the Devin key or raise a startup-time error naming the fix."""
-        raise NotImplementedError
-        # TODO(build): raise RuntimeError("DEVIN_API_KEY unset; copy
-        # .env.example to .env") when blank.
+        if not self.devin_api_key.strip():
+            raise RuntimeError("DEVIN_API_KEY unset; copy .env.example to .env")
+        return self.devin_api_key
 
 
 @lru_cache
@@ -68,5 +71,31 @@ def get_settings() -> Settings:
     return Settings()
 
 
-# TODO(build): validate at startup that artifacts_dir is writable and
-# menagerie_dir exists, and log a warning pointing at `make menagerie` if not.
+def validate_paths(settings: Settings | None = None) -> list[str]:
+    """Check the filesystem assumptions and return the warnings raised.
+
+    Called from the app lifespan. Never raises: a missing model library is a
+    reason to warn loudly at startup, not a reason to refuse to boot — the
+    dashboard and the seeded replay work without it.
+    """
+    settings = settings or get_settings()
+    warnings: list[str] = []
+
+    try:
+        settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        probe = settings.artifacts_dir / ".write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        warnings.append(
+            f"ARTIFACTS_DIR {settings.artifacts_dir} is not writable: {exc}"
+        )
+
+    if not settings.menagerie_dir.is_dir():
+        warnings.append(
+            f"MENAGERIE_DIR {settings.menagerie_dir} is missing; run `make menagerie`"
+        )
+
+    for warning in warnings:
+        log.warning(warning)
+    return warnings

@@ -25,3 +25,9 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.ruff.lint]
+# `def route(db: Session = Depends(get_db))` is how FastAPI declares
+# dependencies; B008 flags the call in the default argument, which here is the
+# framework's documented idiom rather than a mutable-default bug.
+extend-ignore = ["B008"]
