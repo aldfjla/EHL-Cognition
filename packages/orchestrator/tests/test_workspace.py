@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 from orchestrator import workspace as ws_mod
-from orchestrator.workspace import GitError, Workspace, read_config, run_git
+from orchestrator.workspace import (
+    GitError,
+    PatchConflict,
+    Workspace,
+    read_config,
+    run_git,
+)
 
 
 async def make_repo(tmp_path: Path) -> Workspace:
@@ -98,7 +104,11 @@ async def test_merge_patches_reports_conflicts_instead_of_raising(
 
     # Both touch the same line: the first lands, the second conflicts and is
     # aborted rather than left half-merged.
-    assert conflicts == ["fix-b"]
+    assert len(conflicts) == 1
+    assert isinstance(conflicts[0], PatchConflict)
+    assert conflicts[0].worktree == "fix-b"
+    assert conflicts[0].files == ("control.py",)
+    assert conflicts[0].blocked_by == ("fix-a",)
     verify = ws.worktree("verify")
     assert "fix-a" in (verify / "control.py").read_text()
     state = await run_git(verify, "status", "--porcelain")
@@ -117,6 +127,36 @@ async def test_non_conflicting_fixes_all_land(tmp_path: Path) -> None:
     verify = ws.worktree("verify")
     assert (verify / "a.py").exists()
     assert (verify / "b.py").exists()
+
+
+async def test_same_file_different_regions_both_land(tmp_path: Path) -> None:
+    ws = await make_repo(tmp_path)
+    (ws.base / "control.py").write_text(
+        "\n".join(f"line_{index} = {index}" for index in range(12)) + "\n"
+    )
+    await run_git(ws.base, "add", "control.py")
+    await run_git(ws.base, "commit", "-qm", "add distant regions")
+    ws.commit_sha = (await run_git(ws.base, "rev-parse", "HEAD")).strip()
+    for name, text in (
+        (
+            "fix-a",
+            "\n".join(["line_0 = 2"] + [f"line_{i} = {i}" for i in range(1, 12)])
+            + "\n",
+        ),
+        (
+            "fix-b",
+            "\n".join([f"line_{i} = {i}" for i in range(11)] + ["line_11 = 22"]) + "\n",
+        ),
+    ):
+        path = await ws_mod.create_worktree(ws, name, f"robotci/{name}")
+        (path / "control.py").write_text(text)
+        await run_git(path, "add", "control.py")
+        await run_git(path, "commit", "-qm", f"fix from {name}")
+
+    assert await ws_mod.merge_patches(ws, ["fix-a", "fix-b"], into="verify") == []
+    content = (ws.worktree("verify") / "control.py").read_text()
+    assert "line_0 = 2" in content
+    assert "line_11 = 22" in content
 
 
 async def test_cleanup_removes_the_clone_and_its_worktrees(tmp_path: Path) -> None:

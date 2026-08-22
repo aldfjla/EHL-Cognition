@@ -47,7 +47,9 @@ from typing import TYPE_CHECKING, Any
 
 from orchestrator import clustering, github
 from orchestrator import workspace as workspace_mod
+from orchestrator.devin.hierarchy import AgentTree
 from orchestrator.pool import SuitePool
+from orchestrator.roles.base import RoleAgent
 from orchestrator.roles.fixer import FixerAgent
 from orchestrator.roles.harness_builder import HarnessBuilderAgent
 from orchestrator.roles.investigator import InvestigatorAgent
@@ -141,6 +143,30 @@ _CLUSTER_TERMINAL = {"resolved", "unresolved", "conflicted"}
 _AGENT_WATCH_INTERVAL_S = 0.01
 
 
+def _conflict_worktree(
+    conflict: workspace_mod.PatchConflict | str, worktree: str | None
+) -> bool:
+    """Match both structured conflicts and legacy test doubles."""
+    if worktree is None:
+        return False
+    return (
+        conflict.worktree == worktree
+        if isinstance(conflict, workspace_mod.PatchConflict)
+        else conflict == worktree
+    )
+
+
+def _conflict_description(
+    conflict: workspace_mod.PatchConflict | str,
+) -> str:
+    """Render a conflict with the files and sibling that blocked it."""
+    if isinstance(conflict, str):
+        return conflict
+    files = ", ".join(conflict.files) or "unknown files"
+    blocked_by = ", ".join(conflict.blocked_by) or "unknown sibling"
+    return f"{conflict.worktree} ({files}; blocked by {blocked_by})"
+
+
 # --------------------------------------------------------------------------- #
 # Run context
 # --------------------------------------------------------------------------- #
@@ -187,6 +213,7 @@ class _ClusterWork:
     outcome: str | None = None
     error: str | None = None
     retry_count: int = 0
+    owner_agent_id: str | None = None
 
 
 class Pipeline:
@@ -206,7 +233,8 @@ class Pipeline:
         self._after_results: list[Any] = []
         self._after_videos: dict[str, dict[str, str]] = {}
         self._fix_worktrees: list[str] = []
-        self._conflicts: list[str] = []
+        self._conflicts: list[workspace_mod.PatchConflict | str] = []
+        self._agent_tree = AgentTree()
         self._pool: SuitePool | None = None
         self._agent_gate = asyncio.Semaphore(self._max_parallel_agents)
         self._cluster_work: dict[str, _ClusterWork] = {}
@@ -565,7 +593,7 @@ class Pipeline:
             before_stats=before.model_dump(mode="json"),
             after_stats=after.model_dump(mode="json"),
             regressions=comparison.get("newly_broken", []),
-            conflicts=self._conflicts,
+            conflicts=[_conflict_description(conflict) for conflict in self._conflicts],
             diff=await workspace_mod.diff(ctx.workspace, "verify"),
         )
 
@@ -629,6 +657,8 @@ class Pipeline:
                 param_correlation=clustering.correlate_params(scenarios),
             )
         work.agent_ids.append(agent.id)
+        work.owner_agent_id = agent.id
+        self._agent_tree.register_root(agent.id)
         for finding in self._findings_of(agent):
             if finding.kind is FindingKind.OBSERVATION:
                 await role.relay(finding, Role.INVESTIGATOR, "finding")
@@ -656,6 +686,19 @@ class Pipeline:
             work.outcome = "unresolved"
             return
         ctx = self.ctx
+        if work.owner_agent_id is None:
+            work.owner_agent_id = work.cause.author_agent_id
+        if work.owner_agent_id and not self._agent_tree.has(work.owner_agent_id):
+            self._agent_tree.register_root(work.owner_agent_id)
+        parent_id = work.owner_agent_id
+        refusal = (
+            self._agent_tree.child_refusal(parent_id)
+            if parent_id is not None
+            else "agent tree parent unavailable for fixer"
+        )
+        if refusal is not None:
+            await self._refuse_cluster(work, refusal)
+            return
         name = f"fix-{work.cluster.id}"
         branch = f"robotci/{name}-{ctx.run.commit_sha[:7]}"
         path = await workspace_mod.create_worktree(ctx.workspace, name, branch)
@@ -674,8 +717,75 @@ class Pipeline:
                 worktree=str(path),
                 scenario_seeds=work.original_seeds,
                 iteration=ctx.fix_iteration,
+                parent_agent_id=parent_id,
             )
         work.agent_ids.append(agent.id)
+        self._agent_tree.register_child(parent_id, agent.id)
+        seed_results = await self._execute_cluster_suite(
+            self._cluster_scenarios(work), repo_dir=path
+        )
+        cluster_scenarios = self._cluster_scenarios(work)
+        still_red = [
+            str(scenario.seed)
+            for scenario, result in zip(cluster_scenarios, seed_results)
+            if result.status != "passed"
+        ]
+        if len(seed_results) != len(work.original_seeds):
+            observed = {result.seed for result in seed_results}
+            still_red.extend(
+                str(seed) for seed in work.original_seeds if seed not in observed
+            )
+        reviewer_error: str | None = None
+        reviewer = ReviewerAgent(ctx)
+        refusal = self._agent_tree.child_refusal(agent.id)
+        if refusal is not None:
+            await self._refuse_cluster(work, refusal)
+            return
+        try:
+            patch_diff = await workspace_mod.diff(ctx.workspace, name)
+        except Exception as exc:  # noqa: BLE001 - evidence is best effort
+            patch_diff = "(diff unavailable)"
+            await self._nonfatal(f"cluster {work.cluster.label} patch diff", exc)
+        try:
+            async with gate:
+                reviewer_agent = await self._dispatch_with_agent_watch(
+                    reviewer,
+                    issue=work.cause.summary,
+                    step="verifying",
+                    root_cause=work.cause.summary,
+                    cluster_id=work.cluster.id,
+                    cluster_label=work.cluster.label,
+                    fix_summary=[work.cause.summary],
+                    before_stats=self._stats(cluster_scenarios),
+                    after_stats=self._result_stats(seed_results),
+                    regressions=still_red,
+                    conflicts=self._conflicts,
+                    diff=patch_diff,
+                    parent_agent_id=agent.id,
+                )
+            work.agent_ids.append(reviewer_agent.id)
+            self._agent_tree.register_child(agent.id, reviewer_agent.id)
+            reviewer_claimed_success = reviewer.output.get("verdict") == "ship"
+            if reviewer_claimed_success and still_red:
+                reviewer_error = (
+                    "Reviewer claimed success while originally red seeds stayed "
+                    f"red: {', '.join(still_red)}"
+                )
+        except Exception as exc:  # noqa: BLE001 - reviewer telemetry is optional
+            reviewer_error = f"Reviewer unavailable: {exc}"
+            await self._nonfatal(f"cluster {work.cluster.label} reviewer", exc)
+        if still_red:
+            work.error = (
+                "originally red seeds still failing in fixer worktree: "
+                + ", ".join(still_red)
+            )
+            if reviewer_error:
+                work.error += f"; {reviewer_error}"
+            work.outcome = "unresolved"
+            self._set_cluster_phase(work, "unresolved")
+            return
+        if reviewer_error:
+            work.error = reviewer_error
         if "patched" in role.output and not role.output["patched"]:
             work.outcome = "unresolved"
             self._set_cluster_phase(work, "unresolved")
@@ -695,7 +805,9 @@ class Pipeline:
             )
             if conflicts:
                 self._conflicts.extend(
-                    name for name in conflicts if name not in self._conflicts
+                    conflict
+                    for conflict in conflicts
+                    if conflict not in self._conflicts
                 )
                 work.outcome = "unresolved"
                 self._set_cluster_phase(work, "conflicted")
@@ -706,8 +818,11 @@ class Pipeline:
             )
             if results and all(result.status == "passed" for result in results):
                 await self._record_cluster_after(work)
-                if work.worktree in self._conflicts:
-                    self._conflicts.remove(work.worktree)
+                self._conflicts = [
+                    conflict
+                    for conflict in self._conflicts
+                    if not _conflict_worktree(conflict, work.worktree)
+                ]
                 work.outcome = "resolved"
                 self._set_cluster_phase(work, "resolved")
             else:
@@ -781,6 +896,28 @@ class Pipeline:
         work.phase = phase
         self._cluster_progress.set()
 
+    async def _refuse_cluster(self, work: _ClusterWork, reason: str) -> None:
+        """Record a cap refusal as an honest, non-fatal cluster failure."""
+        work.error = reason
+        work.outcome = "unresolved"
+        self._set_cluster_phase(work, "unresolved")
+        await self.ctx.bus.emit(
+            self.ctx.run.id,
+            EventType.ERROR,
+            {
+                "stage": self.ctx.run.stage.value,
+                "message": f"cluster {work.cluster.label}: {reason}",
+                "fatal": False,
+            },
+        )
+
+    @staticmethod
+    def _result_stats(results: list[Any]) -> SuiteStats:
+        """Summarize private oracle evidence without mutating scenarios."""
+        passed = sum(1 for result in results if result.status == "passed")
+        failed = len(results) - passed
+        return SuiteStats.from_counts(passed=passed, failed=failed)
+
     async def _wait_for_cluster(
         self, predicate: Callable[[_ClusterWork], bool]
     ) -> bool:
@@ -805,7 +942,7 @@ class Pipeline:
 
     async def _dispatch_with_agent_watch(
         self,
-        role: InvestigatorAgent | FixerAgent,
+        role: RoleAgent,
         *,
         issue: str,
         step: str,
@@ -826,7 +963,7 @@ class Pipeline:
 
     async def _watch_agent(
         self,
-        role: InvestigatorAgent | FixerAgent,
+        role: RoleAgent,
         *,
         issue: str,
         step: str,
@@ -842,7 +979,7 @@ class Pipeline:
 
     async def _safe_emit_agent_update(
         self,
-        role: InvestigatorAgent | FixerAgent,
+        role: RoleAgent,
         *,
         issue: str,
         step: str,
@@ -1212,7 +1349,19 @@ class Pipeline:
         if regressions:
             reasons.append(f"newly broken seeds: {', '.join(map(str, regressions))}")
         if self._conflicts:
-            reasons.append(f"unresolved patch conflicts: {', '.join(self._conflicts)}")
+            reasons.append(
+                "unresolved patch conflicts: "
+                + "; ".join(
+                    _conflict_description(conflict) for conflict in self._conflicts
+                )
+            )
+        cluster_errors = [
+            f"{work.cluster.label}: {work.error}"
+            for work in self._cluster_work.values()
+            if work.error
+        ]
+        if cluster_errors:
+            reasons.append("cluster errors: " + "; ".join(cluster_errors))
         return "verification unresolved: " + (
             "; ".join(reasons) if reasons else "suite did not pass"
         )
@@ -1247,7 +1396,13 @@ class Pipeline:
                 + ", ".join(f"{i.title} ({i.affected_scenarios})" for i in unresolved),
             ]
         if self._conflicts:
-            lines += ["", "Conflicting patches: " + ", ".join(self._conflicts)]
+            lines += [
+                "",
+                "Conflicting patches: "
+                + "; ".join(
+                    _conflict_description(conflict) for conflict in self._conflicts
+                ),
+            ]
         return "\n".join(lines)
 
     # -- misc helpers ------------------------------------------------------ #

@@ -60,6 +60,17 @@ class Workspace:
         return self.root / name
 
 
+@dataclass(frozen=True)
+class PatchConflict:
+    """A patch rejected because an already-merged sibling touched its files."""
+
+    worktree: str
+    branch: str
+    sha: str
+    files: tuple[str, ...]
+    blocked_by: tuple[str, ...]
+
+
 async def run_git(cwd: Path, *args: str, check: bool = True) -> str:
     """Run one git command in ``cwd`` and return its stdout.
 
@@ -166,33 +177,101 @@ async def apply_patch(ws: Workspace, worktree: str, patch: str) -> None:
         raise GitError(f"patch did not apply in {worktree}: {err.decode().strip()}")
 
 
-async def merge_patches(ws: Workspace, worktrees: list[str], into: str) -> list[str]:
+async def merge_patches(
+    ws: Workspace, worktrees: list[str], into: str
+) -> list[PatchConflict]:
     """Combine every Fixer's branch into the verify worktree.
 
-    Returns the list of worktree names that conflicted. Conflicts are a real
-    outcome, not an exception: two agents fixing overlapping code is exactly
-    what the Reviewer role exists to adjudicate.
+    Returns structured conflict records. Conflicts are a real outcome, not an
+    exception: two agents fixing overlapping code is exactly what the Reviewer
+    role exists to adjudicate.
     """
     target = ws.worktree(into)
     if not target.exists():
         await create_worktree(ws, into, f"robotci/verify-{ws.commit_sha[:7]}")
 
-    conflicted: list[str] = []
+    conflicted: list[PatchConflict] = []
+    merged_files: dict[str, set[str]] = {}
     for name in worktrees:
-        branch = await run_git(ws.worktree(name), "rev-parse", "HEAD")
+        sha = (await run_git(ws.worktree(name), "rev-parse", "HEAD")).strip()
+        branch = (
+            await run_git(ws.worktree(name), "rev-parse", "--abbrev-ref", "HEAD")
+        ).strip()
         process = await asyncio.create_subprocess_exec(
             "git",
             "merge",
             "--no-edit",
-            branch.strip(),
+            sha,
             cwd=str(target),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         await process.communicate()
         if process.returncode != 0:
-            conflicted.append(name)
+            files = tuple(
+                line
+                for line in (
+                    await run_git(target, "diff", "--name-only", "--diff-filter=U")
+                ).splitlines()
+                if line
+            )
+            blocked_by = tuple(
+                sibling
+                for sibling, sibling_files in merged_files.items()
+                if set(files) & sibling_files
+            )
+            if not blocked_by:
+                for sibling_path in ws.root.iterdir():
+                    sibling = sibling_path.name
+                    if sibling in {name, into, "base"} or not sibling_path.is_dir():
+                        continue
+                    try:
+                        sibling_sha = (
+                            await run_git(sibling_path, "rev-parse", "HEAD")
+                        ).strip()
+                        await run_git(
+                            target, "merge-base", "--is-ancestor", sibling_sha, "HEAD"
+                        )
+                    except (GitError, FileNotFoundError):
+                        continue
+                    sibling_files = {
+                        line
+                        for line in (
+                            await run_git(
+                                target,
+                                "diff",
+                                "--name-only",
+                                f"{ws.commit_sha}..{sibling_sha}",
+                            )
+                        ).splitlines()
+                        if line
+                    }
+                    if set(files) & sibling_files:
+                        blocked_by += (sibling,)
+            conflicted.append(
+                PatchConflict(
+                    worktree=name,
+                    branch=branch,
+                    sha=sha,
+                    files=files,
+                    blocked_by=blocked_by,
+                )
+            )
             await run_git(target, "merge", "--abort", check=False)
+            continue
+        merged = {
+            line
+            for line in (
+                await run_git(
+                    target,
+                    "diff",
+                    "--name-only",
+                    f"{ws.commit_sha}..HEAD",
+                )
+            ).splitlines()
+            if line
+        }
+        merged_files[name] = merged
     return conflicted
 
 
