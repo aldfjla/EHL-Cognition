@@ -53,6 +53,48 @@ async def test_create_session_sends_prompt_and_tags() -> None:
     assert "investigator" in seen[0]["body"]
 
 
+async def test_v3_paths_use_org_and_devin_session_prefix() -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, str(request.url)))
+        if request.method == "POST" and request.url.path.endswith("/sessions"):
+            return httpx.Response(
+                200, json={"session_id": "s-3", "status": "new", "url": "u"}
+            )
+        if request.method == "GET" and request.url.path.endswith("/sessions"):
+            return httpx.Response(200, json={"items": []})
+        if request.method == "GET":
+            return httpx.Response(200, json={"status": "running"})
+        return httpx.Response(200, json={})
+
+    client = make_client(handler, org_id="org-test")
+    handle = await client.create_session("p")
+    await client.ping()
+    await client.get_session(handle.session_id)
+    await client.get_session("devin-already-prefixed")
+    await client.send_message(handle.session_id, "hello")
+    await client.aclose()
+
+    assert ("POST", "https://api.test/v1/organizations/org-test/sessions") in seen
+    assert (
+        "GET",
+        "https://api.test/v1/organizations/org-test/sessions?limit=1",
+    ) in seen
+    assert (
+        "GET",
+        "https://api.test/v1/organizations/org-test/sessions/devin-s-3",
+    ) in seen
+    assert (
+        "GET",
+        "https://api.test/v1/organizations/org-test/sessions/devin-already-prefixed",
+    ) in seen
+    assert (
+        "POST",
+        "https://api.test/v1/organizations/org-test/sessions/devin-s-3/messages",
+    ) in seen
+
+
 async def test_create_session_without_id_fails_and_frees_the_slot() -> None:
     client = make_client(lambda request: httpx.Response(200, json={"url": "x"}))
     with pytest.raises(DevinError):
@@ -158,6 +200,57 @@ async def test_wait_until_done_streams_only_new_lines() -> None:
     assert payload["status"] == "finished"
 
 
+async def test_v3_transcript_pages_are_merged_for_activity_streaming() -> None:
+    calls: list[str] = []
+    polls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path.endswith("/messages"):
+            if request.url.params.get("after") == "cursor-1":
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [{"message": "second"}],
+                        "has_next_page": False,
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "items": [{"message": "first"}],
+                    "end_cursor": "cursor-1",
+                    "has_next_page": True,
+                },
+            )
+        polls["n"] += 1
+        status = "running" if polls["n"] == 1 else "exit"
+        return httpx.Response(200, json={"status": status})
+
+    seen: list[str] = []
+    client = make_client(handler, org_id="org-test")
+    payload = await client.wait_until_done(
+        "s-1", poll_interval_s=0, on_activity=seen.append
+    )
+    await client.aclose()
+
+    assert seen == ["first", "second"]
+    assert payload["status"] == "exit"
+    assert any("after=cursor-1" in call for call in calls)
+
+
+async def test_v3_status_detail_waiting_for_user_is_terminal() -> None:
+    client = make_client(
+        lambda request: httpx.Response(
+            200, json={"status": "running", "status_detail": "waiting_for_user"}
+        ),
+        org_id="org-test",
+    )
+    payload = await client.wait_until_done("s-1", poll_interval_s=0)
+    await client.aclose()
+    assert payload["status_detail"] == "waiting_for_user"
+
+
 async def test_wait_until_done_times_out() -> None:
     client = make_client(
         lambda request: httpx.Response(200, json={"status": "working", "messages": []})
@@ -185,6 +278,29 @@ async def test_structured_output_scrapes_a_fenced_block() -> None:
     client = make_client(lambda request: httpx.Response(200, json=payload))
     assert await client.structured_output("s-1") == {"root_cause": "timer"}
     await client.aclose()
+
+
+async def test_v3_structured_output_scrapes_transcript_fallback() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path.endswith("/messages"):
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"source": "devin", "message": '```json\n{"ok": true}\n```'}
+                    ],
+                    "has_next_page": False,
+                },
+            )
+        return httpx.Response(200, json={"status": "exit"})
+
+    client = make_client(handler, org_id="org-test")
+    assert await client.structured_output("s-1") == {"ok": True}
+    await client.aclose()
+    assert any("/messages" in call for call in calls)
 
 
 async def test_structured_output_reminds_once_then_accepts() -> None:

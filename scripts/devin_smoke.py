@@ -45,6 +45,7 @@ DEFAULT_PROMPT = (
 )
 
 DEFAULT_API_BASE = "https://api.devin.ai/v1"
+DEFAULT_V3_API_BASE = "https://api.devin.ai/v3"
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,15 +91,17 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
-def check_env() -> tuple[str, str]:
-    """Return ``(api_key, api_base)`` or exit with an actionable message."""
+def check_env() -> tuple[str, str, str | None]:
+    """Return ``(api_key, api_base, org_id)`` or exit with an actionable message."""
     _load_dotenv(REPO_ROOT / ".env")
     api_key = os.environ.get("DEVIN_API_KEY", "").strip()
-    api_base = os.environ.get("DEVIN_API_BASE", "").strip() or DEFAULT_API_BASE
+    org_id = os.environ.get("DEVIN_ORG_ID", "").strip() or None
+    default_base = DEFAULT_V3_API_BASE if org_id else DEFAULT_API_BASE
+    api_base = os.environ.get("DEVIN_API_BASE", "").strip() or default_base
     if not api_key:
         print("DEVIN_API_KEY unset — copy .env.example to .env")
         raise SystemExit(1)
-    return api_key, api_base
+    return api_key, api_base, org_id
 
 
 async def _run(args: argparse.Namespace, api_key: str, result: dict) -> None:
@@ -108,7 +111,12 @@ async def _run(args: argparse.Namespace, api_key: str, result: dict) -> None:
     halfway through must still leave the earlier findings — above all the
     session url — printable.
     """
-    client = DevinClient(api_key, api_base=result["api_base"], max_parallel=1)
+    client = DevinClient(
+        api_key,
+        api_base=result["api_base"],
+        max_parallel=1,
+        org_id=result["org_id"],
+    )
     try:
         # 2. Auth: a bad key fails here, before a session is spent on it.
         await client.ping()
@@ -147,9 +155,14 @@ def main(argv: list[str] | None = None) -> int:
     if argv is not None:
         sys.argv = [sys.argv[0], *argv]
     args = parse_args()
-    api_key, api_base = check_env()
+    api_key, api_base, org_id = check_env()
 
-    result: dict = {"ok": False, "api_base": api_base}
+    result: dict = {
+        "ok": False,
+        "api_base": api_base,
+        "org_id": org_id,
+        "flavor": "v3" if org_id else "v1",
+    }
     error: str | None = None
     try:
         asyncio.run(_run(args, api_key, result))
@@ -164,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, indent=2, default=str))
     else:
         print(f"1. DEVIN_API_KEY present            {_mark(True)}")
+        print(f"   API flavor: {result['flavor']}")
         print(f"2. {api_base} authenticates  {_mark(result.get('auth'))}")
         print(f"3. session created                  {_mark(result.get('session_id'))}")
         # Printed even when a later check failed: the session page is the

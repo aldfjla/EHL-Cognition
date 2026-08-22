@@ -70,10 +70,20 @@ def test_check_env_returns_key_and_base(
     smoke: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DEVIN_API_KEY", "k")
+    monkeypatch.delenv("DEVIN_ORG_ID", raising=False)
     monkeypatch.delenv("DEVIN_API_BASE", raising=False)
-    assert smoke.check_env() == ("k", smoke.DEFAULT_API_BASE)
+    assert smoke.check_env() == ("k", smoke.DEFAULT_API_BASE, None)
     monkeypatch.setenv("DEVIN_API_BASE", "https://api.test/v1")
-    assert smoke.check_env()[1] == "https://api.test/v1"
+    assert smoke.check_env()[1:] == ("https://api.test/v1", None)
+
+
+def test_check_env_defaults_v3_base_for_org(
+    smoke: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEVIN_API_KEY", "k")
+    monkeypatch.setenv("DEVIN_ORG_ID", "org-test")
+    monkeypatch.delenv("DEVIN_API_BASE", raising=False)
+    assert smoke.check_env() == ("k", smoke.DEFAULT_V3_API_BASE, "org-test")
 
 
 def _patch_transport(smoke: Any, monkeypatch: pytest.MonkeyPatch, handler: Any) -> None:
