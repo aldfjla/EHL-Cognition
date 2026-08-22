@@ -354,7 +354,13 @@ class Pipeline:
                 "robotci.yaml has no control.entrypoint and none could be "
                 "inferred; there is no control code to simulate"
             )
-        module = entrypoint.split(":", 1)[0].replace(".", "/")
+        raw = entrypoint.split(":", 1)[0]
+        # Dotted module notation ("pkg.mod") needs its dots turned into path
+        # separators; a filesystem path ("src/ctl.py") must be left alone. The
+        # replace used to be unconditional, which rewrote "src/ctl.py" to
+        # "src/ctl/py" and made the path form documented in
+        # robotci.example.yaml impossible to resolve.
+        module = raw if "/" in raw or raw.endswith(".py") else raw.replace(".", "/")
         candidates = [
             ctx.workspace.base / module,
             ctx.workspace.base / f"{module}.py",

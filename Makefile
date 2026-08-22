@@ -21,6 +21,7 @@ setup: ## Create venv, install python packages editable, npm install the UI
 
 api: ## Run the FastAPI orchestrator on $$API_PORT (default 8000)
 	$(UVICORN) app.main:app --app-dir apps/api --reload \
+		--reload-dir apps/api --reload-dir packages \
 		--host $${API_HOST:-0.0.0.0} --port $${API_PORT:-8000}
 
 ui: ## Run the Next.js dashboard on :3000

@@ -25,8 +25,13 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "Starting API on :$API_PORT"
+# --reload-dir pins the watcher to source. Without it WatchFiles also sees
+# workspaces/ and artifacts/, which the pipeline writes during a run: cloning
+# the customer repo would trip a reload and kill the in-flight pipeline.
 "$ROOT/.venv/bin/uvicorn" app.main:app \
-  --app-dir "$ROOT/apps/api" --reload --host "$API_HOST" --port "$API_PORT" &
+  --app-dir "$ROOT/apps/api" --reload \
+  --reload-dir "$ROOT/apps/api" --reload-dir "$ROOT/packages" \
+  --host "$API_HOST" --port "$API_PORT" &
 pids+=($!)
 
 # Wait for /health before starting the UI, so the dashboard's first fetch does
