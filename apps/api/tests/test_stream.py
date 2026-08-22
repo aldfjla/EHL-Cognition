@@ -78,9 +78,35 @@ def test_live_events_are_forwarded_after_replay(
 
     with client.websocket_connect(f"/ws/runs/{RUN_ID}") as ws:
         assert ws.receive_json()["type"] == "run.created"
-        seed(bus, EventType.SUITE_PROGRESS, EventType.RUN_FINISHED)
-        assert ws.receive_json()["type"] == "suite.progress"
+        seed(
+            bus,
+            EventType.SCENARIO_PROGRESS,
+            EventType.WORKER_POOL_CHANGED,
+            EventType.AGENT_UPDATED,
+            EventType.RUN_FINISHED,
+        )
+        assert ws.receive_json()["type"] == "scenario.progress"
+        assert ws.receive_json()["type"] == "worker.pool_changed"
+        assert ws.receive_json()["type"] == "agent.updated"
         assert ws.receive_json()["type"] == "run.finished"
+
+
+def test_live_event_types_replay_with_since(client: TestClient, bus: FakeBus) -> None:
+    seed(
+        bus,
+        EventType.SCENARIO_PROGRESS,
+        EventType.WORKER_POOL_CHANGED,
+        EventType.AGENT_UPDATED,
+    )
+
+    with client.websocket_connect(f"/ws/runs/{RUN_ID}?since=1") as ws:
+        frames = [ws.receive_json() for _ in range(2)]
+
+    assert [frame["seq"] for frame in frames] == [2, 3]
+    assert [frame["type"] for frame in frames] == [
+        "worker.pool_changed",
+        "agent.updated",
+    ]
 
 
 def test_index_stream_filters_to_run_level_events(

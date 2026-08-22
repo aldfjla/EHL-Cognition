@@ -6,6 +6,7 @@ are the parts the dashboard breaks on.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -13,6 +14,7 @@ from orchestrator.schemas import (
     Agent,
     AgentStatus,
     Cluster,
+    EventType,
     Finding,
     FindingKind,
     FindingStatus,
@@ -78,6 +80,68 @@ def test_run_detail_includes_scenarios_and_clusters(
     assert body["commit_sha"] == "a" * 40
     assert [item["label"] for item in body["scenarios"]] == ["grasp"]
     assert [item["label"] for item in body["clusters"]] == ["gripper early"]
+    assert body["worker_pool"] == {
+        "workers": 4,
+        "busy": 0,
+        "queued": 1,
+        "reason": None,
+        "scenarios": [],
+    }
+
+
+def test_worker_pool_measures_scenarios_and_uses_latest_event(
+    client: TestClient, db: Any, run: Run, bus: Any
+) -> None:
+    repo.upsert_scenario(
+        db,
+        Scenario(
+            run_id=run.id,
+            index=1,
+            seed=11,
+            status=ScenarioStatus.RUNNING,
+            worker_id="worker-1",
+        ),
+    )
+    repo.upsert_scenario(
+        db,
+        Scenario(run_id=run.id, index=0, seed=10, status=ScenarioStatus.PENDING),
+    )
+    db.commit()
+
+    async def publish() -> None:
+        await bus.emit(
+            run.id,
+            EventType.WORKER_POOL_CHANGED,
+            {"workers": 8, "busy": 99, "queued": 99, "reason": "fan-out"},
+        )
+
+    asyncio.run(publish())
+    body = client.get(f"/runs/{run.id}/workers").json()
+
+    assert body["workers"] == 8
+    assert body["busy"] == 1
+    assert body["queued"] == 1
+    assert body["reason"] == "fan-out"
+    assert [item["index"] for item in body["scenarios"]] == [1]
+
+
+def test_worker_pool_falls_back_without_events(
+    client: TestClient, db: Any, run: Run
+) -> None:
+    for index in (2, 0):
+        repo.upsert_scenario(
+            db,
+            Scenario(
+                run_id=run.id, index=index, seed=index, status=ScenarioStatus.RUNNING
+            ),
+        )
+    db.commit()
+
+    body = client.get(f"/runs/{run.id}/workers").json()
+
+    assert body["workers"] == 4
+    assert body["busy"] == 2
+    assert body["queued"] == 0
 
 
 def test_missing_run_is_404(client: TestClient) -> None:
@@ -99,6 +163,9 @@ def test_scenarios_come_back_in_index_order(
                 seed=1000 + index,
                 label=f"grasp-{index}",
                 status=ScenarioStatus.PASSED,
+                live_frame_path="frames/live.jpg" if index == 0 else None,
+                worker_id="worker-1" if index == 0 else None,
+                progress=0.5 if index == 0 else None,
             ),
         )
     db.commit()
@@ -106,6 +173,10 @@ def test_scenarios_come_back_in_index_order(
     indices = [item["index"] for item in client.get(f"/runs/{run.id}/scenarios").json()]
 
     assert indices == [0, 1, 2]
+    scenario = client.get(f"/runs/{run.id}/scenarios").json()[0]
+    assert scenario["live_frame_path"] == "frames/live.jpg"
+    assert scenario["worker_id"] == "worker-1"
+    assert scenario["progress"] == 0.5
 
 
 def test_scenarios_filter_by_attempt(client: TestClient, db: Any, run: Run) -> None:
@@ -150,6 +221,9 @@ def test_agents_messages_and_findings(client: TestClient, db: Any, run: Run) -> 
             role=Role.INVESTIGATOR,
             title="investigator-1",
             status=AgentStatus.WORKING,
+            desktop_url="https://desktop.example",
+            issue="gripper closes early",
+            step="reproduce",
         ),
     )
     fixer = repo.upsert_agent(
@@ -192,6 +266,9 @@ def test_agents_messages_and_findings(client: TestClient, db: Any, run: Run) -> 
 
     agents = client.get(f"/runs/{run.id}/agents").json()
     assert [item["title"] for item in agents] == ["investigator-1", "fixer-1"]
+    assert agents[0]["desktop_url"] == "https://desktop.example"
+    assert agents[0]["issue"] == "gripper closes early"
+    assert agents[0]["step"] == "reproduce"
 
     assert (
         client.get(f"/agents/{investigator.id}").json()["role"]
