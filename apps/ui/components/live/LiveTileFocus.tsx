@@ -11,10 +11,10 @@
 import clsx from "clsx";
 import { useEffect } from "react";
 
-import * as api from "@/lib/api";
 import type { Scenario } from "@/lib/types";
 
 import LiveFeed from "./LiveFeed";
+import RecordedVideo from "./RecordedVideo";
 
 export interface LiveTileFocusProps {
   runId: string;
@@ -84,14 +84,11 @@ export default function LiveTileFocus({
 
         <div className="aspect-video w-full bg-slate-950">
           {finished && scenario.video_path ? (
-            <video
-              src={api.artifactUrl(scenario.video_path)}
+            <RecordedVideo
+              scenario={scenario}
+              videoPath={scenario.video_path}
               className="h-full w-full object-contain"
               controls
-              muted
-              loop
-              autoPlay
-              playsInline
             />
           ) : (
             <LiveFeed
