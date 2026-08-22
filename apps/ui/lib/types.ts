@@ -87,6 +87,28 @@ export interface RunDetail extends Run {
   clusters: Cluster[];
 }
 
+// ---- repo.json ------------------------------------------------------------
+
+/** Derived from run history: "running" while any run is non-terminal. */
+export type RepoStatus = "dormant" | "running";
+
+export interface ConnectedRepo {
+  id: string;
+  full_name: string;
+  branch: string;
+  suite_size: number;
+  created_at: string;
+  last_push_at: string | null;
+  status: RepoStatus;
+  latest_run: { id: string; stage: Stage; created_at: string } | null;
+}
+
+/** POST /repos response: the repo plus what to paste into GitHub settings. */
+export interface ConnectRepoResponse {
+  repo: ConnectedRepo;
+  webhook: { url: string; secret_configured: boolean };
+}
+
 // ---- agent.json -----------------------------------------------------------
 
 export type Role =

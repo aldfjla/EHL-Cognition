@@ -276,11 +276,6 @@ def get_repo_by_full_name(db: Session, full_name: str) -> Repo | None:
     return _row_to_repo(row) if row else None
 
 
-def get_by_full_name(db: Session, full_name: str) -> Repo | None:
-    """Compatibility alias for looking up a connected repository by name."""
-    return get_repo_by_full_name(db, full_name)
-
-
 def update_repo(db: Session, repository: Repo) -> Repo:
     """Persist changes to a connected repository."""
     row = db.get(RepoRow, repository.id)
