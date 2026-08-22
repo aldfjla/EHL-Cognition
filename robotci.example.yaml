@@ -92,7 +92,8 @@ policy:
   # and reporting FAILED_UNRESOLVED.
   max_fix_iterations: 3
 
-  # Open a pull request when fixes verify clean. Set false for report-only.
+  # Open a pull request only when the full re-run is green with no regressions
+  # or unresolved patch conflicts. Set false for report-only.
   open_pull_request: true
 
   # Record mp4 evidence. `failures` records only failing scenarios (fast),

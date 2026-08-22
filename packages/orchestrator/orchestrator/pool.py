@@ -111,6 +111,7 @@ class SuitePool:
         harness_path: str,
         task: dict[str, Any],
         record: str = "failures",
+        record_dir: str | Path | None = None,
         repo_dir: str | Path | None = None,
         on_result: ResultCallback | None = None,
         reason: str | None = None,
@@ -143,6 +144,7 @@ class SuitePool:
                     harness_path=harness_path,
                     task=task or {},
                     record=policy,
+                    record_dir=record_dir,
                     repo_dir=repo_dir,
                     on_result=on_result,
                 )
@@ -241,6 +243,7 @@ class SuitePool:
         harness_path: str,
         task: dict[str, Any],
         record: str,
+        record_dir: str | Path | None,
         repo_dir: str | Path | None,
         on_result: ResultCallback | None,
     ) -> Any:
@@ -260,6 +263,7 @@ class SuitePool:
                 harness_path=harness_path,
                 task=task,
                 record=record == "all",
+                record_dir=record_dir,
                 repo_dir=repo_dir,
             )
         finally:
@@ -279,6 +283,7 @@ class SuitePool:
                 harness_path=harness_path,
                 task=task,
                 record=True,
+                record_dir=record_dir,
                 repo_dir=repo_dir,
             )
             video_path = getattr(replay, "video_path", None)
@@ -317,6 +322,7 @@ class SuitePool:
         harness_path: str,
         task: dict[str, Any],
         record: bool,
+        record_dir: str | Path | None,
         repo_dir: str | Path | None,
     ) -> Any:
         slot = await self._acquire(spec.scenario_id, -1)
@@ -327,6 +333,7 @@ class SuitePool:
                 harness_path=harness_path,
                 task=task,
                 record=record,
+                record_dir=record_dir,
                 repo_dir=repo_dir,
             )
         finally:
@@ -340,6 +347,7 @@ class SuitePool:
         harness_path: str,
         task: dict[str, Any],
         record: bool,
+        record_dir: str | Path | None,
         repo_dir: str | Path | None,
     ) -> Any:
         kwargs = {
@@ -349,7 +357,9 @@ class SuitePool:
             "params": spec.params,
             "seed": spec.seed,
             "task": task,
-            "record": _record_path(self.artifacts_dir, spec.scenario_id)
+            "record": _record_path(
+                self.artifacts_dir, spec.scenario_id, record_dir=record_dir
+            )
             if record
             else False,
         }
@@ -534,8 +544,11 @@ def _supported_kwargs(runner: Runner, kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _record_path(artifacts_dir: Path, scenario_id: str) -> str:
-    return str(artifacts_dir / f"{scenario_id}.mp4")
+def _record_path(
+    artifacts_dir: Path, scenario_id: str, *, record_dir: str | Path | None = None
+) -> str:
+    directory = Path(record_dir) if record_dir is not None else artifacts_dir
+    return str(directory / f"{scenario_id}.mp4")
 
 
 def _relative_artifact(path: str | Path, artifacts_dir: Path) -> str:

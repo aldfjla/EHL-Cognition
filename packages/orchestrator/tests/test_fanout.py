@@ -475,13 +475,120 @@ async def test_cluster_verification_is_read_only_and_has_no_suite_progress(
         await pipe._pool.aclose()
 
     assert work.phase == "resolved"
-    assert [int(item["seed"]) for item in observed] == [scenario.seed]
-    assert all(item["record"] is False for item in observed)
+    assert [int(item["seed"]) for item in observed] == [scenario.seed, scenario.seed]
+    assert observed[0]["record"] is False
+    assert isinstance(observed[1]["record"], str)
     assert scenario == before
     assert not any(
         event.type in {EventType.SCENARIO_FINISHED, EventType.SUITE_PROGRESS}
         for event in ctx.bus.history(ctx.run.id)
     )
+
+
+async def test_after_video_is_a_distinct_recording_of_a_passing_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = make_context(tmp_path)
+    ctx.run.robot_model = RobotModel(source=ModelSource.REPO, model_path="model.xml")
+    pipe = Pipeline(ctx)
+    await pipe.stage_cluster_failures()
+    work = next(iter(pipe._cluster_work.values()))
+    work.phase = "ready_to_verify"
+    work.worktree = "fix-cluster"
+    before = tmp_path / "before.mp4"
+    before.write_bytes(b"before")
+    ctx.scenarios[0].video_path = str(before)
+    observed: list[dict[str, object]] = []
+
+    async def runner(**kwargs: object) -> SimpleNamespace:
+        observed.append(kwargs)
+        record_path = kwargs.get("record")
+        if record_path:
+            path = Path(str(record_path))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"after")
+        item = result(str(kwargs["scenario_id"]), int(kwargs["seed"]), "passed")
+        item.video_path = str(record_path) if record_path else None
+        return item
+
+    async def execute_cluster_suite(
+        _scenarios: list[Scenario], repo_dir: Path | None = None
+    ) -> list[SimpleNamespace]:
+        del repo_dir
+        return [result(ctx.scenarios[0].id, ctx.scenarios[0].seed, "passed")]
+
+    async def merge_patches(*_args: object, **_kwargs: object) -> list[str]:
+        return []
+
+    monkeypatch.setattr(pipe, "_execute_cluster_suite", execute_cluster_suite)
+    monkeypatch.setattr(pipeline_mod.workspace_mod, "merge_patches", merge_patches)
+    pipe._pool = SuitePool(
+        run_id=ctx.run.id,
+        bus=ctx.bus,
+        workers=1,
+        artifacts_dir=tmp_path,
+        runner=runner,
+    )
+    try:
+        await pipe._verify_cluster(work)
+    finally:
+        await pipe._pool.aclose()
+
+    incident = pipe._incident(work.cluster)
+    assert incident.before_video == str(before)
+    assert incident.after_video is not None
+    assert incident.after_video != incident.before_video
+    assert Path(incident.after_video).is_file()
+    assert len(observed) == 1
+    assert observed[0]["record"] != incident.before_video
+
+
+async def test_after_video_is_unavailable_when_post_fix_seed_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = make_context(tmp_path)
+    ctx.run.robot_model = RobotModel(source=ModelSource.REPO, model_path="model.xml")
+    pipe = Pipeline(ctx)
+    await pipe.stage_cluster_failures()
+    work = next(iter(pipe._cluster_work.values()))
+    work.phase = "ready_to_verify"
+    work.worktree = "fix-cluster"
+    before = tmp_path / "before.mp4"
+    before.write_bytes(b"before")
+    ctx.scenarios[0].video_path = str(before)
+
+    async def runner(**kwargs: object) -> SimpleNamespace:
+        record_path = kwargs.get("record")
+        item = result(str(kwargs["scenario_id"]), int(kwargs["seed"]), "failed")
+        item.video_path = str(record_path) if record_path else None
+        return item
+
+    async def execute_cluster_suite(
+        _scenarios: list[Scenario], repo_dir: Path | None = None
+    ) -> list[SimpleNamespace]:
+        del repo_dir
+        return [result(ctx.scenarios[0].id, ctx.scenarios[0].seed, "passed")]
+
+    async def merge_patches(*_args: object, **_kwargs: object) -> list[str]:
+        return []
+
+    monkeypatch.setattr(pipe, "_execute_cluster_suite", execute_cluster_suite)
+    monkeypatch.setattr(pipeline_mod.workspace_mod, "merge_patches", merge_patches)
+    pipe._pool = SuitePool(
+        run_id=ctx.run.id,
+        bus=ctx.bus,
+        workers=1,
+        artifacts_dir=tmp_path,
+        runner=runner,
+    )
+    try:
+        await pipe._verify_cluster(work)
+    finally:
+        await pipe._pool.aclose()
+
+    incident = pipe._incident(work.cluster)
+    assert incident.before_video == str(before)
+    assert incident.after_video is None
 
 
 async def test_agent_policy_does_not_resize_suite_pool(

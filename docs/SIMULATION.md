@@ -193,8 +193,12 @@ and these clips end up in a PR body where nobody has context.
 
 The **before/after pair** is the closing argument of the demo: identical seed,
 identical world, robot failing on the left and succeeding on the right, with
-nothing between them but an agent's patch. Same seed on both sides or the
-comparison means nothing.
+nothing between them but an agent's patch. The before clip is the failing
+episode; the after clip is a separate post-fix simkit run of that same seed,
+written under a distinct artifact path. Same seed on both sides or the
+comparison means nothing. If the post-fix run fails or recording is unavailable,
+the report says that no verified after-video exists instead of reusing the
+failure clip.
 
 ## The CLI is the agent-facing API
 

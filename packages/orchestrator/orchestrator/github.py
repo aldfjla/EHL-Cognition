@@ -222,13 +222,18 @@ def render_pr_body(report: Report) -> str:
         if incident.files_changed:
             lines += ["Files: " + ", ".join(incident.files_changed), ""]
         if incident.before_video or incident.after_video:
+            after_video = (
+                incident.after_video or "no verified after-video; proof is unavailable"
+            )
             lines += [
                 (
-                    f"Video: before `{incident.before_video}`, "
-                    f"after `{incident.after_video}`"
+                    f"Video: before `{incident.before_video or 'unavailable'}`, "
+                    f"after `{after_video}`"
                 ),
                 "",
             ]
+        elif incident.status == "unresolved":
+            lines += ["Video proof unavailable: no recorded before/after pair.", ""]
     return "\n".join(lines).strip() + "\n"
 
 
