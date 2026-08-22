@@ -132,6 +132,7 @@ CONFIRM_CONFIDENCE = 0.5
 
 #: Emit ``suite.progress`` at most this often, in completed scenarios.
 PROGRESS_EVERY = 1
+_CLUSTER_TERMINAL = {"resolved", "unresolved", "conflicted"}
 
 
 # --------------------------------------------------------------------------- #
@@ -160,6 +161,26 @@ class PipelineContext:
     max_fix_iterations: int = 3
 
 
+@dataclass
+class _ClusterWork:
+    """Pipeline-local progress for one independent failure cluster.
+
+    The global run stage is the maximum phase reached by any cluster and moves
+    only forward. A cluster may therefore enter ``FIX`` after another cluster
+    has already reached ``VERIFY`` without trying to move the run backwards.
+    """
+
+    cluster: Cluster
+    original_seeds: list[int]
+    phase: str = "pending"
+    agent_ids: list[str] = field(default_factory=list)
+    cause: Finding | None = None
+    worktree: str | None = None
+    outcome: str | None = None
+    error: str | None = None
+    retry_count: int = 0
+
+
 class Pipeline:
     """Executes the stage machine for a single run.
 
@@ -177,6 +198,14 @@ class Pipeline:
         self._fix_worktrees: list[str] = []
         self._conflicts: list[str] = []
         self._pool: SuitePool | None = None
+        self._agent_gate: asyncio.Semaphore | None = asyncio.Semaphore(
+            self._max_parallel
+        )
+        self._cluster_work: dict[str, _ClusterWork] = {}
+        self._cluster_tasks: dict[str, asyncio.Task[None]] = {}
+        self._cluster_progress = asyncio.Event()
+        self._merge_lock = asyncio.Lock()
+        self._agent_updates: dict[str, dict[str, Any]] = {}
 
     # -- driver ------------------------------------------------------------ #
 
@@ -264,6 +293,14 @@ class Pipeline:
             run.repo, run.commit_sha, run.id, ctx.workspace.root.parent
         )
         ctx.config = await workspace_mod.read_config(ctx.workspace)
+        policy = ctx.config.get("policy", {})
+        self._max_parallel = max(
+            1,
+            int(
+                policy.get("max_parallel_agents", os.getenv("MAX_PARALLEL_AGENTS", "6"))
+            ),
+        )
+        self._agent_gate = asyncio.Semaphore(self._max_parallel)
         ctx.max_fix_iterations = int(
             ctx.config.get("policy", {}).get(
                 "max_fix_iterations", ctx.max_fix_iterations
@@ -444,98 +481,45 @@ class Pipeline:
             return Stage.PASSED_CLEAN
         by_id = {s.id: s for s in ctx.scenarios}
         for cluster in ctx.clusters:
+            original_seeds = [
+                by_id[scenario_id].seed
+                for scenario_id in cluster.scenario_ids
+                if scenario_id in by_id
+            ]
             for scenario_id in cluster.scenario_ids:
                 by_id[scenario_id].cluster_id = cluster.id
+            self._cluster_work[cluster.id] = _ClusterWork(
+                cluster=cluster,
+                original_seeds=original_seeds,
+            )
         return Stage.INVESTIGATE
 
     async def stage_investigate(self) -> Stage:
-        """Fan out one Investigator per cluster to find root causes.
+        """Start independent cluster workflows and wait for the first cause.
 
-        Runs concurrently, bounded by ``MAX_PARALLEL_AGENTS``. Each agent
-        writes a ``root_cause`` finding to the blackboard; the orchestrator
-        relays cross-cluster findings between them as Messages.
+        Cluster phases advance independently; the global stage is the maximum
+        phase reached by any cluster and never moves backwards. This is why a
+        later cluster can enter FIX while the run already reads VERIFY.
         """
-        ctx = self.ctx
-        gate = asyncio.Semaphore(self._max_parallel)
-
-        async def investigate(cluster: Cluster) -> None:
-            scenarios = [s for s in ctx.scenarios if s.id in set(cluster.scenario_ids)]
-            async with gate:
-                role = InvestigatorAgent(ctx)
-                agent = await role.dispatch(
-                    cluster_id=cluster.id,
-                    cluster_label=cluster.label,
-                    cluster_size=cluster.size,
-                    scenario_seeds=[s.seed for s in scenarios],
-                    diagnoses=[s.diagnosis or "" for s in scenarios],
-                    param_correlation=clustering.correlate_params(scenarios),
-                )
-            # Anything noticed outside this cluster is relayed to the peers
-            # still working the other clusters — the only channel they have.
-            for finding in self._findings_of(agent):
-                if finding.kind is FindingKind.OBSERVATION:
-                    await role.relay(finding, Role.INVESTIGATOR, "finding")
-
-        results = await asyncio.gather(
-            *(investigate(cluster) for cluster in ctx.clusters),
-            return_exceptions=True,
-        )
-        for cluster, outcome in zip(ctx.clusters, results, strict=True):
-            if isinstance(outcome, BaseException):
-                await self._nonfatal(f"investigating {cluster.label}", outcome)
-
-        causes = [
-            f
-            for f in ctx.blackboard.all()
-            if f.kind is FindingKind.ROOT_CAUSE and f.confidence >= CONFIRM_CONFIDENCE
-        ]
-        for finding in causes:
-            await ctx.blackboard.confirm(finding.id, finding.author_agent_id or "")
-        if not ctx.blackboard.confirmed_root_causes():
-            ctx.run.error = "no root cause was established for any cluster"
-            return Stage.FAILED_UNRESOLVED
-        return Stage.FIX
+        self._start_cluster_workflows()
+        if await self._wait_for_cluster(
+            lambda work: (
+                work.phase
+                in {"root_cause", "fixing", "ready_to_verify", "verifying", "resolved"}
+            )
+        ):
+            return Stage.FIX
+        self.ctx.run.error = "no root cause was established for any cluster"
+        return Stage.FAILED_UNRESOLVED
 
     async def stage_fix(self) -> Stage:
-        """Fan out one Fixer per confirmed root cause.
-
-        Each Fixer patches the customer repo on a branch and self-verifies by
-        re-running only its own cluster's scenarios — cheap, fast feedback
-        before the expensive full-suite gate at VERIFY.
-        """
-        ctx = self.ctx
-        gate = asyncio.Semaphore(self._max_parallel)
-        causes = ctx.blackboard.confirmed_root_causes()
-        self._fix_worktrees = []
-
-        async def fix(cause: Finding) -> None:
-            name = f"fix-{cause.cluster_id or cause.id}"
-            branch = f"robotci/{name}-{ctx.run.commit_sha[:7]}"
-            path = await workspace_mod.create_worktree(ctx.workspace, name, branch)
-            seeds = [s.seed for s in ctx.scenarios if s.cluster_id == cause.cluster_id]
-            async with gate:
-                await FixerAgent(ctx).dispatch(
-                    root_cause=cause.summary,
-                    finding_id=cause.id,
-                    cluster_id=cause.cluster_id,
-                    files=cause.files,
-                    worktree=str(path),
-                    scenario_seeds=seeds,
-                    iteration=ctx.fix_iteration,
-                )
-            self._fix_worktrees.append(name)
-
-        outcomes = await asyncio.gather(
-            *(fix(cause) for cause in causes), return_exceptions=True
-        )
-        for cause, outcome in zip(causes, outcomes, strict=True):
-            if isinstance(outcome, BaseException):
-                await self._nonfatal(f"fixing {cause.summary}", outcome)
-
-        if not self._fix_worktrees:
-            ctx.run.error = "every Fixer failed before producing a patch"
-            return Stage.FAILED_UNRESOLVED
-        return Stage.VERIFY
+        """Let workflows continue until one patch is ready to verify."""
+        if await self._wait_for_cluster(
+            lambda work: work.phase in {"ready_to_verify", "verifying", "resolved"}
+        ):
+            return Stage.VERIFY
+        self.ctx.run.error = "every Fixer failed before producing a patch"
+        return Stage.FAILED_UNRESOLVED
 
     async def stage_verify(self) -> Stage:
         """Re-run the FULL suite against all accepted patches together.
@@ -548,9 +532,9 @@ class Pipeline:
         from simkit import suite as suite_mod
 
         ctx = self.ctx
-        self._conflicts = await workspace_mod.merge_patches(
-            ctx.workspace, self._fix_worktrees, into="verify"
-        )
+        await self._wait_for_all_clusters()
+        await self._retry_conflicted_clusters()
+        await asyncio.gather(*self._cluster_tasks.values(), return_exceptions=True)
         verify_tree = ctx.workspace.worktree("verify")
 
         results = await self._execute_suite(ctx.scenarios, repo_dir=verify_tree)
@@ -587,6 +571,221 @@ class Pipeline:
             f"{after.failed} scenarios still failing"
         )
         return Stage.FAILED_UNRESOLVED
+
+    def _start_cluster_workflows(self) -> None:
+        """Start one never-cancelling workflow per cluster."""
+        if self._cluster_tasks:
+            return
+        for cluster_id in self._cluster_work:
+            task = asyncio.create_task(self._run_cluster(cluster_id))
+            self._cluster_tasks[cluster_id] = task
+
+    async def _run_cluster(self, cluster_id: str) -> None:
+        work = self._cluster_work[cluster_id]
+        try:
+            await self._investigate_cluster(work)
+            if work.phase == "root_cause":
+                await self._fix_cluster(work)
+            if work.phase == "ready_to_verify":
+                await self._verify_cluster(work)
+        except Exception as exc:  # noqa: BLE001 - isolate one cluster
+            work.error = f"{type(exc).__name__}: {exc}"
+            work.outcome = "unresolved"
+            work.phase = "unresolved"
+            self._cluster_progress.set()
+            await self._nonfatal(f"cluster {work.cluster.label}", exc)
+
+    async def _investigate_cluster(self, work: _ClusterWork) -> None:
+        """Run one Investigator while other clusters continue independently."""
+        ctx = self.ctx
+        scenarios = [
+            scenario
+            for scenario in ctx.scenarios
+            if scenario.id in set(work.cluster.scenario_ids)
+        ]
+        self._set_cluster_phase(work, "investigating")
+        gate = self._agent_gate or asyncio.Semaphore(self._max_parallel)
+        async with gate:
+            role = InvestigatorAgent(ctx)
+            agent = await role.dispatch(
+                cluster=work.cluster,
+                cluster_id=work.cluster.id,
+                cluster_label=work.cluster.label,
+                cluster_size=work.cluster.size,
+                scenario_seeds=work.original_seeds,
+                diagnoses=[s.diagnosis or "" for s in scenarios],
+                param_correlation=clustering.correlate_params(scenarios),
+            )
+        work.agent_ids.append(agent.id)
+        await self._emit_agent_update(
+            role,
+            issue=_cluster_issue(scenarios),
+            step="investigating",
+        )
+        for finding in self._findings_of(agent):
+            if finding.kind is FindingKind.OBSERVATION:
+                await role.relay(finding, Role.INVESTIGATOR, "finding")
+        cause = next(
+            (
+                finding
+                for finding in reversed(ctx.blackboard.for_cluster(work.cluster.id))
+                if finding.kind is FindingKind.ROOT_CAUSE
+                and finding.confidence >= CONFIRM_CONFIDENCE
+            ),
+            None,
+        )
+        if cause is None:
+            work.outcome = "unresolved"
+            self._set_cluster_phase(work, "unresolved")
+            return
+        work.cause = cause
+        await ctx.blackboard.confirm(cause.id, cause.author_agent_id or agent.id)
+        self._set_cluster_phase(work, "root_cause")
+
+    async def _fix_cluster(self, work: _ClusterWork) -> None:
+        """Patch one cluster in isolation, bounded only while the agent runs."""
+        if work.cause is None:
+            self._set_cluster_phase(work, "unresolved")
+            work.outcome = "unresolved"
+            return
+        ctx = self.ctx
+        name = f"fix-{work.cluster.id}"
+        branch = f"robotci/{name}-{ctx.run.commit_sha[:7]}"
+        path = await workspace_mod.create_worktree(ctx.workspace, name, branch)
+        self._set_cluster_phase(work, "fixing")
+        gate = self._agent_gate or asyncio.Semaphore(self._max_parallel)
+        role = FixerAgent(ctx)
+        async with gate:
+            agent = await role.dispatch(
+                root_cause=work.cause.summary,
+                finding_id=work.cause.id,
+                cluster_id=work.cluster.id,
+                files=work.cause.files,
+                worktree=str(path),
+                scenario_seeds=work.original_seeds,
+                iteration=ctx.fix_iteration,
+            )
+        work.agent_ids.append(agent.id)
+        await self._emit_agent_update(
+            role,
+            issue=work.cause.summary,
+            step="fixing",
+        )
+        if "patched" in role.output and not role.output["patched"]:
+            work.outcome = "unresolved"
+            self._set_cluster_phase(work, "unresolved")
+            return
+        work.worktree = name
+        self._fix_worktrees.append(name)
+        self._set_cluster_phase(work, "ready_to_verify")
+
+    async def _verify_cluster(self, work: _ClusterWork) -> None:
+        """Serialize merge plus exact-seed verification for one cluster."""
+        if work.worktree is None:
+            return
+        async with self._merge_lock:
+            self._set_cluster_phase(work, "verifying")
+            conflicts = await workspace_mod.merge_patches(
+                self.ctx.workspace, [work.worktree], into="verify"
+            )
+            if conflicts:
+                self._conflicts.extend(
+                    name for name in conflicts if name not in self._conflicts
+                )
+                work.outcome = "unresolved"
+                self._set_cluster_phase(work, "conflicted")
+                return
+            results = await self._execute_suite(
+                self._cluster_scenarios(work),
+                repo_dir=self.ctx.workspace.worktree("verify"),
+            )
+            if results and all(result.status == "passed" for result in results):
+                work.outcome = "resolved"
+                self._set_cluster_phase(work, "resolved")
+            else:
+                work.outcome = "unresolved"
+                self._set_cluster_phase(work, "unresolved")
+
+    async def _retry_conflicted_clusters(self) -> None:
+        """Retry each conflict once after all non-conflicting patches landed."""
+        for work in self._cluster_work.values():
+            if work.phase != "conflicted" or work.worktree is None:
+                continue
+            work.retry_count += 1
+            await self._verify_cluster(work)
+            if work.phase == "conflicted":
+                work.outcome = "unresolved"
+                self._set_cluster_phase(work, "unresolved")
+
+    def _cluster_scenarios(self, work: _ClusterWork) -> list[Scenario]:
+        by_id = {scenario.id: scenario for scenario in self.ctx.scenarios}
+        remaining = list(work.cluster.scenario_ids)
+        scenarios: list[Scenario] = []
+        for seed in work.original_seeds:
+            for scenario_id in remaining:
+                scenario = by_id.get(scenario_id)
+                if scenario is not None and scenario.seed == seed:
+                    scenarios.append(scenario)
+                    remaining.remove(scenario_id)
+                    break
+        return scenarios
+
+    def _set_cluster_phase(self, work: _ClusterWork, phase: str) -> None:
+        work.phase = phase
+        self._cluster_progress.set()
+
+    async def _wait_for_cluster(
+        self, predicate: Callable[[_ClusterWork], bool]
+    ) -> bool:
+        """Wait for a milestone without imposing a batch barrier."""
+        while True:
+            if any(predicate(work) for work in self._cluster_work.values()):
+                return True
+            if self._cluster_work and all(
+                work.phase in _CLUSTER_TERMINAL for work in self._cluster_work.values()
+            ):
+                return False
+            self._cluster_progress.clear()
+            await self._cluster_progress.wait()
+
+    async def _wait_for_all_clusters(self) -> None:
+        """Wait until every independent workflow has reached a terminal phase."""
+        while self._cluster_work and not all(
+            work.phase in _CLUSTER_TERMINAL for work in self._cluster_work.values()
+        ):
+            self._cluster_progress.clear()
+            await self._cluster_progress.wait()
+
+    async def _emit_agent_update(
+        self,
+        role: InvestigatorAgent | FixerAgent,
+        *,
+        issue: str,
+        step: str,
+    ) -> None:
+        """Publish only newly known agent fields, never a full Agent object."""
+        session = role.session
+        if session is None:
+            return
+        agent = session.agent
+        handle = getattr(session, "handle", None) or getattr(session, "_handle", None)
+        values = {
+            "session_url": getattr(agent, "session_url", None),
+            "desktop_url": _optional_field(handle, "desktop_url")
+            or getattr(agent, "desktop_url", None),
+            "issue": issue or None,
+            "step": step or None,
+        }
+        patch: dict[str, Any] = {"agent_id": agent.id}
+        previous = self._agent_updates.setdefault(agent.id, {})
+        for name, value in values.items():
+            if value is None or previous.get(name) == value:
+                continue
+            setattr(agent, name, value)
+            previous[name] = value
+            patch[name] = value
+        if len(patch) > 1:
+            await self.ctx.bus.emit(self.ctx.run.id, EventType.AGENT_UPDATED, patch)
 
     async def stage_report(self) -> Stage:
         """Write the incident report from the confirmed blackboard findings."""
@@ -963,6 +1162,17 @@ def _parse_axes(detail: str) -> dict[str, tuple[float, float]]:
             except (TypeError, ValueError):
                 continue
     return axes
+
+
+def _optional_field(value: Any, name: str) -> Any:
+    """Read an optional field from a session handle without requiring it."""
+    return getattr(value, name, None) if value is not None else None
+
+
+def _cluster_issue(scenarios: list[Scenario]) -> str:
+    """Use only oracle diagnoses when describing an agent's assigned issue."""
+    diagnoses = list(dict.fromkeys(s.diagnosis for s in scenarios if s.diagnosis))
+    return "; ".join(diagnoses)
 
 
 # --------------------------------------------------------------------------- #

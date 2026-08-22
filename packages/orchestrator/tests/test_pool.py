@@ -307,3 +307,66 @@ async def test_no_progress_event_without_frame_and_resize_reason(
     assert not any(
         event.type is EventType.SCENARIO_PROGRESS for event in bus.history("run")
     )
+
+
+async def test_saturation_events_only_announce_transition_edges(tmp_path: Path) -> None:
+    bus = EventBus()
+    first_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def runner(*, scenario_id: str, **_: object) -> SimpleNamespace:
+        if scenario_id == "s0":
+            first_started.set()
+            await release.wait()
+        return SimpleNamespace(
+            scenario_id=scenario_id,
+            seed=0,
+            status="passed",
+            duration_s=0.0,
+            sim_time_s=0.0,
+            criteria=[],
+            diagnosis=None,
+            video_path=None,
+            trace_path=None,
+            error=None,
+        )
+
+    pool = SuitePool(
+        run_id="run",
+        bus=bus,
+        workers=1,
+        artifacts_dir=tmp_path,
+        runner=runner,
+    )
+    submit = asyncio.create_task(
+        pool.submit(
+            [{"id": "s0", "index": 0, "seed": 0}, {"id": "s1", "index": 1, "seed": 1}],
+            model_path="m",
+            harness_path="h",
+            task={},
+        )
+    )
+    try:
+        await first_started.wait()
+        saturated = [
+            event
+            for event in bus.history("run")
+            if event.type is EventType.WORKER_POOL_CHANGED
+            and event.data["reason"].startswith("saturated:")
+        ]
+        assert len(saturated) == 1
+        release.set()
+        await submit
+    finally:
+        if not submit.done():
+            release.set()
+            await submit
+        await pool.aclose()
+
+    saturated_events = [
+        event
+        for event in bus.history("run")
+        if event.type is EventType.WORKER_POOL_CHANGED
+        and event.data["reason"].startswith("saturated:")
+    ]
+    assert len(saturated_events) == 1
