@@ -40,6 +40,7 @@ const SCENARIO_COUNT = 24;
 /** Seeds that fail, split across two root causes. */
 const GRIP_FAILURES = [3, 9, 14];
 const LATENCY_FAILURES = [17, 21];
+const WORKER_POOL = ["worker_01", "worker_02", "worker_03"];
 const GRIP_DIAGNOSIS =
   "Gripper closed 41mm before reaching the cube; object never left the table.";
 const LATENCY_DIAGNOSIS =
@@ -354,9 +355,48 @@ export function mockRunScript(runId: string = MOCK_RUN_ID): ScriptedEvent[] {
   let passed = 0;
   let failed = 0;
   for (const scenario of scenarios) {
-    push(120, "scenario.started", { scenario_id: scenario.id });
-    const finished = finishScenario(scenario);
+    const workerId = WORKER_POOL[scenario.index % WORKER_POOL.length];
+    const liveFramePath = `${runId}/${scenario.id}_live.jpg`;
+    const queued = scenarios.length - scenario.index - 1;
+    push(40, "worker.pool_changed", {
+      workers: WORKER_POOL.length,
+      busy: 1,
+      queued,
+      reason: `${workerId} picked up ${scenario.id}`,
+    });
+    push(120, "scenario.started", {
+      scenario_id: scenario.id,
+      worker_id: workerId,
+    });
+    const inProgress = {
+      ...scenario,
+      status: "running" as const,
+      worker_id: workerId,
+      progress: 0,
+      sim_time_s: 0,
+      live_frame_path: liveFramePath,
+    };
+    const horizon = finishScenario(inProgress).sim_time_s ?? 6.2;
+    for (const progress of [0.25, 0.5, 0.75]) {
+      push(80, "scenario.progress", {
+        scenario_id: scenario.id,
+        progress,
+        sim_time_s: Number((horizon * progress).toFixed(2)),
+        live_frame_path: liveFramePath,
+      });
+    }
+    const finished = {
+      ...finishScenario(inProgress),
+      live_frame_path: null,
+      progress: 1,
+    } satisfies Scenario;
     push(260, "scenario.finished", finished);
+    push(40, "worker.pool_changed", {
+      workers: WORKER_POOL.length,
+      busy: 0,
+      queued,
+      reason: `${workerId} finished ${scenario.id}`,
+    });
     completed += 1;
     if (finished.status === "passed") passed += 1;
     else failed += 1;

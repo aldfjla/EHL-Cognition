@@ -9,6 +9,7 @@ import {
   groupAgents,
   headline,
   orderAgents,
+  rosterAgents,
   summarize,
 } from "./agentOps";
 import type { Agent } from "@/lib/types";
@@ -193,6 +194,37 @@ describe("summarize and headline", () => {
       agent({ id: "one", status: "succeeded" }),
       agent({ id: "two", status: "cancelled" }),
     ])).toBe("All 2 agents finished.");
+  });
+});
+
+describe("roster visibility", () => {
+  it("keeps an all-finished roster visible when finished agents are collapsed", () => {
+    const finished = [
+      agent({ id: "done-one", status: "succeeded" }),
+      agent({ id: "done-two", status: "cancelled" }),
+    ];
+
+    expect(rosterAgents(finished, false).map((item) => item.id)).toEqual([
+      "done-one",
+      "done-two",
+    ]);
+  });
+
+  it("collapses finished agents while active agents remain", () => {
+    const mixed = [
+      agent({ id: "done", status: "succeeded" }),
+      agent({ id: "working", status: "working" }),
+    ];
+
+    expect(rosterAgents(mixed, false).map((item) => item.id)).toEqual(["working"]);
+    expect(rosterAgents(mixed, true).map((item) => item.id)).toEqual([
+      "working",
+      "done",
+    ]);
+  });
+
+  it("returns an empty roster for no agents", () => {
+    expect(rosterAgents([], false)).toEqual([]);
   });
 });
 

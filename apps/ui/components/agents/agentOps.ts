@@ -58,6 +58,20 @@ export function isCollapsible(agent: Agent): boolean {
 }
 
 /**
+ * Return the roster that should be rendered for the current collapse setting.
+ *
+ * If every known agent can be collapsed, keep the completed roster visible so
+ * the panel never presents an empty body after a run finishes.
+ */
+export function rosterAgents(agents: Agent[], showFinished: boolean): Agent[] {
+  const ordered = orderAgents(agents);
+  if (showFinished || !ordered.some((agent) => !isCollapsible(agent))) {
+    return ordered;
+  }
+  return ordered.filter((agent) => !isCollapsible(agent));
+}
+
+/**
  * True when an embedded live view is worth offering.
  *
  * A finished agent's machine is gone, so its `desktop_url` would render an

@@ -34,6 +34,7 @@ import {
   isCollapsible,
   needsAttention,
   orderAgents,
+  rosterAgents,
   summarize,
   type DesktopMode,
   type GroupMode,
@@ -117,10 +118,10 @@ export function AgentOpsPanel({ runId, agents, onFocusAgent }: AgentOpsPanelProp
   const now = useMemo(() => headline(agents), [agents]);
 
   const collapsedAway = useMemo(() => ordered.filter(isCollapsible), [ordered]);
-  /** The roster actually rendered: done agents hide until asked for. */
+  /** The roster actually rendered, with an all-done fallback. */
   const roster = useMemo(
-    () => (state.showFinished ? ordered : ordered.filter((a) => !isCollapsible(a))),
-    [ordered, state.showFinished],
+    () => rosterAgents(agents, state.showFinished),
+    [agents, state.showFinished],
   );
   const attention = useMemo(() => ordered.filter(needsAttention), [ordered]);
 
