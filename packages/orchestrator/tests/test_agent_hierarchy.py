@@ -22,6 +22,7 @@ from orchestrator.schemas import (
     Scenario,
     ScenarioStatus,
     Speaker,
+    SuiteStats,
 )
 from orchestrator.workspace import Workspace
 
@@ -269,6 +270,35 @@ async def test_reviewer_cap_refusal_keeps_simkit_green_patch(
     ]
     assert errors and errors[0].data["fatal"] is False
     assert "MAX_AGENT_TREE_DEPTH=2" in errors[0].data["message"]
+
+
+def test_resolved_advisory_error_is_omitted_from_unresolved_reason(
+    tmp_path: Path,
+) -> None:
+    ctx = make_context(tmp_path)
+    pipe, resolved_work = work_for(ctx, "investigator-1")
+    resolved_work.outcome = "resolved"
+    resolved_work.error = "Reviewer seat was refused advisory-only"
+    unresolved_work = _ClusterWork(
+        cluster=Cluster(
+            run_id=ctx.run.id,
+            id="cluster-2",
+            label="still failing",
+            scenario_ids=["red"],
+            size=1,
+        ),
+        original_seeds=[11],
+        outcome="unresolved",
+        error="originally red seed stayed red",
+    )
+    pipe._cluster_work[unresolved_work.cluster.id] = unresolved_work
+
+    reason = pipe._verification_failure_reason(
+        SuiteStats.from_counts(passed=1, failed=0), {}
+    )
+
+    assert "Reviewer seat was refused" not in reason
+    assert "still failing: originally red seed stayed red" in reason
 
 
 def test_agent_tree_refuses_depth_and_fan_out() -> None:

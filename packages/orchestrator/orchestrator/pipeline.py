@@ -1411,7 +1411,7 @@ class Pipeline:
         cluster_errors = [
             f"{work.cluster.label}: {work.error}"
             for work in self._cluster_work.values()
-            if work.error
+            if work.error and work.outcome != "resolved"
         ]
         if cluster_errors:
             reasons.append("cluster errors: " + "; ".join(cluster_errors))
