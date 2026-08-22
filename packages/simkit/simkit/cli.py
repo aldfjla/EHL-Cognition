@@ -84,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
     suite.add_argument("--count", type=int, help="override scenarios.count")
     suite.add_argument("--seed", type=int, help="override scenarios.seed")
     suite.add_argument("--parallel", type=int, help="worker processes")
+    suite.add_argument("--workers", type=int, help="worker processes")
+    live_flags = suite.add_mutually_exclusive_group()
+    live_flags.add_argument("--live", dest="live", action="store_true")
+    live_flags.add_argument("--no-live", dest="live", action="store_false")
+    suite.set_defaults(live=False)
     suite.add_argument(
         "--record",
         choices=suite_mod.RECORD_POLICIES,
@@ -190,9 +195,10 @@ def cmd_suite(args: argparse.Namespace) -> int:
         model_path=model_path,
         harness_path=args.harness,
         task=task_of(config),
-        parallel=args.parallel,
+        parallel=args.parallel if args.parallel is not None else args.workers,
         record=policy,
         on_progress=on_progress,
+        live=args.live,
     )
     stats = suite_mod.summarize(results)
 

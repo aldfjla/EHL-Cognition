@@ -6,7 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-from simkit import live, runner
+from simkit import live, runner, suite
+from simkit import scenarios as scenarios_mod
 
 
 class _FakeRenderer:
@@ -131,3 +132,38 @@ def test_runner_observations_are_throttled_and_observer_errors_swallowed(
         }
         for event in observations
     )
+
+
+def test_suite_is_deterministic_across_pool_width_and_live(
+    toy_arm: Path, sweep_harness: Path, task: dict, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path))
+    scenarios = scenarios_mod.generate(
+        "determinism", 1234, 2, {"object_mass_kg": (0.2, 0.6)}
+    )
+    runs = [
+        suite.run_suite(
+            scenarios=scenarios,
+            model_path=str(toy_arm),
+            harness_path=str(sweep_harness),
+            task=task,
+            parallel=parallel,
+            record="none",
+            live=enabled,
+        )
+        for parallel in (1, 2)
+        for enabled in (False, True)
+    ]
+    baseline = runs[0]
+    for compared in runs[1:]:
+        for expected, actual in zip(baseline, compared, strict=True):
+            assert actual.status == expected.status
+            assert actual.criteria == expected.criteria
+            assert actual.diagnosis == expected.diagnosis
+            assert actual.sim_time_s == expected.sim_time_s
+            for key in ("qpos", "qvel", "object_pos", "contact_force", "t"):
+                assert np.array_equal(expected.trace[key], actual.trace[key]), (
+                    key,
+                    expected.worker_id,
+                    actual.worker_id,
+                )

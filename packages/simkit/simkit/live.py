@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import mujoco
+
 DEFAULT_LIVE_FPS = 4.0
 DEFAULT_LIVE_SIZE = (480, 360)
 
@@ -142,8 +144,6 @@ class LiveFrameWriter:
         from simkit.recorder import require_headless_gl
 
         require_headless_gl()
-        import mujoco
-
         self._renderer = mujoco.Renderer(
             scene.model,
             height=self.height,

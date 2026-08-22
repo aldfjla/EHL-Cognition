@@ -13,3 +13,8 @@ Two invariants hold everywhere in this package:
 """
 
 __version__ = "0.1.0"
+
+from simkit.pool import Job, WorkerPool
+from simkit.suite import run_seeds
+
+__all__ = ["Job", "WorkerPool", "run_seeds"]
