@@ -100,7 +100,9 @@ async def test_merge_patches_reports_conflicts_instead_of_raising(
         (path / "control.py").write_text(f"grip_force = {name!r}\n")
         await run_git(path, "commit", "-aqm", f"fix from {name}")
 
-    conflicts = await ws_mod.merge_patches(ws, ["fix-a", "fix-b"], into="verify")
+    conflicts = await ws_mod.merge_patches(
+        ws, ["fix-a", "fix-b"], into="verify", landed_worktrees=[]
+    )
 
     # Both touch the same line: the first lands, the second conflicts and is
     # aborted rather than left half-merged.
@@ -115,6 +117,30 @@ async def test_merge_patches_reports_conflicts_instead_of_raising(
     assert state.strip() == ""
 
 
+async def test_merge_patches_attributes_landed_sibling_in_one_at_a_time_flow(
+    tmp_path: Path,
+) -> None:
+    ws = await make_repo(tmp_path)
+    for name in ("fix-a", "fix-b"):
+        path = await ws_mod.create_worktree(ws, name, f"robotci/{name}")
+        (path / "control.py").write_text(f"grip_force = {name!r}\n")
+        await run_git(path, "commit", "-aqm", f"fix from {name}")
+
+    assert (
+        await ws_mod.merge_patches(ws, ["fix-a"], into="verify", landed_worktrees=[])
+        == []
+    )
+    conflicts = await ws_mod.merge_patches(
+        ws, ["fix-b"], into="verify", landed_worktrees=["fix-a"]
+    )
+
+    assert len(conflicts) == 1
+    assert conflicts[0].files == ("control.py",)
+    assert conflicts[0].blocked_by == ("fix-a",)
+    assert "fix-a" in (ws.worktree("verify") / "control.py").read_text()
+    assert (await run_git(ws.worktree("verify"), "status", "--porcelain")).strip() == ""
+
+
 async def test_non_conflicting_fixes_all_land(tmp_path: Path) -> None:
     ws = await make_repo(tmp_path)
     for name, filename in (("fix-a", "a.py"), ("fix-b", "b.py")):
@@ -123,7 +149,12 @@ async def test_non_conflicting_fixes_all_land(tmp_path: Path) -> None:
         await run_git(path, "add", filename)
         await run_git(path, "commit", "-qm", f"fix from {name}")
 
-    assert await ws_mod.merge_patches(ws, ["fix-a", "fix-b"], into="verify") == []
+    assert (
+        await ws_mod.merge_patches(
+            ws, ["fix-a", "fix-b"], into="verify", landed_worktrees=[]
+        )
+        == []
+    )
     verify = ws.worktree("verify")
     assert (verify / "a.py").exists()
     assert (verify / "b.py").exists()
@@ -153,7 +184,12 @@ async def test_same_file_different_regions_both_land(tmp_path: Path) -> None:
         await run_git(path, "add", "control.py")
         await run_git(path, "commit", "-qm", f"fix from {name}")
 
-    assert await ws_mod.merge_patches(ws, ["fix-a", "fix-b"], into="verify") == []
+    assert (
+        await ws_mod.merge_patches(
+            ws, ["fix-a", "fix-b"], into="verify", landed_worktrees=[]
+        )
+        == []
+    )
     content = (ws.worktree("verify") / "control.py").read_text()
     assert "line_0 = 2" in content
     assert "line_11 = 22" in content

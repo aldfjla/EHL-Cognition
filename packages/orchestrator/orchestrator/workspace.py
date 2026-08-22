@@ -178,7 +178,11 @@ async def apply_patch(ws: Workspace, worktree: str, patch: str) -> None:
 
 
 async def merge_patches(
-    ws: Workspace, worktrees: list[str], into: str
+    ws: Workspace,
+    worktrees: list[str],
+    into: str,
+    *,
+    landed_worktrees: list[str],
 ) -> list[PatchConflict]:
     """Combine every Fixer's branch into the verify worktree.
 
@@ -191,12 +195,13 @@ async def merge_patches(
         await create_worktree(ws, into, f"robotci/verify-{ws.commit_sha[:7]}")
 
     conflicted: list[PatchConflict] = []
-    merged_files: dict[str, set[str]] = {}
+    merged_files = {name: await _changed_files(ws, name) for name in landed_worktrees}
     for name in worktrees:
         sha = (await run_git(ws.worktree(name), "rev-parse", "HEAD")).strip()
         branch = (
             await run_git(ws.worktree(name), "rev-parse", "--abbrev-ref", "HEAD")
         ).strip()
+        patch_files = await _changed_files(ws, name)
         process = await asyncio.create_subprocess_exec(
             "git",
             "merge",
@@ -218,36 +223,8 @@ async def merge_patches(
             blocked_by = tuple(
                 sibling
                 for sibling, sibling_files in merged_files.items()
-                if set(files) & sibling_files
+                if patch_files & sibling_files
             )
-            if not blocked_by:
-                for sibling_path in ws.root.iterdir():
-                    sibling = sibling_path.name
-                    if sibling in {name, into, "base"} or not sibling_path.is_dir():
-                        continue
-                    try:
-                        sibling_sha = (
-                            await run_git(sibling_path, "rev-parse", "HEAD")
-                        ).strip()
-                        await run_git(
-                            target, "merge-base", "--is-ancestor", sibling_sha, "HEAD"
-                        )
-                    except (GitError, FileNotFoundError):
-                        continue
-                    sibling_files = {
-                        line
-                        for line in (
-                            await run_git(
-                                target,
-                                "diff",
-                                "--name-only",
-                                f"{ws.commit_sha}..{sibling_sha}",
-                            )
-                        ).splitlines()
-                        if line
-                    }
-                    if set(files) & sibling_files:
-                        blocked_by += (sibling,)
             conflicted.append(
                 PatchConflict(
                     worktree=name,
@@ -259,20 +236,26 @@ async def merge_patches(
             )
             await run_git(target, "merge", "--abort", check=False)
             continue
-        merged = {
-            line
-            for line in (
-                await run_git(
-                    target,
-                    "diff",
-                    "--name-only",
-                    f"{ws.commit_sha}..HEAD",
-                )
-            ).splitlines()
-            if line
-        }
-        merged_files[name] = merged
+        merged_files[name] = patch_files
     return conflicted
+
+
+async def _changed_files(ws: Workspace, worktree: str) -> set[str]:
+    """Return only one patch's paths, independent of the verify tree state."""
+    sha = (await run_git(ws.worktree(worktree), "rev-parse", "HEAD")).strip()
+    return {
+        line
+        for line in (
+            await run_git(
+                ws.worktree(worktree),
+                "diff",
+                "--name-only",
+                ws.commit_sha,
+                sha,
+            )
+        ).splitlines()
+        if line
+    }
 
 
 async def cleanup(ws: Workspace, keep_artifacts: bool = True) -> None:

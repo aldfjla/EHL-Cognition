@@ -193,6 +193,84 @@ async def test_depth_cap_refusal_is_visible_on_cluster_and_bus(
     assert errors and errors[0].data["fatal"] is False
 
 
+async def test_pipeline_fan_out_cap_refusal_is_visible_on_cluster_and_bus(
+    tmp_path: Path,
+) -> None:
+    ctx = make_context(tmp_path)
+    pipe, work = work_for(ctx, "investigator-1")
+    pipe._agent_tree = AgentTree(max_children=1)
+    pipe._agent_tree.register_root("investigator-1")
+    pipe._agent_tree.register_child("investigator-1", "existing-fixer")
+
+    await pipe._fix_cluster(work)
+
+    assert work.phase == "unresolved"
+    assert work.outcome == "unresolved"
+    assert "MAX_AGENT_CHILDREN=1" in (work.error or "")
+    errors = [
+        event for event in ctx.bus.history(ctx.run.id) if event.type is EventType.ERROR
+    ]
+    assert errors and errors[0].data["fatal"] is False
+    assert "MAX_AGENT_CHILDREN=1" in errors[0].data["message"]
+
+
+async def test_reviewer_cap_refusal_keeps_simkit_green_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = make_context(tmp_path)
+    pipe, work = work_for(ctx, "investigator-1")
+    pipe._agent_tree = AgentTree(max_depth=2)
+    reviewer_dispatches = 0
+
+    class Fixer:
+        def __init__(self, _ctx: PipelineContext) -> None:
+            self.session = None
+            self.output = {"patched": True}
+
+        async def dispatch(self, **_kwargs: object) -> Agent:
+            return Agent(run_id=ctx.run.id, role=Role.FIXER)
+
+    class Reviewer:
+        def __init__(self, _ctx: PipelineContext) -> None:
+            self.session = None
+            self.output = {"verdict": "ship"}
+
+        async def dispatch(self, **_kwargs: object) -> Agent:
+            nonlocal reviewer_dispatches
+            reviewer_dispatches += 1
+            return Agent(run_id=ctx.run.id, role=Role.REVIEWER)
+
+    async def create_worktree(*_args: object, **_kwargs: object) -> Path:
+        return tmp_path / "fix"
+
+    async def execute_suite(
+        scenarios: list[Scenario], repo_dir: Path | None = None
+    ) -> list[SimpleNamespace]:
+        del repo_dir
+        return [result(scenario, "passed") for scenario in scenarios]
+
+    monkeypatch.setattr("orchestrator.pipeline.FixerAgent", Fixer)
+    monkeypatch.setattr("orchestrator.pipeline.ReviewerAgent", Reviewer)
+    monkeypatch.setattr(
+        "orchestrator.pipeline.workspace_mod.create_worktree", create_worktree
+    )
+    monkeypatch.setattr(pipe, "_execute_cluster_suite", execute_suite)
+
+    await pipe._fix_cluster(work)
+
+    assert reviewer_dispatches == 0
+    assert work.phase == "ready_to_verify"
+    assert work.outcome is None
+    assert work.worktree == "fix-cluster-1"
+    assert pipe._fix_worktrees == ["fix-cluster-1"]
+    assert "MAX_AGENT_TREE_DEPTH=2" in (work.error or "")
+    errors = [
+        event for event in ctx.bus.history(ctx.run.id) if event.type is EventType.ERROR
+    ]
+    assert errors and errors[0].data["fatal"] is False
+    assert "MAX_AGENT_TREE_DEPTH=2" in errors[0].data["message"]
+
+
 def test_agent_tree_refuses_depth_and_fan_out() -> None:
     tree = AgentTree(max_depth=3, max_children=2)
     tree.register_root("owner")
@@ -245,7 +323,8 @@ async def test_red_seeds_reject_fix_even_when_reviewer_claims_success(
 
     assert work.phase == "unresolved"
     assert work.outcome == "unresolved"
-    assert "stayed red" in (work.error or "")
+    assert "11" in (work.error or "")
+    assert "Reviewer claimed success" in (work.error or "")
     assert pipe._fix_worktrees == []
 
 
@@ -257,6 +336,11 @@ def test_render_two_cluster_tree() -> None:
     tree.register_root("investigator-cluster-b")
     tree.register_child("investigator-cluster-b", "fixer-cluster-b")
     tree.register_child("fixer-cluster-b", "reviewer-cluster-b")
-    rendered = tree.render()
-    print(rendered)
-    assert rendered.count("investigator-") == 2
+    assert tree.render() == (
+        "investigator-cluster-a\n"
+        "  fixer-cluster-a\n"
+        "    reviewer-cluster-a\n"
+        "investigator-cluster-b\n"
+        "  fixer-cluster-b\n"
+        "    reviewer-cluster-b"
+    )
