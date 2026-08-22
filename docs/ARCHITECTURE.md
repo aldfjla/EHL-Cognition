@@ -104,10 +104,11 @@ FIX          ⋯ fan-out, one Fixer per confirmed cause        [agents + oracle]
 VERIFY
    ↓  merge all patches, re-run the FULL suite               [oracle + Tech Lead]
    ├── still failing, budget left ───────────────────────▶  back to FIX
-   ├── budget exhausted ─────────────────────────────────▶  FAILED_UNRESOLVED
+   ├── red/regressed/conflicted ─────────────────────────▶  REPORT
+   ├── infrastructure crash ────────────────────────────▶  FAILED_UNRESOLVED
 REPORT
    ├── full suite green, no regressions/conflicts ─────────▶ PR_OPENED [terminal]
-   └── anything still red ─────────────────────────────────▶ FAILED_UNRESOLVED [terminal]
+   └── unresolved findings ────────────────────────────────▶ FAILED_UNRESOLVED [terminal]
 ```
 
 Terminal states: `PASSED_CLEAN`, `PR_OPENED`, `FAILED_UNRESOLVED`.

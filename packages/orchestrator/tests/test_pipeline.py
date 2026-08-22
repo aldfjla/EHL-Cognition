@@ -120,6 +120,9 @@ def test_shipping_a_fix_must_pass_through_verify() -> None:
     assert Stage.REPORT in TRANSITIONS[Stage.VERIFY]
     # And VERIFY can send work back for another attempt.
     assert Stage.FIX in TRANSITIONS[Stage.VERIFY]
+    # A VERIFY infrastructure crash may use the direct failure transition;
+    # red verification results themselves route through REPORT.
+    assert Stage.FAILED_UNRESOLVED in TRANSITIONS[Stage.VERIFY]
 
 
 def test_a_clean_suite_exits_without_agents() -> None:

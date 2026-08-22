@@ -28,7 +28,9 @@ Flow
 -> REPORT -> PR_OPENED``
 
 with two early exits: a clean suite short-circuits to ``PASSED_CLEAN``, and
-exhausting the iteration budget lands on ``FAILED_UNRESOLVED``.
+red or regressed verification routes through ``REPORT`` to
+``FAILED_UNRESOLVED``. An infrastructure crash may transition directly to
+``FAILED_UNRESOLVED`` from any stage that permits it, including ``VERIFY``.
 """
 
 from __future__ import annotations
@@ -99,8 +101,9 @@ TRANSITIONS: dict[Stage, tuple[Stage, ...]] = {
     Stage.CLUSTER_FAILURES: (Stage.INVESTIGATE, Stage.PASSED_CLEAN),
     Stage.INVESTIGATE: (Stage.FIX, Stage.FAILED_UNRESOLVED),
     Stage.FIX: (Stage.VERIFY, Stage.FAILED_UNRESOLVED),
-    # Only a full green VERIFY may proceed to REPORT and then PR_OPENED.
-    Stage.VERIFY: (Stage.REPORT, Stage.FIX),
+    # Only a full green VERIFY may proceed to REPORT and then PR_OPENED; a red
+    # suite also goes through REPORT, so FAILED_UNRESOLVED here means a crash.
+    Stage.VERIFY: (Stage.REPORT, Stage.FIX, Stage.FAILED_UNRESOLVED),
     # REPORT writes findings for both green and failed verification; only the
     # former returns PR_OPENED.
     Stage.REPORT: (Stage.PR_OPENED, Stage.FAILED_UNRESOLVED),
@@ -890,6 +893,7 @@ class Pipeline:
         after = self._stats(ctx.scenarios)
         before = ctx.run.suite or after
         diff = await workspace_mod.diff(ctx.workspace, "verify")
+        incidents = [self._incident(cluster) for cluster in ctx.clusters]
 
         await ReporterAgent(ctx).dispatch(
             confirmed_findings=[
@@ -899,10 +903,9 @@ class Pipeline:
             before_stats=before.model_dump(mode="json"),
             after_stats=after.model_dump(mode="json"),
             diff=diff,
-            video_pairs=self._video_pairs(),
+            video_pairs=self._video_pairs(incidents),
         )
 
-        incidents = [self._incident(cluster) for cluster in ctx.clusters]
         verdict = (
             Verdict.FIXED if self._verification_is_green(after) else Verdict.UNRESOLVED
         )
@@ -1167,16 +1170,21 @@ class Pipeline:
             status=("unresolved" if still_failing or patch is None else "fixed"),
         )
 
-    def _video_pairs(self) -> list[dict[str, Any]]:
+    def _video_pairs(
+        self, incidents: list[Incident] | None = None
+    ) -> list[dict[str, Any]]:
+        if incidents is None:
+            incidents = [self._incident(cluster) for cluster in self.ctx.clusters]
+        by_cluster = {incident.cluster_id: incident for incident in incidents}
         return [
             {
                 "cluster_id": cluster.id,
                 "label": cluster.label,
-                "before": self._incident(cluster).before_video,
-                "after": self._incident(cluster).after_video,
+                "before": (incident := by_cluster[cluster.id]).before_video,
+                "after": incident.after_video,
                 "after_note": (
                     "verified after-video"
-                    if self._incident(cluster).after_video
+                    if incident.after_video
                     else "no verified after-video; proof is unavailable"
                 ),
             }
