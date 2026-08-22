@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://robotci.dev/schemas/repo.json",
+  "title": "Repo",
+  "description": "A GitHub repository connected to Robot CI, including status derived from run history.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "full_name",
+    "branch",
+    "suite_size",
+    "created_at",
+    "status"
+  ],
+  "properties": {
+    "id": { "type": "string", "description": "Opaque repository id, e.g. 'repo_01HQ...'." },
+    "full_name": { "type": "string", "description": "GitHub repository in 'owner/name' format." },
+    "branch": { "type": "string", "description": "Branch whose pushes wake Robot CI." },
+    "suite_size": { "type": "integer", "minimum": 1, "description": "Scenarios generated for each push." },
+    "created_at": { "type": "string", "format": "date-time" },
+    "last_push_at": { "type": ["string", "null"], "format": "date-time" },
+    "status": { "enum": ["dormant", "running"], "description": "Running while any run is non-terminal." },
+    "latest_run": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["id", "stage", "created_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "stage": { "$ref": "run.json#/$defs/stage" },
+        "created_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

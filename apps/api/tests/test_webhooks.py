@@ -13,7 +13,7 @@ import json
 from typing import Any
 
 from fastapi.testclient import TestClient
-from orchestrator.schemas import Run, Stage
+from orchestrator.schemas import Repo, Run, Stage
 
 from app.routers.webhooks import verify_signature
 from app.store import repo
@@ -179,3 +179,45 @@ def test_run_created_is_published(client: TestClient, bus: Any) -> None:
     assert types[0] == "run.created"
     # The index topic mirrors run-level events for the dashboard's home page.
     assert "run.created" in [event.type.value for event in bus.history("*")]
+
+
+def test_connected_repo_push_uses_branch_and_suite_size(
+    client: TestClient, db: Any, monkeypatch: Any
+) -> None:
+    connected = repo.create_repo(
+        db, Repo(full_name="acme/robot", branch="develop", suite_size=7)
+    )
+    db.commit()
+    captured: dict[str, Any] = {}
+
+    async def fake_drive(
+        run_id: str, bus: Any, settings: Any, suite_size: int | None = None
+    ) -> None:
+        captured.update(run_id=run_id, suite_size=suite_size)
+
+    monkeypatch.setattr("app.routers.webhooks._drive_pipeline", fake_drive)
+    body, headers = signed(
+        push_payload(ref="refs/heads/develop", repository={"full_name": "acme/robot"})
+    )
+
+    response = client.post("/webhooks/github", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert captured["suite_size"] == 7
+    with session_scope() as check:
+        stored = repo.get_repo(check, connected.id)
+        assert stored is not None
+        assert stored.last_push_at is not None
+
+
+def test_connected_repo_rejects_a_different_branch(client: TestClient, db: Any) -> None:
+    repo.create_repo(db, Repo(full_name="acme/robot", branch="develop"))
+    db.commit()
+    body, headers = signed(push_payload(ref="refs/heads/main"))
+
+    response = client.post("/webhooks/github", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert "connected branch develop" in response.json()["ignored"]
+    with session_scope() as check:
+        assert repo.list_runs(check) == []

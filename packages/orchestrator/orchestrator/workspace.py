@@ -224,7 +224,7 @@ def _apply_defaults(config: dict) -> dict:
     config.setdefault("control", {}).setdefault("rate_hz", 100)
     config.setdefault("task", {}).setdefault("name", "task")
     scenarios = config.setdefault("scenarios", {})
-    scenarios.setdefault("count", 24)
+    scenarios.setdefault("count", 50)
     scenarios.setdefault("seed", 1337)
     scenarios.setdefault("randomize", {})
     policy = config.setdefault("policy", {})
