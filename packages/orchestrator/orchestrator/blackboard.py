@@ -124,11 +124,7 @@ class Blackboard:
             # First on the board; there is nothing to relay to it.
             return []
         if role is Role.HARNESS_BUILDER:
-            return [
-                f
-                for f in self.constraints()
-                if f.author_role is Speaker.MODELER
-            ]
+            return [f for f in self.constraints() if f.author_role is Speaker.MODELER]
         if role is Role.SCENARIO_DESIGNER:
             return self.constraints()
         if role is Role.INVESTIGATOR:

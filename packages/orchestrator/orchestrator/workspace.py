@@ -122,9 +122,7 @@ async def create_worktree(ws: Workspace, name: str, branch: str) -> Path:
         if path.exists():
             shutil.rmtree(path)
     await run_git(ws.base, "branch", "-D", branch, check=False)
-    await run_git(
-        ws.base, "worktree", "add", "-b", branch, str(path), ws.commit_sha
-    )
+    await run_git(ws.base, "worktree", "add", "-b", branch, str(path), ws.commit_sha)
     return path
 
 
@@ -206,7 +204,9 @@ async def cleanup(ws: Workspace, keep_artifacts: bool = True) -> None:
             continue
         path = Path(line.removeprefix("worktree ").strip())
         if path != ws.base:
-            await run_git(ws.base, "worktree", "remove", "--force", str(path), check=False)
+            await run_git(
+                ws.base, "worktree", "remove", "--force", str(path), check=False
+            )
     if keep_artifacts:
         shutil.rmtree(ws.base, ignore_errors=True)
     else:
