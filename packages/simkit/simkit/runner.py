@@ -33,6 +33,7 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
@@ -42,6 +43,7 @@ import numpy as np
 
 from simkit import scene as scene_mod
 from simkit import scoring
+from simkit.live import LiveFrameWriter
 
 #: Control rate used when ``robotci.yaml`` does not say.
 DEFAULT_RATE_HZ = 100
@@ -65,6 +67,8 @@ class EpisodeResult:
     video_path: str | None = None
     trace_path: str | None = None
     error: str | None = None
+    live_frame_path: str | None = None
+    worker_id: str | None = None
 
 
 class WatchdogExpired(RuntimeError):
@@ -89,6 +93,10 @@ def run_scenario(
     task: dict[str, Any],
     record: bool = False,
     max_wall_s: float = 120.0,
+    live: bool = False,
+    on_observe: Callable[[dict[str, Any]], None] | None = None,
+    observe_hz: float = 2.0,
+    worker_id: str | None = None,
 ) -> EpisodeResult:
     """Execute one scenario end to end.
 
@@ -105,13 +113,19 @@ def run_scenario(
     random.seed(seed)
     np.random.seed(seed & 0xFFFFFFFF)
 
-    result = EpisodeResult(scenario_id=scenario_id, seed=seed, status="error")
+    result = EpisodeResult(
+        scenario_id=scenario_id,
+        seed=seed,
+        status="error",
+        worker_id=worker_id,
+    )
     task = task or {}
     criteria = list(task.get("success") or [])
     rate_hz = int(task.get("rate_hz") or DEFAULT_RATE_HZ)
     sim_limit = _sim_limit(criteria)
 
     recorder = None
+    live_writer = LiveFrameWriter(scenario_id) if live else None
     scene = None
     try:
         harness = load_harness(harness_path)
@@ -144,6 +158,11 @@ def run_scenario(
             sim_limit_s=sim_limit,
             deadline=started + float(max_wall_s),
             recorder=recorder,
+            live_writer=live_writer,
+            on_observe=on_observe,
+            observe_hz=observe_hz,
+            scenario_id=scenario_id,
+            worker_id=worker_id,
             seed=seed,
         )
         harness_params = {
@@ -193,6 +212,8 @@ def run_scenario(
     finally:
         if recorder is not None:
             recorder.close()
+        if live_writer is not None:
+            live_writer.close()
         result.duration_s = round(time.perf_counter() - started, 4)
     return result
 
@@ -314,6 +335,11 @@ class _EpisodeLoop:
         sim_limit_s: float,
         deadline: float,
         recorder: Any = None,
+        live_writer: LiveFrameWriter | None = None,
+        on_observe: Callable[[dict[str, Any]], None] | None = None,
+        observe_hz: float = 2.0,
+        scenario_id: str = "",
+        worker_id: str | None = None,
         seed: int = 0,
     ) -> None:
         self.scene = scene
@@ -322,6 +348,11 @@ class _EpisodeLoop:
         self.sim_limit_s = sim_limit_s
         self.deadline = deadline
         self.recorder = recorder
+        self.live_writer = live_writer
+        self.on_observe = on_observe
+        self.observe_hz = float(observe_hz)
+        self.scenario_id = scenario_id
+        self.worker_id = worker_id
         self.seed = seed
         self.steps = 0
         self._sim_per_control = max(
@@ -330,6 +361,7 @@ class _EpisodeLoop:
         self._frame_every = max(1, round(rate_hz / 30))
         collect_trace(scene, 0, trace)
         self._capture(force=True)
+        self._observe(force=True)
 
     def step(self, n: int = 1) -> float:
         """Advance ``n`` control periods, recording the trace. Returns sim time."""
@@ -340,6 +372,7 @@ class _EpisodeLoop:
             self.steps += 1
             collect_trace(self.scene, self.steps, self.trace)
             self._capture()
+            self._observe()
         return float(self.scene.data.time)
 
     def on_step(self) -> float:
@@ -353,8 +386,8 @@ class _EpisodeLoop:
     def finish(self) -> None:
         """Record the terminal state and flush the video, if any."""
         collect_trace(self.scene, self.steps, self.trace)
-        if self.recorder is not None:
-            self._capture(force=True)
+        self._capture(force=True)
+        self._observe(force=True)
 
     def _guard(self) -> None:
         if time.perf_counter() > self.deadline:
@@ -369,12 +402,44 @@ class _EpisodeLoop:
             )
 
     def _capture(self, force: bool = False) -> None:
-        if self.recorder is None:
+        if self.recorder is not None and (force or not self.steps % self._frame_every):
+            self.recorder.overlay(self._caption())
+            self.recorder.capture(self.scene)
+        if self.live_writer is not None:
+            self.live_writer.maybe_capture(self.scene, force=force)
+
+    def _observe(self, force: bool = False) -> None:
+        if self.on_observe is None:
             return
-        if not force and self.steps % self._frame_every:
+        now = time.monotonic()
+        interval = 1.0 / self.observe_hz if self.observe_hz > 0 else float("inf")
+        last = getattr(self, "_last_observe", None)
+        if not force and last is not None and now - last < interval:
             return
-        self.recorder.overlay(self._caption())
-        self.recorder.capture(self.scene)
+        self._last_observe = now
+        progress = 0.0
+        if self.sim_limit_s > 0:
+            progress = min(
+                max(float(self.scene.data.time) / self.sim_limit_s, 0.0), 1.0
+            )
+        try:
+            self.on_observe(
+                {
+                    "kind": "scenario_progress",
+                    "scenario_id": self.scenario_id,
+                    "seed": self.seed,
+                    "worker_id": self.worker_id,
+                    "progress": progress,
+                    "sim_time_s": float(self.scene.data.time),
+                    "live_frame_path": (
+                        self.live_writer.rel_path
+                        if self.live_writer is not None and self.live_writer.enabled
+                        else None
+                    ),
+                }
+            )
+        except Exception:  # noqa: BLE001 - observer is an optional side channel
+            return
 
     def _caption(self) -> str:
         params = self.scene.spec.params or {}
