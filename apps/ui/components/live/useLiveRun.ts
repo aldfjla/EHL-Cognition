@@ -69,7 +69,12 @@ export function useLiveRun(runId: string): LiveRunState {
   }, [mock, runId]);
 
   if (mock) {
-    return { ...mockState.run, live: mockState.live, replay: true };
+    return {
+      ...mockState.run,
+      missing: false,
+      live: mockState.live,
+      replay: true,
+    };
   }
   return { ...streamState, live: EMPTY_LIVE_STATE, replay: false };
 }

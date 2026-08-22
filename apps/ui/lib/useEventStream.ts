@@ -51,6 +51,7 @@ export interface RunState {
   /** Highest event seq applied. Used for reconnect and gap detection. */
   seq: number;
   error: string | null;
+  missing: boolean;
 }
 
 export const EMPTY_RUN_STATE: RunState = {
@@ -64,6 +65,7 @@ export const EMPTY_RUN_STATE: RunState = {
   connection: "connecting",
   seq: 0,
   error: null,
+  missing: false,
 };
 
 /** Backoff schedule for reconnects, in milliseconds. Capped, not unbounded. */
@@ -156,11 +158,12 @@ export function resetResyncTracker(tracker: ResyncTracker): void {
   tracker.stormed = false;
 }
 
-type Action =
+export type RunStateAction =
   | { kind: "event"; event: unknown }
   | { kind: "snapshot"; state: Partial<RunState> }
   | { kind: "connection"; connection: ConnectionState }
-  | { kind: "error"; error: string | null };
+  | { kind: "error"; error: string | null }
+  | { kind: "missing"; missing: boolean };
 
 function upsertById<T extends { id: string }>(items: T[], item: T): T[] {
   const at = items.findIndex((existing) => existing.id === item.id);
@@ -333,7 +336,10 @@ export function applyEvent(state: RunState, event: unknown): RunState {
   return next;
 }
 
-function reducer(state: RunState, action: Action): RunState {
+export function reduceRunState(
+  state: RunState,
+  action: RunStateAction,
+): RunState {
   switch (action.kind) {
     case "event":
       return applyEvent(state, action.event);
@@ -343,6 +349,12 @@ function reducer(state: RunState, action: Action): RunState {
       return { ...state, connection: action.connection };
     case "error":
       return { ...state, error: action.error };
+    case "missing":
+      return {
+        ...state,
+        missing: action.missing,
+        error: action.missing ? null : state.error,
+      };
   }
 }
 
@@ -352,7 +364,7 @@ function reducer(state: RunState, action: Action): RunState {
  * @param runId - run to follow, or null to stay idle (the index page).
  */
 export function useEventStream(runId: string | null): RunState {
-  const [state, dispatch] = useReducer(reducer, EMPTY_RUN_STATE);
+  const [state, dispatch] = useReducer(reduceRunState, EMPTY_RUN_STATE);
   const cursorRef = useRef<EventCursor>({
     appliedSeq: 0,
     resyncInFlight: false,
@@ -364,18 +376,27 @@ export function useEventStream(runId: string | null): RunState {
 
   /** First paint from REST, so the page is never blank while the socket opens. */
   const resync = useCallback(
-    async (id: string): Promise<void> => {
+    async (id: string): Promise<boolean> => {
       const cursor = cursorRef.current;
-      if (!beginResync(cursor)) return;
+      if (!beginResync(cursor)) return true;
 
       try {
         if (!recordResyncStart(resyncTrackerRef.current, Date.now())) {
           dispatch({ kind: "error", error: RESYNC_STORM_ERROR });
-          return;
+          return true;
         }
 
         const since = cursor.appliedSeq;
-        const detail = await api.getRun(id);
+        let detail: Awaited<ReturnType<typeof api.getRun>>;
+        try {
+          detail = await api.getRun(id);
+        } catch (err) {
+          if (err instanceof api.ApiError && err.status === 404) {
+            dispatch({ kind: "missing", missing: true });
+            return false;
+          }
+          throw err;
+        }
         const replayedEvents = await api.getEvents(id, since).catch(() => []);
         const [agents, messages, findings] = await Promise.all([
           api.getAgents(id).catch(() => [] as Agent[]),
@@ -399,8 +420,10 @@ export function useEventStream(runId: string | null): RunState {
             report,
             seq: appliedSeq,
             error: null,
+            missing: false,
           },
         });
+        return true;
       } finally {
         cursor.resyncInFlight = false;
       }
@@ -432,13 +455,20 @@ export function useEventStream(runId: string | null): RunState {
     let socket: WebSocket | null = null;
     let retry = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let missing = false;
 
-    void resync(runId).catch((err: Error) => {
-      dispatch({ kind: "error", error: err.message });
-    });
+    const stopForMissing = (): void => {
+      missing = true;
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      if (socket !== null) {
+        socket.onclose = null;
+        socket.close();
+        socket = null;
+      }
+    };
 
     const connect = (): void => {
-      if (closed) return;
+      if (closed || missing) return;
       dispatch({
         kind: "connection",
         connection: retry === 0 ? "connecting" : "reconnecting",
@@ -469,9 +499,13 @@ export function useEventStream(runId: string | null): RunState {
         // cannot reconstruct. Silently continuing is subtly wrong, which is
         // worse than visibly reloading.
         if (decision === "gap") {
-          void resync(runId).catch((err: Error) => {
-            dispatch({ kind: "error", error: err.message });
-          });
+          void resync(runId)
+            .then((found) => {
+              if (!found) stopForMissing();
+            })
+            .catch((err: Error) => {
+              dispatch({ kind: "error", error: err.message });
+            });
           return;
         }
         if (decision === "duplicate") return;
@@ -483,7 +517,7 @@ export function useEventStream(runId: string | null): RunState {
       };
 
       ws.onclose = (closeEvent: CloseEvent) => {
-        if (closed) return;
+        if (closed || missing) return;
         // 1000 after run.finished is the server saying "we are done".
         if (closeEvent.code === 1000) {
           dispatch({ kind: "connection", connection: "closed" });
@@ -496,7 +530,18 @@ export function useEventStream(runId: string | null): RunState {
       };
     };
 
-    connect();
+    void resync(runId)
+      .then((found) => {
+        if (!found) {
+          stopForMissing();
+          return;
+        }
+        connect();
+      })
+      .catch((err: Error) => {
+        dispatch({ kind: "error", error: err.message });
+        connect();
+      });
 
     return () => {
       closed = true;

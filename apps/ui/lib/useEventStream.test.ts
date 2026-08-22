@@ -7,6 +7,7 @@ import {
   beginResync,
   completeResync,
   recordResyncStart,
+  reduceRunState,
   resetResyncTracker,
   type EventCursor,
   type ResyncTracker,
@@ -52,6 +53,21 @@ function agent(overrides: Partial<Agent> = {}): Agent {
 }
 
 describe("event stream sequencing", () => {
+  it("marks a run as missing without changing its rendered data", () => {
+    const state = {
+      ...EMPTY_RUN_STATE,
+      error: "previous error",
+    };
+
+    expect(
+      reduceRunState(state, { kind: "missing", missing: true }),
+    ).toEqual({
+      ...state,
+      error: null,
+      missing: true,
+    });
+  });
+
   it("applies a burst of contiguous events arriving in one tick", () => {
     const cursor: EventCursor = { appliedSeq: 0, resyncInFlight: false };
     let state = EMPTY_RUN_STATE;
