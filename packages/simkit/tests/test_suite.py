@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from simkit import suite
+from simkit.pool import WorkerPool
 from simkit.runner import EpisodeResult
 
 
@@ -107,6 +108,31 @@ def test_progress_callback_exceptions_do_not_fail_the_suite(
         on_progress=explode,
     )
     assert len(results) == 2
+
+
+def test_caller_owned_pool_reports_one_progress_event_per_scenario(
+    toy_arm, sweep_harness, task
+) -> None:
+    progress: list[dict] = []
+    pool = WorkerPool(workers=2)
+    try:
+        results = suite.run_suite(
+            scenarios=scenarios(3),
+            model_path=str(toy_arm),
+            harness_path=str(sweep_harness),
+            task=task,
+            record="none",
+            on_progress=progress.append,
+            pool=pool,
+        )
+    finally:
+        pool.shutdown()
+
+    assert len(results) == 3
+    assert len(progress) == 3
+    assert {event["id"] for event in progress} == {
+        scenario["id"] for scenario in scenarios(3)
+    }
 
 
 def test_broken_harness_is_an_error_for_every_scenario(toy_arm, task, tmp_path) -> None:
