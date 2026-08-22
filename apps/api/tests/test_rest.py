@@ -342,7 +342,7 @@ def test_report_404_before_stage_report(client: TestClient, run: Run) -> None:
 
 
 def test_ingested_events_are_replayable(client: TestClient, run: Run) -> None:
-    """The path ``scripts/seed_mock_run.py`` drives a live dashboard through."""
+    """The event ingest path drives a live dashboard through."""
     accepted = client.post(
         f"/runs/{run.id}/events",
         json={

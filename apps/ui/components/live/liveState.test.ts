@@ -6,7 +6,6 @@
 
 import { describe, expect, it } from "vitest";
 
-import { LIVE_MOCK_RUN_ID, mockLiveScript } from "@/lib/mockLive";
 import type { Agent, Scenario, TypedRunEvent } from "@/lib/types";
 
 import {
@@ -259,33 +258,5 @@ describe("feed URLs", () => {
     expect(liveFrameUrl("run_1", "scn_2")).toMatch(
       /\/runs\/run_1\/scenarios\/scn_2\/live\.jpg$/,
     );
-  });
-});
-
-describe("mockLiveScript", () => {
-  it("emits monotonic seq and a coherent suite", () => {
-    const script = mockLiveScript(LIVE_MOCK_RUN_ID);
-    let last = 0;
-    for (const frame of script) {
-      expect(frame.event.seq).toBe(last + 1);
-      last = frame.event.seq;
-    }
-    const types = script.map((f) => f.event.type);
-    expect(types.filter((t) => t === "scenario.created")).toHaveLength(18);
-    expect(types.filter((t) => t === "scenario.finished")).toHaveLength(18);
-    expect(types).toContain("scenario.progress");
-    expect(types).toContain("worker.pool_changed");
-    expect(types[types.length - 1]).toBe("run.finished");
-  });
-
-  it("replays through the reducers into a fully finished wall", () => {
-    const script = mockLiveScript(LIVE_MOCK_RUN_ID);
-    let live = EMPTY_LIVE_STATE;
-    for (const frame of script) {
-      live = applyLiveEvent(live, frame.event);
-    }
-    // Everything finished, so no progress entries and an empty pool.
-    expect(Object.keys(live.progress)).toHaveLength(0);
-    expect(live.pool).toMatchObject({ busy: 0, queued: 0 });
   });
 });

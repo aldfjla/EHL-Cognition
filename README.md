@@ -87,11 +87,9 @@ curl -X POST localhost:8000/webhooks/manual \
   -d '{"repo":"your-org/robot-arm-control","sha":"<sha>"}'
 ```
 
-Building the UI without credentials:
-
-```bash
-make seed    # replays a scripted run so every component has live-looking data
-```
+Building the UI without credentials: open
+`http://localhost:3000/runs/run_replay_demo` after starting the UI. The browser
+replays a complete run without an API connection.
 
 ### Make targets
 
@@ -101,7 +99,6 @@ make seed    # replays a scripted run so every component has live-looking data
 | `make api` / `make ui` / `make dev` | run the API, the dashboard, or both |
 | `make menagerie` | download the robot model library |
 | `make smoke` | verify Devin API auth with one throwaway session |
-| `make seed` | emit a fake run for UI development |
 | `make test` / `make lint` / `make fmt` | pytest, ruff |
 
 ## Using it on your own repo

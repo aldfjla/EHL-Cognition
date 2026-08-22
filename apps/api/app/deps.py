@@ -54,8 +54,8 @@ def get_db() -> Iterator[Session]:
 def get_bus() -> EventBus:
     """The process-wide :class:`~orchestrator.bus.EventBus`.
 
-    Created lazily so the seed script and the tests get the same bus the app
-    uses without having to run the lifespan.
+    Created lazily so development clients and the tests get the same bus the
+    app uses without having to run the lifespan.
     """
     global _bus
     if _bus is None:

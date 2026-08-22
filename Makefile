@@ -10,7 +10,7 @@ RUFF    := $(VENV)/bin/ruff
 UI_DIR  := apps/ui
 
 .DEFAULT_GOAL := help
-.PHONY: help setup api ui dev test fmt lint menagerie seed smoke clean
+.PHONY: help setup api ui dev test fmt lint menagerie smoke clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -42,9 +42,6 @@ lint: ## Check formatting and lint without writing
 
 menagerie: ## Download the MuJoCo Menagerie robot model library into vendor/
 	bash scripts/fetch_menagerie.sh
-
-seed: ## Emit a fake run into the DB/bus so the UI can be built without Devin
-	$(PY) scripts/seed_mock_run.py
 
 smoke: ## Prove DEVIN_API_KEY works by creating one throwaway session
 	$(PY) scripts/devin_smoke.py
