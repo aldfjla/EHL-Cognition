@@ -14,6 +14,7 @@ import {
   STAGE_ORDER,
   TERMINAL_STAGES,
   type Agent,
+  type RobotModel,
   type Run,
   type Stage,
 } from "@/lib/types";
@@ -156,14 +157,45 @@ export default function PipelineTimeline({
           suite {run.suite.passed}/{run.suite.total} passed
         </p>
       )}
-      {run?.robot_model && (
-        <p className="mt-1 truncate font-mono text-[10px] text-slate-500">
-          {run.robot_model.name ?? "model"} · {run.robot_model.source}
-        </p>
-      )}
+      {run?.robot_model && <ModelProvenance model={run.robot_model} />}
       {run?.error && (
         <p className="mt-2 text-[11px] text-status-error">{run.error}</p>
       )}
+    </div>
+  );
+}
+
+/**
+ * Where the simulated robot came from.
+ *
+ * The suite's verdict only means something if the model is the right robot, so
+ * an approximate model and an unknown license are stated rather than hidden.
+ */
+function ModelProvenance({ model }: { model: RobotModel }) {
+  const steps = model.processing_steps ?? [];
+  return (
+    <div className="mt-2 space-y-1 border-t border-surface-border pt-2 font-mono text-[10px] text-slate-500">
+      <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+        <span className="truncate text-slate-400">
+          {model.name ?? "model"} · {model.source}
+        </span>
+        {model.dof != null && <span>{model.dof} dof</span>}
+        {model.approximate && (
+          <span className="text-status-blocked">approximate</span>
+        )}
+        {model.cache_hit && <span>cached</span>}
+      </p>
+      {model.provenance && (
+        <p className="break-words" title={model.provenance}>
+          {model.provenance}
+        </p>
+      )}
+      {steps.length > 0 && <p className="truncate">{steps.join(" → ")}</p>}
+      <p>
+        {model.license ?? (
+          <span className="text-status-blocked">license unknown</span>
+        )}
+      </p>
     </div>
   );
 }

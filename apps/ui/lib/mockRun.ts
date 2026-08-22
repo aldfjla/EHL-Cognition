@@ -1002,6 +1002,11 @@ index 7c02e11..d9b3f45 100644
       model_path: "vendor/menagerie/franka_emika_panda/panda.xml",
       dof: 7,
       confidence: 0.97,
+      provenance: "Menagerie entry franka_emika_panda; robotci.yaml robot.menagerie",
+      license: "Apache License 2.0",
+      processing_steps: ["Menagerie lookup"],
+      approximate: false,
+      cache_hit: true,
     },
     suite: {
       total: 24,
