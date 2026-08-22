@@ -88,9 +88,12 @@ export default function MissionControlPage({
           <div className="flex flex-wrap items-center gap-3">
             <Link
               href="/runs"
-              className="inline-flex items-center gap-2 rounded-full border border-surface-border px-4 py-2 font-mono text-sm text-slate-300 transition-colors hover:border-sky-500/70 hover:bg-surface-raised hover:text-sky-300"
+              className="inline-flex items-center gap-3 rounded-full border border-surface-border px-5 py-2.5 font-mono text-base font-medium text-slate-200 transition-colors hover:border-sky-500/70 hover:bg-surface-raised hover:text-sky-300"
             >
-              <span aria-hidden>←</span> runs
+              <span aria-hidden className="text-2xl leading-none">
+                ←
+              </span>
+              Runs
             </Link>
             <h1 className="font-mono text-lg font-semibold">{runId}</h1>
             {replay && (
