@@ -187,13 +187,16 @@ class EventType(str, Enum):
     RUN_STAGE_CHANGED = "run.stage_changed"
     RUN_FINISHED = "run.finished"
     AGENT_CREATED = "agent.created"
+    AGENT_UPDATED = "agent.updated"
     AGENT_STATUS_CHANGED = "agent.status_changed"
     AGENT_ACTIVITY = "agent.activity"
     MESSAGE_SENT = "message.sent"
     SCENARIO_CREATED = "scenario.created"
     SCENARIO_STARTED = "scenario.started"
+    SCENARIO_PROGRESS = "scenario.progress"
     SCENARIO_FINISHED = "scenario.finished"
     SUITE_PROGRESS = "suite.progress"
+    WORKER_POOL_CHANGED = "worker.pool_changed"
     FINDING_CREATED = "finding.created"
     FINDING_UPDATED = "finding.updated"
     ARTIFACT_CREATED = "artifact.created"
@@ -308,6 +311,21 @@ class Agent(_Base):
         default=None,
         description="Latest transcript line, for the live activity ticker.",
     )
+    desktop_url: str | None = Field(
+        default=None,
+        description="Embeddable live view of the agent's machine, when the "
+        "session exposes one. Null means the dashboard shows the ticker "
+        "instead of a dead frame.",
+    )
+    issue: str | None = Field(
+        default=None,
+        description="The failure being worked on, in the oracle's words. "
+        "Distinct from ``task``, which is our instruction.",
+    )
+    step: str | None = Field(
+        default=None,
+        description="Coarse phase inside the agent's own work.",
+    )
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
     finished_at: datetime | None = None
@@ -357,6 +375,19 @@ class Scenario(_Base):
     )
     cluster_id: str | None = None
     video_path: str | None = None
+    live_frame_path: str | None = Field(
+        default=None,
+        description="Most recent rendered frame while running, overwritten in "
+        "place. Null once ``video_path`` takes over.",
+    )
+    worker_id: str | None = None
+    progress: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of the simulated horizon completed. Advisory "
+        "only — never a success signal.",
+    )
     trace_path: str | None = None
     error: str | None = None
 

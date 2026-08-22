@@ -85,12 +85,28 @@ and the client already holds the run. The UI drives `PipelineTimeline` from it.
 | type | when | `data` |
 |---|---|---|
 | `agent.created` | before the Devin session is requested | full `Agent` |
+| `agent.updated` | any non-status field changes | `{agent_id, ...changed fields}` |
 | `agent.status_changed` | any status transition | `{agent_id, status, previous_status}` |
 | `agent.activity` | new transcript line | `{agent_id, text, ts}` |
 
 `agent.created` is emitted **before** the API call, with `status: "starting"`
 and a null `session_id`. A card appearing instantly and then filling in reads as
 alive; a five-second blank grid reads as hung.
+
+`agent.updated` is a **partial patch**, keyed by `agent_id`, and carries only the
+fields that changed. It is how `session_url`, `desktop_url`, `issue` and `step`
+arrive after the card is already on screen — the session id and any live view of
+the agent's machine do not exist at `agent.created` time.
+
+`desktop_url` is populated only when the session actually exposes an embeddable
+view of its machine; otherwise it stays null and the card shows the activity
+ticker and a `session_url` link. A frame that renders an error page is worse
+than no frame.
+
+`issue` is the failure the agent is working on **in the oracle's words** —
+normally the representative `diagnosis` of its cluster. `task` is the
+instruction we gave it. Keeping them separate is what lets the dashboard say
+what is wrong without laundering an agent's guess into a measured fact.
 
 `agent.activity` is the highest-volume event type. It is throttled server-side
 to at most one per agent per second — the ticker exists to show *that* work is
@@ -110,9 +126,11 @@ recipient's prompt, not before. `TeamChat` and `AgentGraph` both consume this.
 | type | when | `data` |
 |---|---|---|
 | `scenario.created` | matrix generated | full `Scenario` (status `pending`) |
-| `scenario.started` | worker picks it up | `{scenario_id}` |
+| `scenario.started` | worker picks it up | `{scenario_id, worker_id}` |
+| `scenario.progress` | while simulating, throttled | `{scenario_id, progress, sim_time_s, live_frame_path}` |
 | `scenario.finished` | result available | full `Scenario` |
-| `suite.progress` | every N completions | `{total, completed, passed, failed}` |
+| `suite.progress` | every N completions | `{total, completed, passed, failed, running, workers}` |
+| `worker.pool_changed` | pool resized or saturation changes | `{workers, busy, queued, reason}` |
 
 The whole matrix is emitted as `scenario.created` up front, so
 `ScenarioMatrix` can render the full grid greyed out and fill it in. Growing
@@ -122,6 +140,39 @@ the things worth showing.
 `suite.progress` is redundant with counting `scenario.finished` events. It
 exists so the index page and any late subscriber get a summary without
 replaying the whole matrix.
+
+## Live simulation feeds
+
+Many scenarios simulate at once, and each running one is watchable. Frames do
+**not** travel over the event stream — a video feed multiplexed into the same
+socket as state would starve the state.
+
+```
+worker  ──renders──▶  ARTIFACTS_DIR/<live_frame_path>   (one JPEG, overwritten in place)
+browser ──GET──────▶  /runs/{id}/scenarios/{sid}/live.mjpg   (multipart/x-mixed-replace)
+                      /runs/{id}/scenarios/{sid}/live.jpg    (single frame, for thumbnails)
+```
+
+`scenario.progress` announces that a new frame exists and how far along the
+scenario is; the browser decides whether to open a feed for it. A tile that is
+off-screen or collapsed should not hold an MJPEG connection open — the point of
+the throttled progress event is that the grid stays live without N video
+streams.
+
+Rendering is a **side channel**. It never feeds back into the physics step, so
+`(model, harness, seed)` still reproduces a result bit-for-bit whether or not
+anyone was watching. A dropped frame is not an error; it is a frame nobody
+needed.
+
+`worker_id` on `scenario.started` is what lets the dashboard show the pool
+saturated rather than a flat list: N workers, each with the scenario it is
+currently simulating.
+
+`worker.pool_changed` fires when the pool is resized — including the fan-out
+after clustering, when several fixers are dispatched at once and each one's
+verification re-run competes for the same workers. `reason` is a short
+human-readable cause (`"verify fan-out: 3 clusters"`), shown in the UI so a
+sudden change in throughput is explained rather than mysterious.
 
 ### Findings
 
@@ -168,6 +219,8 @@ components disagreeing about `seq`.
 | `TeamChat` | `message.sent` |
 | `AgentGraph` | `agent.created`, `message.sent` |
 | `ScenarioMatrix` | `scenario.*`, `suite.progress`, cluster data from `GET /runs/{id}` |
+| `LiveSimGrid` | `scenario.started`, `scenario.progress`, `scenario.finished`, `worker.pool_changed` |
+| `AgentOps` / desktop panes | `agent.created`, `agent.updated`, `agent.status_changed`, `agent.activity` |
 | `DiffViewer` / `ReportView` | `report.created` |
 | `VideoCompare` | `artifact.created`, `report.created` |
 
