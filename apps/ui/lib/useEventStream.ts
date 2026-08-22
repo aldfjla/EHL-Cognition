@@ -72,6 +72,11 @@ const RESYNC_WINDOW_MS = 10_000;
 const MAX_RESYNCS_PER_WINDOW = 3;
 export const RESYNC_STORM_ERROR =
   "Live stream resync storm detected; event updates have been paused.";
+const TERMINAL_AGENT_STATUSES: Agent["status"][] = [
+  "succeeded",
+  "failed",
+  "cancelled",
+];
 
 /**
  * True when this run id should be served by the local scripted replay instead
@@ -221,12 +226,31 @@ export function applyEvent(state: RunState, event: unknown): RunState {
       next.agents = upsertById(state.agents, typed.data);
       break;
 
-    case "agent.status_changed":
-      next.agents = patchById(state.agents, typed.data.agent_id, {
-        status: typed.data.status,
+    case "agent.updated": {
+      const { agent_id: agentId, ...changed } = typed.data;
+      const definedChanged = Object.fromEntries(
+        Object.entries(changed).filter(([, value]) => value !== undefined),
+      ) as Partial<Agent>;
+      next.agents = patchById(state.agents, agentId, {
+        ...definedChanged,
         updated_at: typed.ts,
       });
       break;
+    }
+
+    case "agent.status_changed": {
+      const patch: Partial<Agent> = {
+        status: typed.data.status,
+        updated_at: typed.ts,
+      };
+      if (typed.data.finished_at !== undefined) {
+        patch.finished_at = typed.data.finished_at;
+      } else if (TERMINAL_AGENT_STATUSES.includes(typed.data.status)) {
+        patch.finished_at = typed.ts;
+      }
+      next.agents = patchById(state.agents, typed.data.agent_id, patch);
+      break;
+    }
 
     case "agent.activity":
       next.agents = patchById(state.agents, typed.data.agent_id, {
@@ -234,7 +258,6 @@ export function applyEvent(state: RunState, event: unknown): RunState {
         updated_at: typed.data.ts ?? typed.ts,
       });
       break;
-
     case "message.sent":
       next.messages = upsertById(state.messages, typed.data);
       break;

@@ -151,6 +151,11 @@ class ScenarioStatus(str, Enum):
     ERROR = "error"  # the sim broke, distinct from the robot failing the task
 
 
+class ScenarioErrorKind(str, Enum):
+    TIMEOUT = "timeout"
+    INFRA = "infra"
+
+
 class FindingKind(str, Enum):
     ROOT_CAUSE = "root_cause"
     PATCH = "patch"
@@ -221,6 +226,26 @@ class RobotModel(_Base):
         ge=0.0,
         le=1.0,
         description="Modeler's confidence that this matches the real hardware.",
+    )
+    provenance: str | None = Field(
+        default=None,
+        description="Concrete file, Menagerie entry, or signal behind the pick.",
+    )
+    license: str | None = Field(
+        default=None,
+        description="License read from the source model when it is known.",
+    )
+    processing_steps: list[str] = Field(
+        default_factory=list,
+        description="Ordered conversion and validation steps applied.",
+    )
+    approximate: bool = Field(
+        default=False,
+        description="True when the model identity or physics is an approximation.",
+    )
+    cache_hit: bool = Field(
+        default=False,
+        description="True when this model came from the durable resolution cache.",
     )
 
 
@@ -305,6 +330,20 @@ class Repo(_Base):
     full_name: str
     branch: str = "main"
     suite_size: int = Field(default=50, ge=1)
+    #: Extra watched branch patterns beyond ``branch``. Empty means "only
+    #: ``branch``". Populated from the repo's ``robotci.yaml`` ``ci.branches``
+    #: after the first checkout — see :mod:`orchestrator.triggers`.
+    branches: list[str] = Field(default_factory=list)
+    #: Path globs a push must touch to start a run, and globs subtracted from
+    #: them. ``None`` means unset (use the built-in defaults); an *empty list*
+    #: is a configured value meaning "nothing" — ``paths.exclude: []`` in a
+    #: repo's ``robotci.yaml`` disables the default exclusions and must survive
+    #: the round-trip through storage.
+    path_include: list[str] | None = None
+    path_exclude: list[str] | None = None
+    #: Where the filters above came from: ``"default"`` until a checkout has
+    #: been read, then ``"robotci.yaml"`` or ``"registry"`` when set by API.
+    filters_source: Literal["default", "registry", "robotci.yaml"] = "default"
     created_at: datetime = Field(default_factory=_now)
     last_push_at: datetime | None = None
     status: Literal["dormant", "running"] = "dormant"
@@ -411,6 +450,9 @@ class Scenario(_Base):
     )
     trace_path: str | None = None
     error: str | None = None
+    error_kind: ScenarioErrorKind | None = None
+    retries: int = Field(default=0, ge=0)
+    retry_reason: str | None = None
 
 
 class Finding(_Base):

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
+from simkit import pool as pool_mod
 from simkit.pool import Job, WorkerPool
 
 
@@ -89,6 +90,35 @@ def test_dead_worker_is_replaced_and_pool_remains_usable(
         assert results[1].status in {"passed", "failed"}
         follow_up = pool.submit(make_jobs(toy_arm, sweep_harness, task, 1))
         assert follow_up.results(timeout=30)[0].status in {"passed", "failed"}
+
+
+def test_parent_watchdog_terminates_stopped_worker(
+    toy_arm, sweep_harness, task, tmp_path, monkeypatch
+) -> None:
+    hang = tmp_path / "stopped.py"
+    hang.write_text(
+        "import os\n"
+        "import signal\n"
+        "def run_episode(model, data, params):\n"
+        "    os.kill(os.getpid(), signal.SIGSTOP)\n"
+    )
+    monkeypatch.setattr(pool_mod, "PARENT_WATCHDOG_GRACE_S", 0.05)
+    job = make_jobs(toy_arm, sweep_harness, task, 1)[0]
+    job = Job(
+        index=job.index,
+        scenario_id="stopped",
+        seed=job.seed,
+        params=job.params,
+        model_path=job.model_path,
+        harness_path=str(hang),
+        task=job.task,
+        max_wall_s=0.05,
+    )
+    with WorkerPool(workers=1) as pool:
+        result = pool.submit([job]).results(timeout=5)[0]
+        assert result.status == "error"
+        assert result.error_kind == "timeout"
+        assert "parent watchdog" in (result.error or "")
 
 
 def test_batch_cancellation_replaces_running_worker(

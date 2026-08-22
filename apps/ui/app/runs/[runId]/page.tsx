@@ -160,7 +160,7 @@ export default function MissionControlPage({
           >
             {replay ? "scripted replay" : state.connection} · seq {state.seq}
           </span>
-          {state.run?.pull_request_url && (
+          {state.run?.pull_request_url ? (
             <div>
               <a
                 href={state.run.pull_request_url}
@@ -171,6 +171,14 @@ export default function MissionControlPage({
                 pull request →
               </a>
             </div>
+          ) : (
+            // A pull request only exists when the whole suite came back green;
+            // say so rather than leaving an empty space that reads as pending.
+            state.run?.stage === "FAILED_UNRESOLVED" && (
+              <div className="font-mono text-xs text-status-failed">
+                no pull request — suite still red
+              </div>
+            )
           )}
         </div>
       </header>
@@ -237,6 +245,7 @@ export default function MissionControlPage({
             <AgentTree
               agents={state.agents}
               messages={state.messages}
+              incidents={state.report?.incidents ?? []}
               focusedAgentId={focusedAgent}
               onFocusAgent={setFocusedAgent}
             />

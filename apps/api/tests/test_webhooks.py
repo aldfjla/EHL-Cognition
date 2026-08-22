@@ -7,15 +7,16 @@ must not reach the store at all.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 from typing import Any
 
 from fastapi.testclient import TestClient
-from orchestrator.schemas import Repo, Run, Stage
+from orchestrator.schemas import EventType, Repo, Run, Stage
 
-from app.routers.webhooks import verify_signature
+from app.routers.webhooks import _drive_pipeline, verify_signature
 from app.store import repo
 from app.store.db import session_scope
 
@@ -99,7 +100,10 @@ def test_other_branch_is_ignored_with_200(client: TestClient) -> None:
     response = client.post("/webhooks/github", content=body, headers=headers)
 
     assert response.status_code == 200
-    assert "TARGET_BRANCH" in response.json()["ignored"]
+    body_json = response.json()
+    assert body_json["reason_code"] == "branch_not_watched"
+    assert "spike is not watched" in body_json["ignored"]
+    assert body_json["filters"]["branches"] == ["main"]
 
 
 def test_other_repo_is_ignored(client: TestClient) -> None:
@@ -181,6 +185,41 @@ def test_run_created_is_published(client: TestClient, bus: Any) -> None:
     assert "run.created" in [event.type.value for event in bus.history("*")]
 
 
+async def test_pipeline_error_reaches_existing_subscriber(
+    run: Run, bus: Any, settings: Any, monkeypatch: Any
+) -> None:
+    """Fatal errors publish before the run stream is closed."""
+
+    class FailingPipeline:
+        def __init__(self, _ctx: Any) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise RuntimeError("pipeline exploded")
+
+    seen: list[Any] = []
+
+    async def collect() -> None:
+        async for event in bus.subscribe(run.id):
+            seen.append(event)
+            if event.type is EventType.ERROR:
+                return
+
+    subscriber = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+    monkeypatch.setattr("app.routers.webhooks.Pipeline", FailingPipeline)
+
+    await _drive_pipeline(run.id, bus, settings)
+    await asyncio.wait_for(subscriber, timeout=1)
+
+    assert any(
+        event.type is EventType.ERROR
+        and event.data["message"] == "pipeline exploded"
+        and event.data["fatal"] is True
+        for event in seen
+    )
+
+
 def test_connected_repo_push_uses_branch_and_suite_size(
     client: TestClient, db: Any, monkeypatch: Any
 ) -> None:
@@ -210,6 +249,235 @@ def test_connected_repo_push_uses_branch_and_suite_size(
         assert stored.last_push_at is not None
 
 
+def commits(*paths: str) -> list[dict[str, Any]]:
+    """A commit list shaped like GitHub's, touching ``paths``."""
+    return [{"id": "b" * 40, "added": list(paths), "removed": [], "modified": []}]
+
+
+def test_docs_only_push_is_ignored_with_a_reason_code(client: TestClient) -> None:
+    """A README-only push must not burn a run."""
+    body, headers = signed(push_payload(commits=commits("README.md", "docs/x.md")))
+
+    response = client.post("/webhooks/github", content=body, headers=headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["reason_code"] == "no_matching_paths"
+    assert "README.md" in payload["ignored"]
+    assert payload["filters"]["path_include"]
+    with session_scope() as check:
+        assert repo.list_runs(check) == []
+
+
+def test_workflow_only_push_is_ignored(client: TestClient) -> None:
+    """The default ``.github/*`` exclusion must actually match, dot included."""
+    body, headers = signed(
+        push_payload(commits=commits(".github/workflows/ci.yml", "README.md"))
+    )
+
+    response = client.post("/webhooks/github", content=body, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["reason_code"] == "no_matching_paths"
+    with session_scope() as check:
+        assert repo.list_runs(check) == []
+
+
+def test_dot_prefixed_include_starts_a_run(client: TestClient, db: Any) -> None:
+    """A repo that watches ``.env`` keeps its dot through the round-trip."""
+    repo.create_repo(
+        db,
+        Repo(
+            full_name="acme/robot",
+            branch="main",
+            path_include=[".env", ".config/*"],
+            path_exclude=[],
+            filters_source="robotci.yaml",
+        ),
+    )
+    db.commit()
+
+    payload = client.post(
+        "/webhooks/github", **_signed_kwargs(push_payload(commits=commits(".env")))
+    ).json()
+
+    assert payload["reason_code"] == "started"
+    assert payload["matched_paths"] == [".env"]
+
+
+def test_stored_empty_exclude_survives_the_round_trip(
+    client: TestClient, db: Any
+) -> None:
+    """``paths.exclude: []`` disables the defaults; storage must not undo it."""
+    from app.routers.webhooks import _filter_cache
+
+    connected = repo.create_repo(db, Repo(full_name="acme/robot", branch="main"))
+    db.commit()
+
+    asyncio.run(
+        _filter_cache("acme/robot")(
+            {"ci": {"paths": {"include": ["docs/*.yaml"], "exclude": []}}}
+        )
+    )
+
+    with session_scope() as check:
+        stored = repo.get_repo(check, connected.id)
+    assert stored is not None
+    assert stored.path_exclude == []
+
+    payload = client.post(
+        "/webhooks/github",
+        **_signed_kwargs(push_payload(commits=commits("docs/tuning.yaml"))),
+    ).json()
+
+    assert payload["reason_code"] == "started"
+    assert payload["matched_paths"] == ["docs/tuning.yaml"]
+
+
+def test_unset_path_filters_read_back_as_defaults(client: TestClient, db: Any) -> None:
+    connected = repo.create_repo(db, Repo(full_name="acme/robot", branch="main"))
+    db.commit()
+
+    with session_scope() as check:
+        stored = repo.get_repo(check, connected.id)
+    assert stored is not None
+    assert stored.path_include is None
+    assert stored.path_exclude is None
+
+    payload = client.post(
+        "/webhooks/github",
+        **_signed_kwargs(push_payload(commits=commits("docs/tuning.yaml"))),
+    ).json()
+
+    assert payload["reason_code"] == "no_matching_paths"
+
+
+def test_control_code_push_starts_a_run_and_reports_the_match(
+    client: TestClient,
+) -> None:
+    body, headers = signed(
+        push_payload(commits=commits("src/controller.py", "README.md"))
+    )
+
+    payload = client.post("/webhooks/github", content=body, headers=headers).json()
+
+    assert payload["reason_code"] == "started"
+    assert payload["matched_paths"] == ["src/controller.py"]
+    assert "run_id" in payload
+
+
+def test_push_without_file_lists_starts_a_run_and_says_so(client: TestClient) -> None:
+    """We never skip CI on a push whose contents the delivery did not include."""
+    body, headers = signed(push_payload(commits=[{"id": "b" * 40}]))
+
+    payload = client.post("/webhooks/github", content=body, headers=headers).json()
+
+    assert payload["reason_code"] == "changed_paths_unavailable"
+    assert "path filters were not applied" in payload["reason"]
+    assert "run_id" in payload
+
+
+def test_connected_repo_path_filters_are_applied(client: TestClient, db: Any) -> None:
+    repo.create_repo(
+        db,
+        Repo(
+            full_name="acme/robot",
+            branch="main",
+            path_include=["control/*"],
+            path_exclude=["control/experiments/*"],
+            filters_source="robotci.yaml",
+        ),
+    )
+    db.commit()
+
+    ignored = client.post(
+        "/webhooks/github",
+        **_signed_kwargs(push_payload(commits=commits("control/experiments/a.py"))),
+    ).json()
+    started = client.post(
+        "/webhooks/github",
+        **_signed_kwargs(push_payload(commits=commits("control/arm.py"))),
+    ).json()
+
+    assert ignored["reason_code"] == "no_matching_paths"
+    assert ignored["filters"]["path_include"] == ["control/*"]
+    assert started["matched_paths"] == ["control/arm.py"]
+
+
+def test_connected_repo_extra_branch_patterns_are_watched(
+    client: TestClient, db: Any
+) -> None:
+    repo.create_repo(
+        db, Repo(full_name="acme/robot", branch="main", branches=["release/*"])
+    )
+    db.commit()
+    body, headers = signed(push_payload(ref="refs/heads/release/2.1"))
+
+    payload = client.post("/webhooks/github", content=body, headers=headers).json()
+
+    assert "run_id" in payload
+    assert payload["reason_code"] == "changed_paths_unavailable"
+
+
+def test_ignored_push_does_not_touch_last_push_at(client: TestClient, db: Any) -> None:
+    """``last_push_at`` means "we ran for a push", not "GitHub called us"."""
+    connected = repo.create_repo(db, Repo(full_name="acme/robot", branch="main"))
+    db.commit()
+    body, headers = signed(push_payload(commits=commits("README.md")))
+
+    client.post("/webhooks/github", content=body, headers=headers)
+
+    with session_scope() as check:
+        stored = repo.get_repo(check, connected.id)
+        assert stored is not None
+        assert stored.last_push_at is None
+
+
+def test_filters_are_cached_from_the_checkout(client: TestClient, db: Any) -> None:
+    """Stage TRIGGERED is the first place the repo's own ``ci:`` block exists."""
+    from app.routers.webhooks import _filter_cache
+
+    connected = repo.create_repo(db, Repo(full_name="acme/robot", branch="main"))
+    db.commit()
+
+    asyncio.run(
+        _filter_cache("acme/robot")(
+            {"ci": {"branches": ["dev", "release/*"], "paths": {"include": ["ctrl/*"]}}}
+        )
+    )
+
+    with session_scope() as check:
+        stored = repo.get_repo(check, connected.id)
+    assert stored is not None
+    assert stored.branch == "dev"
+    assert stored.branches == ["release/*"]
+    assert stored.path_include == ["ctrl/*"]
+    assert stored.filters_source == "robotci.yaml"
+
+
+def test_filters_are_left_alone_without_a_ci_section(
+    client: TestClient, db: Any
+) -> None:
+    from app.routers.webhooks import _filter_cache
+
+    connected = repo.create_repo(
+        db, Repo(full_name="acme/robot", branch="main", path_include=["ctrl/*"])
+    )
+    db.commit()
+
+    asyncio.run(_filter_cache("acme/robot")({"control": {"entrypoint": "a.py:run"}}))
+
+    with session_scope() as check:
+        stored = repo.get_repo(check, connected.id)
+    assert stored is not None
+    assert stored.path_include == ["ctrl/*"]
+
+
+def _signed_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
+    body, headers = signed(payload)
+    return {"content": body, "headers": headers}
+
+
 def test_connected_repo_rejects_a_different_branch(client: TestClient, db: Any) -> None:
     repo.create_repo(db, Repo(full_name="acme/robot", branch="develop"))
     db.commit()
@@ -218,6 +486,7 @@ def test_connected_repo_rejects_a_different_branch(client: TestClient, db: Any) 
     response = client.post("/webhooks/github", content=body, headers=headers)
 
     assert response.status_code == 200
-    assert "connected branch develop" in response.json()["ignored"]
+    assert response.json()["reason_code"] == "branch_not_watched"
+    assert "watching: develop" in response.json()["ignored"]
     with session_scope() as check:
         assert repo.list_runs(check) == []

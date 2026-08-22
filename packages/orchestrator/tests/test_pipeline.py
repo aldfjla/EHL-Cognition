@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from orchestrator import pipeline as pipeline_mod
@@ -16,8 +18,19 @@ from orchestrator.pipeline import (
     PipelineError,
     can_transition,
 )
-from orchestrator.schemas import TERMINAL_STAGES, EventType, Run, Stage
-from orchestrator.workspace import Workspace
+from orchestrator.schemas import (
+    TERMINAL_STAGES,
+    Agent,
+    EventType,
+    Role,
+    Run,
+    Scenario,
+    ScenarioStatus,
+    Stage,
+    SuiteStats,
+)
+from orchestrator.workspace import PatchConflict, Workspace
+from simkit.models import resolver as resolver_module
 
 
 def make_ctx(tmp_path: Path) -> PipelineContext:
@@ -33,6 +46,59 @@ def make_ctx(tmp_path: Path) -> PipelineContext:
         blackboard=Blackboard(run.id, bus),
         devin=None,  # type: ignore[arg-type]
     )
+
+
+def oracle_result(scenario_id: str, seed: int, status: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        scenario_id=scenario_id,
+        seed=seed,
+        status=status,
+        duration_s=0.0,
+        sim_time_s=0.0,
+        criteria=[],
+        diagnosis=None,
+        video_path=None,
+        trace_path=None,
+        error=None,
+    )
+
+
+def verify_ctx(tmp_path: Path) -> PipelineContext:
+    ctx = make_ctx(tmp_path)
+    ctx.run.suite = SuiteStats(total=2, passed=1, failed=1, pass_rate=0.5)
+    ctx.scenarios = [
+        Scenario(
+            run_id=ctx.run.id,
+            id="failed",
+            index=0,
+            seed=11,
+            status=ScenarioStatus.FAILED,
+        ),
+        Scenario(
+            run_id=ctx.run.id,
+            id="passing",
+            index=1,
+            seed=22,
+            status=ScenarioStatus.PASSED,
+        ),
+    ]
+    return ctx
+
+
+class NoopReviewer:
+    def __init__(self, _ctx: PipelineContext) -> None:
+        pass
+
+    async def dispatch(self, **_kwargs: object) -> None:
+        return None
+
+
+class NoopReporter:
+    def __init__(self, _ctx: PipelineContext) -> None:
+        pass
+
+    async def dispatch(self, **_kwargs: object) -> None:
+        return None
 
 
 # -- the table itself ------------------------------------------------------- #
@@ -58,12 +124,40 @@ def test_shipping_a_fix_must_pass_through_verify() -> None:
     assert Stage.REPORT in TRANSITIONS[Stage.VERIFY]
     # And VERIFY can send work back for another attempt.
     assert Stage.FIX in TRANSITIONS[Stage.VERIFY]
+    # A VERIFY infrastructure crash may use the direct failure transition;
+    # red verification results themselves route through REPORT.
+    assert Stage.FAILED_UNRESOLVED in TRANSITIONS[Stage.VERIFY]
 
 
 def test_a_clean_suite_exits_without_agents() -> None:
     assert Stage.PASSED_CLEAN in TRANSITIONS[Stage.RUN_SUITE]
     assert can_transition(Stage.RUN_SUITE, Stage.PASSED_CLEAN)
     assert not can_transition(Stage.RUN_SUITE, Stage.INVESTIGATE)
+
+
+def test_empty_config_gets_default_axes_and_diverse_parameters(
+    tmp_path: Path,
+) -> None:
+    from simkit import scenarios as scenario_gen
+
+    ctx = make_ctx(tmp_path)
+    agent = Agent(run_id=ctx.run.id, role=Role.SCENARIO_DESIGNER)
+    axes = Pipeline(ctx)._axes(agent)
+
+    assert len(axes) >= 3
+    generated = scenario_gen.generate(ctx.run.id, 1337, 50, axes)
+    params = {tuple(sorted(scenario["params"].items())) for scenario in generated}
+    assert len(params) > 1
+
+
+def test_worker_count_uses_context_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SIM_WORKERS", "99")
+    ctx = make_ctx(tmp_path)
+    ctx.sim_workers = 2
+
+    assert Pipeline(ctx)._worker_count() == min(2, os.cpu_count() or 1)
 
 
 def test_every_stage_can_reach_a_terminal_stage() -> None:
@@ -247,3 +341,172 @@ async def test_pr_opened_side_effects_run_before_the_terminal_transition(
 def test_module_exposes_a_headless_entrypoint() -> None:
     assert callable(pipeline_mod.run_headless)
     assert callable(pipeline_mod.main)
+
+
+@pytest.mark.parametrize(
+    ("after_statuses", "conflicts", "expected_error"),
+    [
+        (["failed", "passed"], [], "1 scenarios still failing"),
+        (["passed", "failed"], [], "newly broken seeds: 22"),
+        (
+            ["passed", "passed"],
+            [
+                PatchConflict(
+                    worktree="fix-cls-1",
+                    branch="test",
+                    sha="a" * 40,
+                    files=("control.py",),
+                    blocked_by=("fix-cls-0",),
+                )
+            ],
+            "unresolved patch conflicts",
+        ),
+    ],
+)
+async def test_unsuccessful_verify_reports_failure_without_opening_pr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    after_statuses: list[str],
+    conflicts: list[PatchConflict],
+    expected_error: str,
+) -> None:
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path))
+    ctx = verify_ctx(tmp_path)
+    pipe = Pipeline(ctx)
+    pipe._before_results = [
+        oracle_result("failed", 11, "failed"),
+        oracle_result("passing", 22, "passed"),
+    ]
+    pipe._conflicts = conflicts
+    after_results = [
+        oracle_result("failed", 11, after_statuses[0]),
+        oracle_result("passing", 22, after_statuses[1]),
+    ]
+
+    async def execute_suite(
+        _scenarios: list[Scenario], repo_dir: Path | None = None
+    ) -> list[SimpleNamespace]:
+        del repo_dir
+        return after_results
+
+    async def diff(*_args: object, **_kwargs: object) -> str:
+        return ""
+
+    comments: list[str] = []
+    statuses: list[tuple[str, str]] = []
+
+    async def comment(_repo: str, _sha: str, body: str) -> None:
+        comments.append(body)
+
+    async def status(
+        _repo: str,
+        _sha: str,
+        state: str,
+        description: str,
+        target_url: str | None = None,
+    ) -> None:
+        del target_url
+        statuses.append((state, description))
+
+    monkeypatch.setattr(pipe, "_execute_suite", execute_suite)
+    monkeypatch.setattr(pipeline_mod.workspace_mod, "diff", diff)
+    monkeypatch.setattr(pipeline_mod, "ReviewerAgent", NoopReviewer)
+    monkeypatch.setattr(pipeline_mod, "ReporterAgent", NoopReporter)
+    monkeypatch.setattr(pipeline_mod.github, "comment_on_commit", comment)
+    monkeypatch.setattr(pipeline_mod.github, "set_commit_status", status)
+
+    ctx.run.stage = Stage.VERIFY
+    pipe.ctx.max_fix_iterations = 1
+    nxt = await pipe.stage_verify()
+    assert nxt is Stage.REPORT
+    assert ctx.run.error is not None and expected_error in ctx.run.error
+
+    await pipe.advance(Stage.REPORT)
+    terminal = await pipe.stage_report()
+    assert terminal is Stage.FAILED_UNRESOLVED
+    await pipe.advance(terminal)
+    assert ctx.run.stage is Stage.FAILED_UNRESOLVED
+    assert comments
+    assert statuses and statuses[-1][0] == "failure"
+
+
+async def test_green_verify_reaches_pr_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path))
+    ctx = verify_ctx(tmp_path)
+    pipe = Pipeline(ctx)
+    pipe._before_results = [
+        oracle_result("failed", 11, "failed"),
+        oracle_result("passing", 22, "passed"),
+    ]
+    after_results = [
+        oracle_result("failed", 11, "passed"),
+        oracle_result("passing", 22, "passed"),
+    ]
+
+    async def execute_suite(
+        _scenarios: list[Scenario], repo_dir: Path | None = None
+    ) -> list[SimpleNamespace]:
+        del repo_dir
+        return after_results
+
+    async def diff(*_args: object, **_kwargs: object) -> str:
+        return ""
+
+    async def push(*_args: object, **_kwargs: object) -> str:
+        return "b" * 40
+
+    async def open_pr(*_args: object, **_kwargs: object) -> str:
+        return "https://github.com/acme/arm-control/pull/1"
+
+    async def status(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(pipe, "_execute_suite", execute_suite)
+    monkeypatch.setattr(pipeline_mod.workspace_mod, "diff", diff)
+    monkeypatch.setattr(pipeline_mod, "ReviewerAgent", NoopReviewer)
+    monkeypatch.setattr(pipeline_mod, "ReporterAgent", NoopReporter)
+    monkeypatch.setattr(pipeline_mod.github, "push_branch", push)
+    monkeypatch.setattr(pipeline_mod.github, "open_pull_request", open_pr)
+    monkeypatch.setattr(pipeline_mod.github, "set_commit_status", status)
+
+    ctx.run.stage = Stage.VERIFY
+    assert await pipe.stage_verify() is Stage.REPORT
+    await pipe.advance(Stage.REPORT)
+    assert await pipe.stage_report() is Stage.PR_OPENED
+    await pipe.stage_pr_opened()
+    await pipe.advance(Stage.PR_OPENED)
+    assert ctx.run.stage is Stage.PR_OPENED
+    assert ctx.run.pull_request_url == "https://github.com/acme/arm-control/pull/1"
+
+
+async def test_resolve_model_cache_hit_skips_modeler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    ctx = make_ctx(tmp_path / "workspace")
+    ctx.config = {"robot": {}}
+    pipe = Pipeline(ctx)
+    cached = resolver_module.Resolution(
+        found=True,
+        source="repo",
+        name="cached_arm",
+        model_path=str(tmp_path / "cached.xml"),
+        dof=2,
+        confidence=0.98,
+        provenance="cache source",
+        processing_steps=["MJCF validation"],
+        cache_hit=True,
+    )
+
+    async def fail_modeler(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("Modeler must not run on a cache hit")
+
+    monkeypatch.setattr(resolver_module, "resolve", lambda *_args, **_kwargs: cached)
+    monkeypatch.setattr(pipeline_mod, "ModelerAgent", fail_modeler)
+
+    assert await pipe.stage_resolve_model() is Stage.BUILD_HARNESS
+    assert ctx.run.robot_model is not None
+    assert ctx.run.robot_model.cache_hit is True
+    assert ctx.run.robot_model.provenance == "cache source"
