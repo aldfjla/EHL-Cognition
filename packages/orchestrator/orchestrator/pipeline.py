@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from orchestrator import clustering, github
 from orchestrator import workspace as workspace_mod
+from orchestrator.pool import SuitePool
 from orchestrator.roles.fixer import FixerAgent
 from orchestrator.roles.harness_builder import HarnessBuilderAgent
 from orchestrator.roles.investigator import InvestigatorAgent
@@ -175,6 +176,7 @@ class Pipeline:
         self._after_results: list[Any] = []
         self._fix_worktrees: list[str] = []
         self._conflicts: list[str] = []
+        self._pool: SuitePool | None = None
 
     # -- driver ------------------------------------------------------------ #
 
@@ -679,70 +681,61 @@ class Pipeline:
     async def _execute_suite(
         self, scenarios: list[Scenario], repo_dir: Path | None = None
     ) -> list[Any]:
-        """Run the whole matrix off the event loop, streaming progress.
-
-        ``simkit.suite.run_suite`` is synchronous and CPU-bound, so it runs in a
-        worker thread; its progress callback fires on that thread and is bounced
-        back onto the loop, because a blocking emit inside the callback would
-        stall the suite.
-        """
-        from simkit import suite as suite_mod
-
+        """Submit scenarios to the run's shared pool and stream full records."""
         ctx = self.ctx
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-
-        def on_progress(payload: dict[str, Any]) -> None:
-            # Must be cheap and must never raise: a throwing callback is not
-            # allowed to fail the suite.
-            try:
-                loop.call_soon_threadsafe(queue.put_nowait, dict(payload))
-            except RuntimeError:  # loop already closed
-                pass
-
-        async def drain() -> None:
-            completed = 0
-            passed = 0
-            failed = 0
-            while True:
-                payload = await queue.get()
-                if payload is None:
-                    return
-                completed += 1
-                status = str(payload.get("status", ""))
-                if status == "passed":
-                    passed += 1
-                elif status in ("failed", "error"):
-                    failed += 1
-                await ctx.bus.emit(ctx.run.id, EventType.SCENARIO_FINISHED, payload)
-                if completed % PROGRESS_EVERY == 0:
-                    await ctx.bus.emit(
-                        ctx.run.id,
-                        EventType.SUITE_PROGRESS,
-                        {
-                            "total": len(scenarios),
-                            "completed": completed,
-                            "passed": passed,
-                            "failed": failed,
-                        },
-                    )
-
-        drainer = asyncio.create_task(drain())
-        try:
-            results = await asyncio.to_thread(
-                suite_mod.run_suite,
-                scenarios=[self._suite_spec(s) for s in scenarios],
-                model_path=self._model_path(),
-                harness_path=str(self._artifacts / HARNESS_FILENAME),
-                task=ctx.config.get("task", {}),
-                parallel=self._max_parallel,
-                record=ctx.config.get("policy", {}).get("record_video", "failures"),
-                on_progress=on_progress,
+        if self._pool is None:
+            self._pool = SuitePool(
+                run_id=ctx.run.id,
+                bus=ctx.bus,
+                workers=self._max_parallel,
+                artifacts_dir=self._artifacts,
             )
-        finally:
-            await queue.put(None)
-            await drainer
-        return results
+        completed = 0
+        passed = 0
+        failed = 0
+        by_id = {scenario.id: scenario for scenario in scenarios}
+
+        async def on_result(result: Any) -> None:
+            nonlocal completed, passed, failed
+            scenario = by_id.get(result.scenario_id)
+            if scenario is None:
+                return
+            self._apply_result(scenario, result)
+            completed += 1
+            if result.status == "passed":
+                passed += 1
+            elif result.status in ("failed", "error"):
+                failed += 1
+            await ctx.bus.emit(
+                ctx.run.id,
+                EventType.SCENARIO_FINISHED,
+                scenario.model_dump(mode="json"),
+            )
+            if completed % PROGRESS_EVERY == 0:
+                snapshot = self._pool.snapshot()
+                await ctx.bus.emit(
+                    ctx.run.id,
+                    EventType.SUITE_PROGRESS,
+                    {
+                        "total": len(scenarios),
+                        "completed": completed,
+                        "passed": passed,
+                        "failed": failed,
+                        "running": snapshot["busy"],
+                        "workers": snapshot["workers"],
+                    },
+                )
+
+        return await self._pool.submit(
+            [self._suite_spec(scenario) for scenario in scenarios],
+            model_path=self._model_path(),
+            harness_path=str(self._artifacts / HARNESS_FILENAME),
+            task=ctx.config.get("task", {}),
+            record=ctx.config.get("policy", {}).get("record_video", "failures"),
+            repo_dir=repo_dir,
+            on_result=on_result,
+            reason=f"{ctx.run.stage.value.lower()}: {len(scenarios)} scenarios",
+        )
 
     def _apply_results(
         self, scenarios: list[Scenario], results: list[Any]
@@ -753,17 +746,23 @@ class Pipeline:
             scenario = by_id.get(result.scenario_id)
             if scenario is None:
                 continue
-            scenario.status = ScenarioStatus(result.status)
-            scenario.duration_s = result.duration_s
-            scenario.sim_time_s = result.sim_time_s
-            scenario.diagnosis = result.diagnosis
-            scenario.video_path = result.video_path
-            scenario.trace_path = result.trace_path
-            scenario.error = result.error
-            scenario.criteria = [
-                CriterionResult(**criterion) for criterion in result.criteria
-            ]
+            self._apply_result(scenario, result)
         return self._stats(scenarios)
+
+    @staticmethod
+    def _apply_result(scenario: Scenario, result: Any) -> None:
+        """Fold one oracle result onto its live protocol record."""
+        scenario.status = ScenarioStatus(result.status)
+        scenario.duration_s = result.duration_s
+        scenario.sim_time_s = result.sim_time_s
+        scenario.diagnosis = result.diagnosis
+        scenario.video_path = result.video_path
+        scenario.trace_path = result.trace_path
+        scenario.error = result.error
+        scenario.worker_id = getattr(result, "worker_id", scenario.worker_id)
+        scenario.criteria = [
+            CriterionResult(**criterion) for criterion in result.criteria
+        ]
 
     @staticmethod
     def _stats(scenarios: list[Scenario]) -> SuiteStats:
@@ -932,6 +931,8 @@ class Pipeline:
 
     async def _finish(self) -> None:
         run = self.ctx.run
+        if self._pool is not None:
+            await self._pool.aclose()
         run.finished_at = _now()
         run.updated_at = run.finished_at
         await self.ctx.bus.emit(
