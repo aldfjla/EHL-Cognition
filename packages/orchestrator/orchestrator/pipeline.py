@@ -1175,12 +1175,12 @@ class Pipeline:
     ) -> list[dict[str, Any]]:
         if incidents is None:
             incidents = [self._incident(cluster) for cluster in self.ctx.clusters]
-        by_cluster = {incident.cluster_id: incident for incident in incidents}
+        labels = {cluster.id: cluster.label for cluster in self.ctx.clusters}
         return [
             {
-                "cluster_id": cluster.id,
-                "label": cluster.label,
-                "before": (incident := by_cluster[cluster.id]).before_video,
+                "cluster_id": incident.cluster_id,
+                "label": labels.get(incident.cluster_id, incident.title),
+                "before": incident.before_video,
                 "after": incident.after_video,
                 "after_note": (
                     "verified after-video"
@@ -1188,7 +1188,7 @@ class Pipeline:
                     else "no verified after-video; proof is unavailable"
                 ),
             }
-            for cluster in self.ctx.clusters
+            for incident in incidents
         ]
 
     def _verification_is_green(self, after: SuiteStats) -> bool:
