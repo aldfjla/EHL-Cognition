@@ -11,8 +11,15 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_API_BASE: process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000",
     NEXT_PUBLIC_WS_BASE: process.env.NEXT_PUBLIC_WS_BASE ?? "ws://localhost:8000",
   },
-  // TODO(build): add a rewrite proxying /api/* to the FastAPI process so the
-  // dashboard can be served from one origin and CORS stops mattering.
+  /**
+   * Proxy `/api/*` to the FastAPI process so the dashboard can be served from
+   * a single origin and CORS stops mattering — useful when the demo runs
+   * through one tunnel.
+   */
+  async rewrites() {
+    const target = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+    return [{ source: "/api/:path*", destination: `${target}/:path*` }];
+  },
 };
 
 export default nextConfig;

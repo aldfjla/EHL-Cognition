@@ -31,6 +31,23 @@ const config: Config = {
       fontFamily: {
         mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
+      keyframes: {
+        // A fan-out of six agents has to read as a fan-out, not a snap.
+        rise: {
+          "0%": { opacity: "0", transform: "translateY(6px) scale(0.98)" },
+          "100%": { opacity: "1", transform: "translateY(0) scale(1)" },
+        },
+        // A cell landing red should be noticed from across the room.
+        land: {
+          "0%": { transform: "scale(0.6)", opacity: "0.2" },
+          "60%": { transform: "scale(1.12)" },
+          "100%": { transform: "scale(1)", opacity: "1" },
+        },
+      },
+      animation: {
+        rise: "rise 260ms ease-out",
+        land: "land 320ms ease-out",
+      },
     },
   },
   plugins: [],
