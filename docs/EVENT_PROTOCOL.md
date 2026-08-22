@@ -93,6 +93,10 @@ and the client already holds the run. The UI drives `PipelineTimeline` from it.
 and a null `session_id`. A card appearing instantly and then filling in reads as
 alive; a five-second blank grid reads as hung.
 
+`agent.created` carries `parent_agent_id`. These parent links are the
+queryable source of the agent tree (including the children of each cluster
+owner); the tree is no longer inferred from timing or role names.
+
 `agent.updated` is a **partial patch**, keyed by `agent_id`, and carries only the
 fields that changed. It is how `session_url`, `desktop_url`, `issue` and `step`
 arrive after the card is already on screen — the session id and any live view of

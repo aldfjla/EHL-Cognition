@@ -29,7 +29,7 @@ from orchestrator.schemas import (
     Stage,
     SuiteStats,
 )
-from orchestrator.workspace import Workspace
+from orchestrator.workspace import PatchConflict, Workspace
 from simkit.models import resolver as resolver_module
 
 
@@ -348,14 +348,26 @@ def test_module_exposes_a_headless_entrypoint() -> None:
     [
         (["failed", "passed"], [], "1 scenarios still failing"),
         (["passed", "failed"], [], "newly broken seeds: 22"),
-        (["passed", "passed"], ["fix-cls-1"], "unresolved patch conflicts"),
+        (
+            ["passed", "passed"],
+            [
+                PatchConflict(
+                    worktree="fix-cls-1",
+                    branch="test",
+                    sha="a" * 40,
+                    files=("control.py",),
+                    blocked_by=("fix-cls-0",),
+                )
+            ],
+            "unresolved patch conflicts",
+        ),
     ],
 )
 async def test_unsuccessful_verify_reports_failure_without_opening_pr(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     after_statuses: list[str],
-    conflicts: list[str],
+    conflicts: list[PatchConflict],
     expected_error: str,
 ) -> None:
     monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path))

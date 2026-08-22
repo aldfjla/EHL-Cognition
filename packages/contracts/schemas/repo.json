@@ -18,6 +18,25 @@
     "full_name": { "type": "string", "description": "GitHub repository in 'owner/name' format." },
     "branch": { "type": "string", "description": "Branch whose pushes wake Robot CI." },
     "suite_size": { "type": "integer", "minimum": 1, "description": "Scenarios generated for each push." },
+    "branches": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Extra watched branch glob patterns beyond 'branch'. Empty means only 'branch'."
+    },
+    "path_include": {
+      "type": ["array", "null"],
+      "items": { "type": "string" },
+      "description": "Path globs a push must touch to start a run. Null means unset (built-in default set); an empty array is configured as 'no patterns'."
+    },
+    "path_exclude": {
+      "type": ["array", "null"],
+      "items": { "type": "string" },
+      "description": "Path globs subtracted from path_include. Null means unset (built-in default set); an empty array disables the defaults."
+    },
+    "filters_source": {
+      "enum": ["default", "registry", "robotci.yaml"],
+      "description": "Where the branch and path filters came from. 'robotci.yaml' once a checkout has been read."
+    },
     "created_at": { "type": "string", "format": "date-time" },
     "last_push_at": { "type": ["string", "null"], "format": "date-time" },
     "status": { "enum": ["dormant", "running"], "description": "Running while any run is non-terminal." },

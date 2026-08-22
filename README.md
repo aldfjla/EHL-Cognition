@@ -127,6 +127,61 @@ task:
 Every field is optional except `entrypoint` — anything omitted is inferred by
 the agents.
 
+### Which pushes start a run
+
+```yaml
+ci:
+  branches: [main, "release/*"]   # globs; `*` crosses `/`
+  paths:
+    include: [src/*, config/*, robotci.yaml]
+    exclude: ["*.md", src/vendor/*]
+```
+
+| key | default | meaning |
+|---|---|---|
+| `ci.branches` | `[main]` | a push to any other ref is ignored |
+| `ci.paths.include` | source and config extensions, plus `robotci.yaml` | a run needs at least one changed path in here |
+| `ci.paths.exclude` | `*.md`, `*.rst`, `docs/*`, `.github/*`, `LICENSE*`, images, video | subtracted from the include set; excludes win. `exclude: []` disables the defaults |
+
+So a README-only push does not burn a run. Omit the section entirely and the
+defaults apply; write an empty list and that is a configured answer, not an
+omission — `exclude: []` really means "exclude nothing", and it survives being
+cached on your repository. Patterns and paths are compared after stripping a
+leading `./` and `/` only, so dot-prefixed entries like `.github/*` or `.env`
+match what you would expect.
+
+The webhook cannot read this file — your repo is not cloned yet at that point —
+so it evaluates the copy Robot CI cached for your repository (what you entered
+when connecting it, then whatever the last run read from `robotci.yaml`), and
+stage `TRIGGERED` refreshes that cache from the committed file. A change to
+`ci:` therefore takes effect from the *next* push. Until a repo's first run, the
+values from the connect form (or the defaults) are used.
+
+A push Robot CI deliberately skips is still answered `200` — an error would
+make your webhook page look broken — with a stable reason:
+
+| `reason_code` | |
+|---|---|
+| `started` | a run was created; `matched_paths` lists why |
+| `branch_not_watched` | ref is not in `ci.branches` |
+| `no_matching_paths` | nothing changed that matches the path filters |
+| `changed_paths_unavailable` | the delivery carried no file lists (>20 commits, >3000 files), so path filters were skipped and the run started anyway — CI never silently skips work it could not inspect |
+| `already_in_flight` | redelivery of a `(repo, commit)` that already has a run |
+| `not_a_push` | some other GitHub event |
+| `branch_deleted`, `no_head_commit` | nothing to simulate |
+| `repo_not_connected` | unknown repository (single-repo `TARGET_REPO` mode) |
+
+The ignored body echoes the filters that were applied, so GitHub's delivery
+page shows what Robot CI thinks it is watching. The same line is logged.
+
+The repair-agent tree is bounded by `MAX_AGENT_TREE_DEPTH=3` (Investigator
+owner → Fixer → Reviewer, the whole repair contract) and
+`MAX_AGENT_CHILDREN=4` (three configured fix iterations plus one spare seat).
+Hitting either cap is always recorded as a non-fatal error event and a cluster
+error, never silently skipped. A refused Fixer seat leaves its cluster
+unresolved; a refused Reviewer seat is advisory-only and does not discard a
+patch whose originally red seeds passed simkit verification.
+
 ## Layout
 
 ```
@@ -147,6 +202,7 @@ docs/                the build spec (start with ARCHITECTURE.md)
 | [`AGENT_ROLES.md`](docs/AGENT_ROLES.md) | The seven roles, and how isolated sessions become a team |
 | [`EVENT_PROTOCOL.md`](docs/EVENT_PROTOCOL.md) | Event schemas and the WebSocket contract |
 | [`SIMULATION.md`](docs/SIMULATION.md) | Model resolution, scenarios, scoring, video |
+| [`DORMANCY.md`](docs/DORMANCY.md) | Measured idle cost and cold-start latency, and how to reproduce them |
 | [`DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md) | The 90-second stage run |
 | [`PITCH.md`](docs/PITCH.md) | The judging narrative |
 
