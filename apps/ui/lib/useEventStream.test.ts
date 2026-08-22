@@ -6,7 +6,10 @@ import {
   applyEvent,
   beginResync,
   completeResync,
+  recordResyncStart,
+  resetResyncTracker,
   type EventCursor,
+  type ResyncTracker,
 } from "./useEventStream";
 
 function event(seq: number, type: string, data: Record<string, unknown>) {
@@ -55,7 +58,7 @@ describe("event stream sequencing", () => {
 
     expect(beginResync(cursor)).toBe(true);
     expect(completeResync(cursor, [{ seq: 3 }, { seq: 7 }, { seq: 5 }])).toBe(7);
-    expect(cursor).toEqual({ appliedSeq: 7, resyncInFlight: false });
+    expect(cursor).toEqual({ appliedSeq: 7, resyncInFlight: true });
   });
 
   it("ignores replayed duplicates without changing state", () => {
@@ -86,5 +89,21 @@ describe("event stream sequencing", () => {
     expect(acceptEventSeq(cursor, 2)).toBe("duplicate");
     expect(applyEvent(state, older)).toBe(state);
     expect(cursor.appliedSeq).toBe(3);
+  });
+
+  it("latches a resync storm until a fresh connection resets it", () => {
+    const tracker: ResyncTracker = { history: [], stormed: false };
+
+    expect(recordResyncStart(tracker, 0)).toBe(true);
+    expect(recordResyncStart(tracker, 1)).toBe(true);
+    expect(recordResyncStart(tracker, 2)).toBe(true);
+    expect(recordResyncStart(tracker, 3)).toBe(false);
+    expect(tracker.stormed).toBe(true);
+    expect(recordResyncStart(tracker, 4)).toBe(false);
+
+    resetResyncTracker(tracker);
+
+    expect(tracker).toEqual({ history: [], stormed: false });
+    expect(recordResyncStart(tracker, 4)).toBe(true);
   });
 });

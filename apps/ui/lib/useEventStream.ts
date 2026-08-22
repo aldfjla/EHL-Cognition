@@ -88,6 +88,11 @@ export interface EventCursor {
   resyncInFlight: boolean;
 }
 
+export interface ResyncTracker {
+  history: number[];
+  stormed: boolean;
+}
+
 /**
  * Advance the stream cursor synchronously with dispatch.
  *
@@ -122,8 +127,28 @@ export function completeResync(
     cursor.appliedSeq,
   );
   cursor.appliedSeq = highestReplayedSeq;
-  cursor.resyncInFlight = false;
   return cursor.appliedSeq;
+}
+
+export function recordResyncStart(
+  tracker: ResyncTracker,
+  now: number,
+): boolean {
+  if (tracker.stormed) return false;
+  tracker.history = tracker.history.filter(
+    (startedAt) => now - startedAt < RESYNC_WINDOW_MS,
+  );
+  if (tracker.history.length >= MAX_RESYNCS_PER_WINDOW) {
+    tracker.stormed = true;
+    return false;
+  }
+  tracker.history.push(now);
+  return true;
+}
+
+export function resetResyncTracker(tracker: ResyncTracker): void {
+  tracker.history = [];
+  tracker.stormed = false;
 }
 
 type Action =
@@ -309,29 +334,24 @@ export function useEventStream(runId: string | null): RunState {
     appliedSeq: 0,
     resyncInFlight: false,
   });
-  const resyncHistoryRef = useRef<number[]>([]);
-  const resyncStormRef = useRef(false);
+  const resyncTrackerRef = useRef<ResyncTracker>({
+    history: [],
+    stormed: false,
+  });
 
   /** First paint from REST, so the page is never blank while the socket opens. */
   const resync = useCallback(
     async (id: string): Promise<void> => {
       const cursor = cursorRef.current;
-      if (resyncStormRef.current || !beginResync(cursor)) return;
+      if (!beginResync(cursor)) return;
 
-      const now = Date.now();
-      resyncHistoryRef.current = resyncHistoryRef.current.filter(
-        (startedAt) => now - startedAt < RESYNC_WINDOW_MS,
-      );
-      if (resyncHistoryRef.current.length >= MAX_RESYNCS_PER_WINDOW) {
-        cursor.resyncInFlight = false;
-        resyncStormRef.current = true;
-        dispatch({ kind: "error", error: RESYNC_STORM_ERROR });
-        return;
-      }
-      resyncHistoryRef.current.push(now);
-
-      const since = cursor.appliedSeq;
       try {
+        if (!recordResyncStart(resyncTrackerRef.current, Date.now())) {
+          dispatch({ kind: "error", error: RESYNC_STORM_ERROR });
+          return;
+        }
+
+        const since = cursor.appliedSeq;
         const detail = await api.getRun(id);
         const replayedEvents = await api.getEvents(id, since).catch(() => []);
         const [agents, messages, findings] = await Promise.all([
@@ -408,6 +428,7 @@ export function useEventStream(runId: string | null): RunState {
 
       ws.onopen = () => {
         retry = 0;
+        resetResyncTracker(resyncTrackerRef.current);
         dispatch({ kind: "connection", connection: "open" });
       };
 
