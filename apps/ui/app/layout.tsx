@@ -18,6 +18,13 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
+      <head>
+        {/* Scroll reveals start hidden; without scripting they would never be
+            told to appear. */}
+        <noscript>
+          <style>{"[data-reveal]{opacity:1!important;transform:none!important}"}</style>
+        </noscript>
+      </head>
       <body className="min-h-screen">
         <AppShell>{children}</AppShell>
       </body>
