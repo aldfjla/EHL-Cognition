@@ -21,7 +21,7 @@ DEFAULT_LIVE_SIZE = (480, 360)
 
 
 def _artifacts_dir() -> Path:
-    return Path(os.environ.get("ARTIFACTS_DIR", "artifacts"))
+    return Path(os.environ.get("ARTIFACTS_DIR", "artifacts")).expanduser().resolve()
 
 
 def _safe_scenario_id(scenario_id: str) -> str:
@@ -115,6 +115,7 @@ class LiveFrameWriter:
         ):
             return False
         self._last_capture = now
+        temporary: Path | None = None
         try:
             renderer = self._ensure_renderer(scene)
             camera = self.camera if self.camera is not None else -1
@@ -135,6 +136,11 @@ class LiveFrameWriter:
             return True
         except Exception:  # noqa: BLE001 - live rendering is best effort
             self.drops += 1
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except Exception:  # noqa: BLE001 - cleanup is best effort
+                    return False
             self._disable()
             return False
 

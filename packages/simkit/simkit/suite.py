@@ -62,14 +62,6 @@ def run_suite(
     try:
         batch = event_pool.submit(jobs)
         results = batch.results()
-        if pool is not None:
-            for result in results:
-                _notify(
-                    on_progress,
-                    result,
-                    _index_for_result(jobs, result),
-                    len(scenarios),
-                )
 
         if policy == "failures":
             replay_jobs = [
