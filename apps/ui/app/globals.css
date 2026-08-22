@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Mission control runs on a projector in a dark room. Dark background, high
+ * contrast, monospace for anything numeric so columns of seeds and timings
+ * line up.
+ */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-surface text-slate-200 antialiased;
+}
+
+/* Placeholder chrome used by every stub component in this scaffold. */
+.stub {
+  @apply rounded-lg border border-dashed border-surface-border bg-surface-raised p-4;
+}
+
+.stub-label {
+  @apply text-xs font-mono uppercase tracking-widest text-slate-500;
+}

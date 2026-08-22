@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://robotci.dev/schemas/finding.json",
+  "title": "Finding",
+  "description": "A unit of knowledge written to the shared blackboard by an agent. Findings are what the orchestrator relays between sessions — the mechanism that turns isolated Devin sessions into a team.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "run_id", "author_role", "kind", "summary", "created_at"],
+  "properties": {
+    "id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "author_agent_id": { "type": ["string", "null"] },
+    "author_role": {
+      "enum": ["modeler", "harness_builder", "scenario_designer", "investigator", "fixer", "reviewer", "reporter", "orchestrator"]
+    },
+    "kind": {
+      "description": "root_cause: an explained failure. patch: a proposed code change. constraint: something later agents must not violate. observation: raw signal, not yet a cause. verification: evidence a fix held.",
+      "enum": ["root_cause", "patch", "constraint", "observation", "verification"]
+    },
+    "summary": { "type": "string", "description": "One sentence. Shown in TeamChat and quoted into other agents' prompts." },
+    "detail": { "type": "string", "description": "Markdown. Full reasoning, evidence, and code references." },
+    "cluster_id": { "type": ["string", "null"] },
+    "scenario_ids": { "type": "array", "items": { "type": "string" } },
+    "files": { "type": "array", "items": { "type": "string" }, "description": "Customer-repo paths implicated." },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "Author's self-reported confidence. Reviewer uses it to break ties between conflicting root causes." },
+    "status": {
+      "description": "Lifecycle. Reviewer promotes to 'confirmed' or 'refuted' at VERIFY.",
+      "enum": ["proposed", "confirmed", "refuted", "superseded"]
+    },
+    "superseded_by": { "type": ["string", "null"], "description": "Finding id that replaced this one." },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

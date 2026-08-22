@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robotci-simkit"
+version = "0.1.0"
+description = "The oracle: MuJoCo model resolution, scenario generation, deterministic execution, scoring and video capture. Pure python, no agents."
+requires-python = ">=3.12"
+dependencies = [
+    "mujoco>=3.2",
+    "numpy>=1.26",
+    "imageio>=2.34",
+    "imageio-ffmpeg>=0.5",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+simkit = "simkit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["simkit*"]

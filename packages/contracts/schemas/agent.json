@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://robotci.dev/schemas/agent.json",
+  "title": "Agent",
+  "description": "One Devin session, wrapped in a role. Rendered as a card in AgentGrid and a node in AgentGraph.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "run_id", "role", "status", "created_at"],
+  "properties": {
+    "id": { "type": "string", "description": "Our id for the agent, stable across session restarts." },
+    "run_id": { "type": "string" },
+    "session_id": { "type": ["string", "null"], "description": "Devin's own session id. Null until the session is created." },
+    "session_url": { "type": ["string", "null"], "format": "uri", "description": "Deep link to the Devin session, shown on the card so judges can click through." },
+    "role": { "$ref": "#/$defs/role" },
+    "title": { "type": "string", "description": "Human label, e.g. 'Debug Eng #2 - gripper slip cluster'." },
+    "task": { "type": "string", "description": "One-line statement of what this agent was dispatched to do." },
+    "status": { "$ref": "#/$defs/status" },
+    "iteration": { "type": "integer", "minimum": 0, "description": "Fix/verify attempts consumed. Capped by MAX_AGENT_ITERATIONS." },
+    "max_iterations": { "type": "integer", "minimum": 1 },
+    "cluster_id": { "type": ["string", "null"], "description": "Failure cluster this agent owns, for investigator/fixer roles." },
+    "scenario_ids": { "type": "array", "items": { "type": "string" }, "description": "Scenarios in scope for this agent." },
+    "parent_agent_id": { "type": ["string", "null"], "description": "Agent that spawned this one, e.g. investigator -> fixer handoff." },
+    "finding_ids": { "type": "array", "items": { "type": "string" }, "description": "Blackboard findings this agent authored." },
+    "last_activity": { "type": ["string", "null"], "description": "Most recent line from the Devin transcript, for the live 'what is it doing' ticker." },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "$defs": {
+    "role": {
+      "description": "Position on the simulated engineering team. See docs/AGENT_ROLES.md.",
+      "enum": [
+        "modeler",
+        "harness_builder",
+        "scenario_designer",
+        "investigator",
+        "fixer",
+        "reviewer",
+        "reporter"
+      ]
+    },
+    "status": {
+      "enum": ["queued", "starting", "working", "blocked", "succeeded", "failed", "cancelled"]
+    }
+  }
+}

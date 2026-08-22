@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://robotci.dev/schemas/message.json",
+  "title": "Message",
+  "description": "One relay of information between agents. Devin sessions cannot talk to each other; the orchestrator mediates every exchange and emits it as a Message. This is what TeamChat renders as a feed and AgentGraph renders as an edge.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "run_id", "from_role", "to_role", "kind", "body", "ts"],
+  "properties": {
+    "id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "from_agent_id": { "type": ["string", "null"], "description": "Null when the orchestrator itself is speaking." },
+    "to_agent_id": { "type": ["string", "null"], "description": "Null for broadcasts." },
+    "from_role": {
+      "description": "Author role, or 'orchestrator' for system-mediated relays.",
+      "enum": ["modeler", "harness_builder", "scenario_designer", "investigator", "fixer", "reviewer", "reporter", "orchestrator"]
+    },
+    "to_role": {
+      "description": "Recipient role, or 'broadcast' when written to the blackboard for anyone.",
+      "enum": ["modeler", "harness_builder", "scenario_designer", "investigator", "fixer", "reviewer", "reporter", "orchestrator", "broadcast"]
+    },
+    "kind": {
+      "description": "Speech act. Drives the icon and colour in TeamChat.",
+      "enum": ["hypothesis", "finding", "question", "answer", "verdict", "handoff"]
+    },
+    "body": { "type": "string", "description": "Markdown. The actual content relayed into the recipient's prompt." },
+    "refs": {
+      "type": "array",
+      "description": "Pointers to the evidence behind this message.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "id"],
+        "properties": {
+          "type": { "enum": ["scenario", "finding", "artifact", "commit", "cluster", "agent"] },
+          "id": { "type": "string" },
+          "label": { "type": "string" }
+        }
+      }
+    },
+    "ts": { "type": "string", "format": "date-time" }
+  }
+}
