@@ -76,6 +76,13 @@ REMINDER_TIMEOUT_S = 120.0
 #: Maximum number of transcript pages fetched for one poll or output scrape.
 MAX_TRANSCRIPT_PAGES = 100
 
+#: Response marker returned while a newly created session is booting.
+SESSION_INITIALIZING_MARKER = "session still initializing"
+
+#: Warm-up retry bounds for sending the first message to a new session.
+SESSION_WARMUP_INTERVAL_S = 5.0
+SESSION_WARMUP_TIMEOUT_S = 180.0
+
 _JSON_BLOCK = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
@@ -85,6 +92,10 @@ class DevinError(RuntimeError):
 
 class _Retryable(RuntimeError):
     """Internal: a transport error or 429/5xx that is worth trying again."""
+
+
+class _SessionInitializing(DevinError):
+    """Internal: the session has not finished booting yet."""
 
 
 @dataclass
@@ -197,6 +208,14 @@ class DevinClient:
         if response.status_code == 429 or response.status_code >= 500:
             raise _Retryable(f"{method} {path} -> HTTP {response.status_code}")
         if response.status_code >= 400:
+            if (
+                response.status_code == 400
+                and SESSION_INITIALIZING_MARKER in response.text.casefold()
+            ):
+                raise _SessionInitializing(
+                    f"{method} {path} -> HTTP {response.status_code}: "
+                    f"{response.text[:500]}"
+                )
             raise DevinError(
                 f"{method} {path} -> HTTP {response.status_code}: {response.text[:500]}"
             )
@@ -288,7 +307,7 @@ class DevinClient:
             return payload
         try:
             messages = await self._fetch_transcript(session_id)
-        except Exception:  # noqa: BLE001 — transcript is supplementary
+        except DevinError:
             return payload
         merged = dict(payload)
         merged["messages"] = messages
@@ -362,9 +381,19 @@ class DevinClient:
         the orchestrator reads one session's finding and speaks it into
         another. See ``docs/AGENT_ROLES.md``.
         """
-        await self._request(
-            "POST", self._message_path(session_id), {"message": message}
-        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SESSION_WARMUP_TIMEOUT_S
+        while True:
+            try:
+                await self._request(
+                    "POST", self._message_path(session_id), {"message": message}
+                )
+                return
+            except _SessionInitializing as exc:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise DevinError(str(exc)) from exc
+                await asyncio.sleep(min(SESSION_WARMUP_INTERVAL_S, remaining))
 
     async def wait_until_done(
         self,

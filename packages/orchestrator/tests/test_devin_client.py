@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 
 import httpx
+import orchestrator.devin.client as client_module
 import pytest
 from orchestrator.devin.client import (
     STRUCTURED_OUTPUT_REMINDER,
@@ -141,6 +142,59 @@ async def test_client_error_is_not_retried() -> None:
     with pytest.raises(DevinError, match="403"):
         await client.ping()
     await client.aclose()
+    assert attempts["n"] == 1
+
+
+async def test_send_message_retries_while_session_initializes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(400, json={"detail": "SeSsIoN StIlL iNiTiAlIzInG"})
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(client_module, "SESSION_WARMUP_INTERVAL_S", 0.0)
+    client = make_client(handler, org_id="org-test")
+    await client.send_message("s-1", "hello")
+    await client.aclose()
+
+    assert attempts["n"] == 2
+
+
+async def test_send_message_times_out_while_session_initializes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        return httpx.Response(400, json={"detail": "Session still initializing"})
+
+    monkeypatch.setattr(client_module, "SESSION_WARMUP_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(client_module, "SESSION_WARMUP_INTERVAL_S", 0.0)
+    client = make_client(handler, org_id="org-test")
+    with pytest.raises(DevinError, match="still initializing"):
+        await client.send_message("s-1", "hello")
+    await client.aclose()
+
+    assert attempts["n"] == 1
+
+
+async def test_send_message_does_not_retry_other_400s() -> None:
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        return httpx.Response(400, json={"detail": "invalid message"})
+
+    client = make_client(handler, org_id="org-test")
+    with pytest.raises(DevinError, match="400"):
+        await client.send_message("s-1", "hello")
+    await client.aclose()
+
     assert attempts["n"] == 1
 
 
