@@ -62,8 +62,7 @@ class LiveStreamLease:
 class LiveStreamLimiter:
     """A small synchronous cap for active MJPEG generators."""
 
-    def __init__(self, limit: int = 12) -> None:
-        self.limit = limit
+    def __init__(self) -> None:
         self._leases: set[LiveStreamLease] = set()
 
     @property
@@ -73,29 +72,25 @@ class LiveStreamLimiter:
 
     def acquire(self) -> LiveStreamLease | None:
         """Claim one slot, returning ``None`` when the cap is reached."""
-        if self.active_count >= self.limit:
+        if self.active_count >= get_settings().max_live_streams:
             return None
         lease = LiveStreamLease(self)
         self._leases.add(lease)
         return lease
 
-    def release(self, lease: LiveStreamLease | None = None) -> None:
-        """Release a reservation, or one arbitrary slot for test cleanup."""
-        if lease is None:
-            self._leases.pop() if self._leases else None
-        else:
-            self._leases.discard(lease)
+    def release(self, lease: LiveStreamLease) -> None:
+        """Release the specified reservation."""
+        self._leases.discard(lease)
 
-    def reset(self, limit: int = 12) -> None:
+    def reset(self) -> None:
         """Testing hook for isolated app instances."""
         self._leases.clear()
-        self.limit = limit
 
 
 live_stream_limiter = LiveStreamLimiter()
 
 
-def _scenario_for_path(run_id: str, scenario_id: str, db: Session) -> tuple[str, Path]:
+def _scenario_for_path(run_id: str, scenario_id: str, db: Session) -> Path:
     """Validate ownership and return the recorded frame path."""
     if repo.get_run(db, run_id) is None:
         raise HTTPException(status_code=404, detail="run not found")
@@ -104,7 +99,7 @@ def _scenario_for_path(run_id: str, scenario_id: str, db: Session) -> tuple[str,
         raise HTTPException(status_code=404, detail="scenario not found")
     if scenario.live_frame_path is None:
         raise HTTPException(status_code=404, detail="no live frame yet")
-    return scenario.id, safe_path(scenario.live_frame_path)
+    return safe_path(scenario.live_frame_path)
 
 
 def _read_complete_frame(path: Path) -> tuple[tuple[int, int], bytes] | None:
@@ -148,8 +143,7 @@ async def _mjpeg(
     scenario_id: str,
     frame_path: Path,
     *,
-    limiter: LiveStreamLimiter,
-    lease: LiveStreamLease | None = None,
+    lease: LiveStreamLease,
 ) -> AsyncIterator[bytes]:
     """Yield changed complete frames until terminal or idle."""
     settings = get_settings()
@@ -166,7 +160,7 @@ async def _mjpeg(
                 status = await asyncio.to_thread(_scenario_status, scenario_id)
                 next_status_at = now + 1.0
                 if status is None or status in _TERMINAL_STATUSES:
-                    return
+                    break
 
             result = await asyncio.to_thread(_read_complete_frame, frame_path)
             if result is not None:
@@ -178,20 +172,18 @@ async def _mjpeg(
 
             remaining_idle = idle_timeout - (time.monotonic() - last_frame_at)
             if remaining_idle <= 0:
-                return
+                break
             await asyncio.sleep(min(interval, remaining_idle))
+        yield b"--frame--\r\n"
     finally:
-        if lease is None:
-            limiter.release()
-        else:
-            lease.release()
+        lease.release()
 
 
 @router.get("/runs/{run_id}/scenarios/{scenario_id}/live.jpg")
 async def live_jpg(run_id: str, scenario_id: str) -> Response:
     """Return the current complete frame for a thumbnail."""
     with session_scope() as db:
-        _, path = _scenario_for_path(run_id, scenario_id, db)
+        path = _scenario_for_path(run_id, scenario_id, db)
     result = await asyncio.to_thread(_read_complete_frame, path)
     if result is None:
         raise HTTPException(status_code=404, detail="live frame not available")
@@ -206,9 +198,7 @@ async def live_jpg(run_id: str, scenario_id: str) -> Response:
 async def live_mjpg(run_id: str, scenario_id: str) -> StreamingResponse:
     """Stream changed frames, bounded by the configured cap and idle timeout."""
     with session_scope() as db:
-        _, path = _scenario_for_path(run_id, scenario_id, db)
-    settings = get_settings()
-    live_stream_limiter.limit = settings.max_live_streams
+        path = _scenario_for_path(run_id, scenario_id, db)
     lease = live_stream_limiter.acquire()
     if lease is None:
         raise HTTPException(
@@ -217,7 +207,7 @@ async def live_mjpg(run_id: str, scenario_id: str) -> StreamingResponse:
             headers={"Retry-After": "1"},
         )
     return StreamingResponse(
-        _mjpeg(scenario_id, path, limiter=live_stream_limiter, lease=lease),
+        _mjpeg(scenario_id, path, lease=lease),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={"Cache-Control": "no-store"},
     )

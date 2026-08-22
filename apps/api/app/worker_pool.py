@@ -6,7 +6,7 @@ Combine durable scenario state with the latest in-process pool event so a
 fresh dashboard load sees the same shape as a client that stayed connected.
 
 Inputs:  a database session, run id, event bus, and runtime settings.
-Outputs: a ``worker_pool`` mapping with pool counters and running scenarios.
+Outputs: a ``worker_pool`` mapping with pool counters and a ``running`` list.
 
 The database is authoritative for ``busy`` and ``queued``. Those values are
 measured from ``running`` and ``pending`` scenarios rather than copied from an
@@ -54,7 +54,7 @@ def get_worker_pool(db: Session, run_id: str, bus: EventBus) -> dict[str, Any]:
         "busy": busy,
         "queued": queued,
         "reason": reason,
-        "scenarios": [
+        "running": [
             scenario.model_dump(mode="json")
             for scenario in sorted(
                 (s for s in scenarios if s.status is ScenarioStatus.RUNNING),

@@ -144,7 +144,10 @@ def test_live_frame_path_cannot_escape_artifacts(
 
 
 def test_mjpeg_multipart_frame_and_finished_termination(
-    client: TestClient, db: Any, run: Any
+    client: TestClient,
+    db: Any,
+    run: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario = make_scenario(
         db,
@@ -154,12 +157,14 @@ def test_mjpeg_multipart_frame_and_finished_termination(
     )
     assert scenario.live_frame_path is not None
     path = write_frame(scenario.live_frame_path)
-    settings = get_settings()
-    settings.live_stream_idle_timeout_s = 1.0
+    monkeypatch.setenv("LIVE_STREAM_IDLE_TIMEOUT_S", "1.0")
+    get_settings.cache_clear()
 
-    async def consume() -> list[bytes]:
+    async def consume() -> tuple[list[bytes], bytes]:
         parts: list[bytes] = []
-        generator = _mjpeg(scenario.id, path, limiter=live_stream_limiter)
+        lease = live_stream_limiter.acquire()
+        assert lease is not None
+        generator = _mjpeg(scenario.id, path, lease=lease)
         try:
             parts.append(await anext(generator))
             repo.upsert_scenario(
@@ -167,17 +172,94 @@ def test_mjpeg_multipart_frame_and_finished_termination(
             )
             db.commit()
             await asyncio.sleep(1.05)
+            closing = await anext(generator)
             with pytest.raises(StopAsyncIteration):
                 await anext(generator)
         finally:
             await generator.aclose()
-        return parts
+        return parts, closing
 
-    assert live_stream_limiter.acquire()
-    parts = asyncio.run(consume())
+    parts, closing = asyncio.run(consume())
     assert parts[0].startswith(b"--frame\r\nContent-Type: image/jpeg\r\n")
     assert b"Content-Length: " in parts[0]
     assert parts[0].endswith(JPEG + b"\r\n")
+    assert closing == b"--frame--\r\n"
+    assert live_stream_limiter.active_count == 0
+
+
+def test_mjpeg_emits_changed_frames_only(
+    db: Any, run: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = make_scenario(
+        db,
+        run.id,
+        live_frame_path="frames/live.jpg",
+        status=ScenarioStatus.RUNNING,
+    )
+    assert scenario.live_frame_path is not None
+    path = write_frame(scenario.live_frame_path)
+    monkeypatch.setenv("LIVE_STREAM_IDLE_TIMEOUT_S", "2.0")
+    monkeypatch.setenv("LIVE_STREAM_FPS", "60.0")
+    get_settings.cache_clear()
+    changed = b"\xff\xd8new-frame\xff\xd9"
+
+    async def consume() -> tuple[bytes, bytes]:
+        lease = live_stream_limiter.acquire()
+        assert lease is not None
+        generator = _mjpeg(scenario.id, path, lease=lease)
+        try:
+            first = await anext(generator)
+            path.write_bytes(changed)
+            second = await anext(generator)
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(anext(generator), timeout=0.1)
+            return first, second
+        finally:
+            await generator.aclose()
+
+    first, second = asyncio.run(consume())
+    assert JPEG in first
+    assert changed in second
+    assert live_stream_limiter.active_count == 0
+
+
+def test_mjpeg_skips_torn_write_until_complete(
+    db: Any, run: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = make_scenario(
+        db,
+        run.id,
+        live_frame_path="frames/live.jpg",
+        status=ScenarioStatus.RUNNING,
+    )
+    assert scenario.live_frame_path is not None
+    path = write_frame(scenario.live_frame_path)
+    monkeypatch.setenv("LIVE_STREAM_IDLE_TIMEOUT_S", "2.0")
+    monkeypatch.setenv("LIVE_STREAM_FPS", "30.0")
+    get_settings.cache_clear()
+    torn = b"\xff\xd8torn-write"
+    complete = b"\xff\xd8complete-frame\xff\xd9"
+
+    async def consume() -> tuple[bytes, bytes]:
+        lease = live_stream_limiter.acquire()
+        assert lease is not None
+        generator = _mjpeg(scenario.id, path, lease=lease)
+        try:
+            first = await anext(generator)
+            path.write_bytes(torn)
+            next_part = asyncio.create_task(anext(generator))
+            await asyncio.sleep(0.15)
+            assert not next_part.done()
+            path.write_bytes(complete)
+            second = await asyncio.wait_for(next_part, timeout=0.5)
+            return first, second
+        finally:
+            await generator.aclose()
+
+    first, second = asyncio.run(consume())
+    assert JPEG in first
+    assert torn not in second
+    assert complete in second
     assert live_stream_limiter.active_count == 0
 
 
@@ -190,21 +272,23 @@ def test_mjpeg_close_releases_limiter_slot(db: Any, run: Any) -> None:
     )
     assert scenario.live_frame_path is not None
     path = write_frame(scenario.live_frame_path)
-    settings = get_settings()
-    settings.live_stream_idle_timeout_s = 10.0
+    lease = live_stream_limiter.acquire()
+    assert lease is not None
 
     async def abort() -> None:
-        generator = _mjpeg(scenario.id, path, limiter=live_stream_limiter)
+        generator = _mjpeg(scenario.id, path, lease=lease)
         await anext(generator)
         await generator.aclose()
 
-    assert live_stream_limiter.acquire()
     asyncio.run(abort())
     assert live_stream_limiter.active_count == 0
 
 
 def test_mjpeg_cap_sheds_with_retry_after(
-    client: TestClient, db: Any, run: Any
+    client: TestClient,
+    db: Any,
+    run: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario = make_scenario(
         db,
@@ -214,7 +298,8 @@ def test_mjpeg_cap_sheds_with_retry_after(
     )
     assert scenario.live_frame_path is not None
     write_frame(scenario.live_frame_path)
-    get_settings().max_live_streams = 0
+    monkeypatch.setenv("MAX_LIVE_STREAMS", "0")
+    get_settings.cache_clear()
 
     response = client.get(f"/runs/{run.id}/scenarios/{scenario.id}/live.mjpg")
 

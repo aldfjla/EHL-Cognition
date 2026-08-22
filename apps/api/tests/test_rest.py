@@ -85,7 +85,7 @@ def test_run_detail_includes_scenarios_and_clusters(
         "busy": 0,
         "queued": 1,
         "reason": None,
-        "scenarios": [],
+        "running": [],
     }
 
 
@@ -122,7 +122,7 @@ def test_worker_pool_measures_scenarios_and_uses_latest_event(
     assert body["busy"] == 1
     assert body["queued"] == 1
     assert body["reason"] == "fan-out"
-    assert [item["index"] for item in body["scenarios"]] == [1]
+    assert [item["index"] for item in body["running"]] == [1]
 
 
 def test_worker_pool_falls_back_without_events(
