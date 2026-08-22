@@ -24,12 +24,11 @@ interface Command {
 }
 
 const STATIC_COMMANDS: Command[] = [
-  { id: "nav-runs", label: "Go to runs", hint: "g r", href: "/" },
-  { id: "nav-repos", label: "Go to repositories", hint: "g p", href: "/repos" },
+  { id: "nav-runs", label: "Go to dashboard", hint: "g r", href: "/runs" },
   {
     id: "act-connect",
     label: "Connect a GitHub repository",
-    href: "/repos?connect=1",
+    href: "/runs?connect=1",
   },
   {
     id: "demo-replay",

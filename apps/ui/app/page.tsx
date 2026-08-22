@@ -163,7 +163,7 @@ export default function LandingPage() {
                     href="/runs"
                     className="rounded-full bg-slate-100 px-6 py-2.5 text-sm font-medium text-slate-900 transition-colors hover:bg-white"
                   >
-                    Open mission control
+                    Check Repo Now
                   </Link>
                   <Link
                     href={`/runs/${MOCK_RUN_ID}`}
@@ -303,7 +303,7 @@ export default function LandingPage() {
                     href="/runs"
                     className="rounded-full bg-slate-100 px-6 py-2.5 text-sm font-medium text-slate-900 transition-colors hover:bg-white"
                   >
-                    Open mission control
+                    Check Repo Now
                   </Link>
                   <a
                     href="https://github.com/aldfjla/EHL-Cognition"
