@@ -21,10 +21,15 @@ Routes
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import get_settings
+from app import deps
+from app.config import get_settings, validate_paths
+from app.routers import agents, artifacts, runs, stream, webhooks
+from app.store.db import get_engine
 
 
 def create_app() -> FastAPI:
@@ -39,6 +44,7 @@ def create_app() -> FastAPI:
         title="Robot CI",
         version="0.1.0",
         summary="Autonomous CI for robot control code, tested in simulation.",
+        lifespan=deps.lifespan,
     )
 
     app.add_middleware(
@@ -55,14 +61,36 @@ def create_app() -> FastAPI:
         it answers "is the process up", not "is everything configured"."""
         return {"status": "ok"}
 
-    # TODO(build): mount routers once they expose `router`:
-    #   from app.routers import agents, artifacts, runs, stream, webhooks
-    #   for m in (webhooks, runs, agents, artifacts, stream):
-    #       app.include_router(m.router)
-    # TODO(build): attach deps.lifespan to the FastAPI(...) constructor.
-    # TODO(build): add a /ready endpoint that DOES check DB + menagerie + key.
+    @app.get("/ready", tags=["meta"])
+    async def ready() -> dict[str, Any]:
+        """Readiness probe: the checks ``/health`` deliberately skips.
+
+        Reports rather than refuses: the dashboard is useful with a missing
+        model library or Devin key, so this returns the degraded detail and
+        lets the caller decide.
+        """
+        checks: dict[str, Any] = {
+            "database": _check_db(),
+            "menagerie": settings.menagerie_dir.is_dir(),
+            "devin_api_key": bool(settings.devin_api_key.strip()),
+            "warnings": validate_paths(settings),
+        }
+        return {"status": "ok" if checks["database"] else "degraded", "checks": checks}
+
+    for module in (webhooks, runs, agents, artifacts, stream):
+        app.include_router(module.router)
 
     return app
+
+
+def _check_db() -> bool:
+    """True when a trivial query round-trips to SQLite."""
+    try:
+        with get_engine().connect() as connection:
+            connection.exec_driver_sql("SELECT 1")
+    except Exception:  # noqa: BLE001 - the point of the probe is to report this
+        return False
+    return True
 
 
 app = create_app()

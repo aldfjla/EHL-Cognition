@@ -23,28 +23,74 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlmodel import Session, SQLModel, create_engine
 
-def get_engine() -> Any:
+from app.config import get_settings
+from app.store import tables  # noqa: F401  (registers the tables on SQLModel.metadata)
+
+#: How long a writer waits on a locked database before giving up.
+BUSY_TIMEOUT_MS = 5000
+
+_engine: Engine | None = None
+
+
+def _is_sqlite(url: str) -> bool:
+    return url.startswith("sqlite")
+
+
+@event.listens_for(Engine, "connect")
+def _configure_sqlite(dbapi_connection: Any, _record: Any) -> None:
+    """Put every SQLite connection into WAL mode with a busy timeout."""
+    if type(dbapi_connection).__module__.split(".")[0] != "sqlite3":
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
+
+
+def get_engine() -> Engine:
     """Create (once) and return the SQLModel engine."""
-    raise NotImplementedError
-    # TODO(build): create_engine(settings.database_url, connect_args={
-    # "check_same_thread": False}); PRAGMA journal_mode=WAL and busy_timeout
-    # via a connect event listener.
+    global _engine
+    if _engine is None:
+        url = get_settings().database_url
+        connect_args = {"check_same_thread": False} if _is_sqlite(url) else {}
+        _engine = create_engine(url, connect_args=connect_args, echo=False)
+    return _engine
+
+
+def reset_engine() -> None:
+    """Drop the cached engine. Testing hook — production never calls this."""
+    global _engine
+    if _engine is not None:
+        _engine.dispose()
+    _engine = None
 
 
 def init_db() -> None:
     """Create tables if absent. Called from the app lifespan."""
-    raise NotImplementedError
-    # TODO(build): SQLModel.metadata.create_all(get_engine()).
+    SQLModel.metadata.create_all(get_engine())
 
 
 @contextmanager
-def session_scope() -> Iterator[Any]:
+def session_scope() -> Iterator[Session]:
     """Transactional session: commit on success, rollback on error, always close."""
-    raise NotImplementedError
-    # TODO(build): Session(engine), try/yield/commit, except rollback+raise,
-    # finally close.
+    session = Session(get_engine())
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
-# TODO(build): decide on migrations. create_all is fine while the schema is
-# churning; the moment a demo DB needs to survive a schema change, add alembic.
+# NOTE: schema evolution is `create_all` only. That is honest while the schema
+# churns; the moment a demo database has to survive a column change, add alembic
+# rather than teaching this module to ALTER TABLE by hand.

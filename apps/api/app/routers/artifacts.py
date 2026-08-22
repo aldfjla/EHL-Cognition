@@ -22,38 +22,65 @@ a broken recording rather than a broken server.
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+import mimetypes
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
+
+from app.config import get_settings
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
 
 
-def safe_path(rel_path: str) -> str:
+def safe_path(rel_path: str) -> Path:
     """Resolve ``rel_path`` under ARTIFACTS_DIR, rejecting escapes.
 
     Raises ``HTTPException(400)`` if the resolved path leaves the directory.
     """
-    raise NotImplementedError
-    # TODO(build): (ARTIFACTS_DIR / rel).resolve(), then
-    # is_relative_to(ARTIFACTS_DIR.resolve()) — reject otherwise.
+    root = get_settings().artifacts_dir.resolve()
+    candidate = (root / rel_path).resolve()
+    if not candidate.is_relative_to(root):
+        raise HTTPException(status_code=400, detail="path escapes ARTIFACTS_DIR")
+    return candidate
+
+
+def _file_or_404(rel_path: str, media_type: str) -> FileResponse:
+    """A FileResponse for a contained path, 404 when the artifact is absent."""
+    path = safe_path(rel_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="artifact not found")
+    # Starlette's FileResponse answers Range requests itself, which is what
+    # makes seeking work in a <video> element.
+    return FileResponse(path, media_type=media_type, headers={"Accept-Ranges": "bytes"})
 
 
 @router.get("/video/{run_id}/{name}")
-async def get_video(run_id: str, name: str):
+async def get_video(run_id: str, name: str) -> FileResponse:
     """Stream a scenario mp4 with range support."""
-    raise NotImplementedError
-    # TODO(build): safe_path, FileResponse with media_type video/mp4 and
-    # Accept-Ranges; verify seeking works in Chrome before calling it done.
+    return _file_or_404(f"{run_id}/{name}", "video/mp4")
 
 
 @router.get("/report/{run_id}")
-async def get_report_markdown(run_id: str):
+async def get_report_markdown(run_id: str) -> FileResponse:
     """The rendered incident report as markdown."""
-    raise NotImplementedError
-    # TODO(build): safe_path to <run_id>/report.md, text/markdown.
+    return _file_or_404(f"{run_id}/report.md", "text/markdown")
 
 
 @router.get("/diff/{run_id}")
-async def get_diff(run_id: str):
+async def get_diff(run_id: str) -> FileResponse:
     """The unified diff of all accepted patches."""
-    raise NotImplementedError
-    # TODO(build): safe_path to <run_id>/patch.diff, text/plain.
+    return _file_or_404(f"{run_id}/patch.diff", "text/plain")
+
+
+@router.get("/{rel_path:path}")
+async def get_artifact(rel_path: str) -> FileResponse:
+    """Any artifact by its stored path.
+
+    Events carry paths relative to ``ARTIFACTS_DIR`` (``artifact.created``), and
+    the client resolves them with ``api.artifactUrl()`` — this is the route that
+    URL lands on. Content type is guessed from the suffix; containment is still
+    enforced by :func:`safe_path`.
+    """
+    media_type = mimetypes.guess_type(rel_path)[0] or "application/octet-stream"
+    return _file_or_404(rel_path, media_type)
