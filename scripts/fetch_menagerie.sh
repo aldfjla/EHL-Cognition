@@ -24,7 +24,23 @@ fi
 echo "==> Models available:"
 find "$DEST" -maxdepth 1 -mindepth 1 -type d -not -name '.*' -printf '  %f\n' | sort
 
-# TODO(build): build the index.json that simkit.models.menagerie.index() reads,
-# so lookups do not walk the tree and the index can be pasted into a prompt.
+# Build the index.json that simkit.models.menagerie.index() reads, so lookups
+# never walk the tree and the summary can be pasted straight into a prompt.
+PYTHON="${PYTHON:-}"
+if [ -z "$PYTHON" ]; then
+  if [ -x "$ROOT/.venv/bin/python" ]; then
+    PYTHON="$ROOT/.venv/bin/python"
+  else
+    PYTHON="$(command -v python3.12 || command -v python3)"
+  fi
+fi
+
 echo
-echo "Next: build the model index with  python -m simkit.cli models --refresh"
+echo "==> Building model index at $DEST/index.json"
+if MENAGERIE_DIR="$DEST" "$PYTHON" -m simkit.cli models list --refresh >/dev/null; then
+  COUNT="$("$PYTHON" -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["models"]))' "$DEST/index.json")"
+  echo "    indexed $COUNT models"
+else
+  echo "    could not build the index; simkit is not importable yet." >&2
+  echo "    Run scripts/setup.sh, then: python -m simkit.cli models list --refresh" >&2
+fi
