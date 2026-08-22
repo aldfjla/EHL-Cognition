@@ -46,5 +46,34 @@ also the easiest way to exercise the pause control and the fallback tiles side b
   only 4 agents with a `desktop_url`, so the cap never binds. To test it, the fixture
   needs >6 desktop-capable agents held in a working state.
 
+## Run-page agent tree (`components/AgentTree.tsx`, tab "2" on a run page)
+- `http://localhost:3000/runs/run_replay_demo` (fixture `lib/mockRun.ts`) is the polished
+  replay: 10 agents, ends `PR_OPENED` with a `pull request →` header link. Press `2` for
+  the Agents tab; the whole replay takes ~60-90s, so wait for the FIX stage before
+  asserting on the hierarchy.
+- `http://localhost:3000/runs/run_live_demo` (fixture `lib/mockLive.ts`) is the only
+  fixture that reaches `FAILED_UNRESOLVED` (`pull_request_url: null`), so it is the route
+  to use for the "no pull request — suite still red" header. It takes ~70s of streaming
+  before the stage flips, and it creates only 2 agents — do not use it for tree tests.
+- Useful expected values: only `agt_fix_grip_attempt1` is `failed`, so the header must
+  read `1 failed` and its parent `Debug Eng #1 — grasp timeout cluster` carries a `1✗`
+  subtree badge; the report has incidents for `cl_grip` (`scn_03_*`) and `cl_latency`
+  (`scn_17_*`) only, so `agt_inv_trace` (`cl_observation`) must show no evidence block.
+- Beware a real trap when asserting drawer fields: `lib/useEventStream.ts` (the run-page
+  reducer) has **no `agent.updated` case**, so everything the fixture sends via
+  `agent.updated` (iteration, issue text, session/desktop urls, step) never reaches the
+  run page — the failed agent's drawer shows `iteration 0/3` even though the fixture sets
+  `iteration: 3`. The `/agents-demo` reducer *does* handle it and shows `3/3 · at cap`, so
+  comparing the same agent on both routes is the fastest way to tell a tree-component bug
+  from a reducer gap.
+- Likewise no event ever sets an agent's `finished_at`, so `elapsed()` in
+  `components/agentTree.ts` treats finished agents as still running and their clocks keep
+  ticking. If you are asked to verify that finished agents' clocks freeze, expect this to
+  fail until the reducer/fixture sets `finished_at`.
+- Filters/collapse/keyboard are pure client state and are safe to test at any point:
+  search input is `aria-label="filter agents"`, the scroll container is
+  `role="tree" aria-label="agent hierarchy"` (click it to focus, then Arrow keys), and the
+  `showing N of M` line only renders when rows < agents.
+
 ## Devin Secrets Needed
 none — the harness needs no API, database, or credentials.
