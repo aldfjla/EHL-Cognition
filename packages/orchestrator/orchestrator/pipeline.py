@@ -177,6 +177,7 @@ class PipelineContext:
     blackboard: Blackboard
     devin: DevinClient
     config: dict = field(default_factory=dict)
+    sim_workers: int | None = None
     #: Called once with the parsed ``robotci.yaml`` as soon as there is a
     #: checkout. The transport layer uses it to cache the repo's trigger
     #: filters, which the webhook cannot read (nothing is cloned yet). The
@@ -1165,13 +1166,7 @@ class Pipeline:
             self._pool = SuitePool(
                 run_id=ctx.run.id,
                 bus=ctx.bus,
-                workers=max(
-                    1,
-                    min(
-                        int(os.getenv("SIM_WORKERS", "4")),
-                        os.cpu_count() or 1,
-                    ),
-                ),
+                workers=self._worker_count(),
                 artifacts_dir=self._artifacts,
             )
         policy = ctx.config.get("policy", {})
@@ -1249,13 +1244,7 @@ class Pipeline:
             self._pool = SuitePool(
                 run_id=ctx.run.id,
                 bus=ctx.bus,
-                workers=max(
-                    1,
-                    min(
-                        int(os.getenv("SIM_WORKERS", "4")),
-                        os.cpu_count() or 1,
-                    ),
-                ),
+                workers=self._worker_count(),
                 artifacts_dir=self._artifacts,
             )
         policy = ctx.config.get("policy", {})
@@ -1499,7 +1488,7 @@ class Pipeline:
                 for name, bounds in configured.items()
                 if isinstance(bounds, (list, tuple)) and len(bounds) == 2
             }
-        if axes and len(axes) < 3:
+        if len(axes) < 3:
             from simkit.scenarios import DEFAULT_AXES
 
             for name, bounds in DEFAULT_AXES.items():
@@ -1507,6 +1496,15 @@ class Pipeline:
                     break
                 axes.setdefault(name, bounds)
         return axes
+
+    def _worker_count(self) -> int:
+        """Resolve the shared simulation-worker count once for every suite."""
+        configured = (
+            self.ctx.sim_workers
+            if self.ctx.sim_workers is not None
+            else int(os.getenv("SIM_WORKERS", "4"))
+        )
+        return max(1, min(int(configured), os.cpu_count() or 1))
 
     def _findings_of(self, agent: Agent) -> list[Finding]:
         ids = set(agent.finding_ids)

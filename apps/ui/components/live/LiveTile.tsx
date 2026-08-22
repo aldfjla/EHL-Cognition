@@ -8,12 +8,17 @@
  * video (failures land loud — a red border and status chip, not a vanished
  * tile). Clicking focuses the tile large in the wall's overlay.
  *
+ * Motion is deliberately cheap and short: the tile pops in when a worker picks
+ * the scenario up, and pulses once in the outcome's colour when the verdict
+ * lands, so a running -> passed flip is seen live on a projector. Both are
+ * disabled under `prefers-reduced-motion`.
+ *
  * Visibility is observed here (IntersectionObserver) and reported up; the
  * wall decides which visible tiles may hold a streaming connection.
  */
 
 import clsx from "clsx";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { Scenario, ScenarioStatus } from "@/lib/types";
 
@@ -36,6 +41,14 @@ const BORDER_TONE: Record<ScenarioStatus, string> = {
   error: "border-status-error",
 };
 
+/** Kept in sync with the `pop` / `settle-*` durations in tailwind.config.ts. */
+const ENTER_MS = 300;
+const SETTLE_MS = 560;
+
+function isVerdict(status: ScenarioStatus): boolean {
+  return status === "passed" || status === "failed" || status === "error";
+}
+
 export interface LiveTileProps {
   runId: string;
   scenario: Scenario;
@@ -56,6 +69,28 @@ export default function LiveTile({
   onFocus,
 }: LiveTileProps) {
   const rootRef = useRef<HTMLButtonElement | null>(null);
+  // The tile pops in once, then never again; without this the entry animation
+  // would re-trigger every time the class list changes.
+  const [entering, setEntering] = useState(true);
+  const [settled, setSettled] = useState<ScenarioStatus | null>(null);
+  const lastStatus = useRef<ScenarioStatus>(scenario.status);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setEntering(false), ENTER_MS);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    const previous = lastStatus.current;
+    lastStatus.current = scenario.status;
+    // Only the transition into a verdict is worth a pulse — a tile that
+    // arrives already finished (late mount, replay scrub) just pops in.
+    if (previous === scenario.status || previous === "pending") return;
+    if (!isVerdict(scenario.status)) return;
+    setSettled(scenario.status);
+    const timer = window.setTimeout(() => setSettled(null), SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [scenario.status]);
 
   useEffect(() => {
     const node = rootRef.current;
@@ -71,10 +106,7 @@ export default function LiveTile({
     };
   }, [scenario.id, onVisibility]);
 
-  const finished =
-    scenario.status === "passed" ||
-    scenario.status === "failed" ||
-    scenario.status === "error";
+  const finished = isVerdict(scenario.status);
   const progressPct = Math.round((scenario.progress ?? 0) * 100);
 
   return (
@@ -83,10 +115,13 @@ export default function LiveTile({
       type="button"
       onClick={() => onFocus(scenario.id)}
       className={clsx(
-        "group relative flex w-full flex-col overflow-hidden rounded-lg border text-left transition-colors",
-        "bg-surface-raised hover:border-sky-500/70",
+        "group relative flex w-full flex-col overflow-hidden rounded-lg border text-left",
+        "bg-surface-raised transition-colors duration-500 hover:border-sky-500/70",
         BORDER_TONE[scenario.status],
-        scenario.status === "failed" && "animate-land",
+        settled === "passed" && "animate-settle-pass",
+        settled !== null && settled !== "passed" && "animate-settle-fail",
+        settled === null && entering && "animate-pop",
+        "motion-reduce:animate-none",
       )}
       aria-label={`scenario ${scenario.label} — ${scenario.status}`}
     >

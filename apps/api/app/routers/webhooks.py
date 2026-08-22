@@ -120,6 +120,7 @@ async def _drive_pipeline(
 
     # Construction is inside the try: a Workspace that cannot clone, or a
     # missing Devin key, is the same class of failure as a stage that throws.
+    persistence: asyncio.Task[None] | None = None
     try:
         workspace = Workspace(
             run_id=run.id,
@@ -135,16 +136,14 @@ async def _drive_pipeline(
             devin=_devin_or_none(),
             on_config=_filter_cache(run.repo),
             max_fix_iterations=settings.max_agent_iterations,
+            sim_workers=settings.sim_workers,
             suite_size=suite_size,
             default_suite_size=settings.suite_size,
         )
         persistence = asyncio.create_task(_persist_scenario_events(run.id, bus))
-        try:
-            await Pipeline(ctx).run()
-        finally:
-            if not persistence.done():
-                await bus.close(run.id)
-            await persistence
+        # Let persistence subscribe before a synchronously failing pipeline emits.
+        await asyncio.sleep(0)
+        await Pipeline(ctx).run()
     except Exception as exc:
         log.exception("run %s failed", run.id)
         await events.emit(
@@ -162,6 +161,13 @@ async def _drive_pipeline(
                         update={"stage": Stage.FAILED_UNRESOLVED, "error": str(exc)}
                     ),
                 )
+    finally:
+        if persistence is not None:
+            await bus.close(run.id)
+            driver = asyncio.current_task()
+            if driver is not None and driver.cancelling():
+                persistence.cancel()
+            await persistence
 
 
 def _filter_cache(repo_name: str) -> Any:

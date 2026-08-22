@@ -112,7 +112,7 @@ export default function MissionControlPage({
   };
 
   return (
-    <main className="p-6">
+    <main className="px-6 py-8">
       {/* A silently stale dashboard is worse than a loud one. */}
       {stale && !replay && (
         <div className="mb-4 rounded border border-status-blocked/60 bg-amber-950/30 px-3 py-2 text-xs text-status-blocked">
@@ -127,14 +127,17 @@ export default function MissionControlPage({
         </div>
       )}
 
-      <header className="mb-4 flex flex-wrap items-baseline justify-between gap-3">
+      <header className="mb-6 flex flex-wrap items-baseline justify-between gap-4">
         <div>
-          <div className="flex items-baseline gap-2">
+          <div className="flex flex-wrap items-center gap-3">
             <Link
-              href="/"
-              className="font-mono text-xs text-slate-500 hover:text-sky-400"
+              href="/runs"
+              className="inline-flex items-center gap-3 rounded-full border border-surface-border px-5 py-2.5 font-mono text-base font-medium text-slate-200 transition-colors hover:border-sky-500/70 hover:bg-surface-raised hover:text-sky-300"
             >
-              ← runs
+              <span aria-hidden className="text-2xl leading-none">
+                ←
+              </span>
+              Back
             </Link>
             <h1 className="font-mono text-lg font-semibold">{runId}</h1>
             {replay && (
@@ -188,7 +191,7 @@ export default function MissionControlPage({
         pool={state.live.pool}
       />
 
-      <nav className="mt-4 flex items-center gap-1 border-b border-surface-border">
+      <nav className="mt-6 flex items-center gap-1 border-b border-surface-border">
         {TABS.map(({ id, label, key }) => (
           <button
             key={id}
@@ -210,7 +213,7 @@ export default function MissionControlPage({
       </nav>
 
       {tab === "overview" && (
-        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[220px_1fr_380px]">
+        <div className="mt-6 grid grid-cols-1 gap-5 xl:grid-cols-[220px_1fr_380px]">
           <aside>
             <PipelineTimeline
               stage={state.run?.stage ?? null}
@@ -237,8 +240,8 @@ export default function MissionControlPage({
       )}
 
       {tab === "agents" && (
-        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1fr_380px]">
-          <section className="space-y-4">
+        <div className="mt-6 grid grid-cols-1 gap-5 xl:grid-cols-[1fr_380px]">
+          <section className="space-y-5">
             <AgentTree
               agents={state.agents}
               messages={state.messages}
@@ -257,7 +260,7 @@ export default function MissionControlPage({
               onFocusAgent={focusAgent}
             />
           </section>
-          <aside className="space-y-4">
+          <aside className="space-y-5">
             <AgentGraph
               agents={state.agents}
               messages={state.messages}
@@ -273,7 +276,7 @@ export default function MissionControlPage({
       )}
 
       {tab === "scenarios" && (
-        <div className="mt-4 space-y-4">
+        <div className="mt-6 space-y-5">
           <ScenarioMatrix
             scenarios={state.scenarios}
             clusters={state.clusters}
@@ -291,7 +294,7 @@ export default function MissionControlPage({
       )}
 
       {tab === "evidence" && (
-        <section className="mt-4 space-y-4">
+        <section className="mt-6 space-y-5">
           <VideoCompare incidents={state.report?.incidents ?? []} />
           <DiffViewer diff={state.report?.diff ?? null} />
           <ReportView report={state.report} />

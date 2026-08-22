@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,7 +20,9 @@ from orchestrator.pipeline import (
 )
 from orchestrator.schemas import (
     TERMINAL_STAGES,
+    Agent,
     EventType,
+    Role,
     Run,
     Scenario,
     ScenarioStatus,
@@ -130,6 +133,31 @@ def test_a_clean_suite_exits_without_agents() -> None:
     assert Stage.PASSED_CLEAN in TRANSITIONS[Stage.RUN_SUITE]
     assert can_transition(Stage.RUN_SUITE, Stage.PASSED_CLEAN)
     assert not can_transition(Stage.RUN_SUITE, Stage.INVESTIGATE)
+
+
+def test_empty_config_gets_default_axes_and_diverse_parameters(
+    tmp_path: Path,
+) -> None:
+    from simkit import scenarios as scenario_gen
+
+    ctx = make_ctx(tmp_path)
+    agent = Agent(run_id=ctx.run.id, role=Role.SCENARIO_DESIGNER)
+    axes = Pipeline(ctx)._axes(agent)
+
+    assert len(axes) >= 3
+    generated = scenario_gen.generate(ctx.run.id, 1337, 50, axes)
+    params = {tuple(sorted(scenario["params"].items())) for scenario in generated}
+    assert len(params) > 1
+
+
+def test_worker_count_uses_context_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SIM_WORKERS", "99")
+    ctx = make_ctx(tmp_path)
+    ctx.sim_workers = 2
+
+    assert Pipeline(ctx)._worker_count() == min(2, os.cpu_count() or 1)
 
 
 def test_every_stage_can_reach_a_terminal_stage() -> None:
