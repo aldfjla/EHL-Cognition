@@ -16,6 +16,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import * as api from "@/lib/api";
+import { LIVE_MOCK_RUN_ID } from "@/lib/mockLive";
 import { MOCK_RUN_ID } from "@/lib/mockRun";
 import type { Run, Stage } from "@/lib/types";
 import { WS_BASE } from "@/lib/useEventStream";
@@ -191,7 +192,14 @@ export default function RunsIndexPage() {
         >
           /runs/{MOCK_RUN_ID}
         </Link>{" "}
-        plays a scripted run entirely in the browser, labelled as a replay.
+        plays a scripted run entirely in the browser, and{" "}
+        <Link
+          href={`/runs/${LIVE_MOCK_RUN_ID}`}
+          className="font-mono text-sky-400 hover:underline"
+        >
+          /runs/{LIVE_MOCK_RUN_ID}
+        </Link>{" "}
+        demos the live simulation wall. Both are labelled as replays.
       </p>
     </main>
   );
