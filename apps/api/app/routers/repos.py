@@ -3,6 +3,13 @@
 Repositories are dormant until a matching GitHub push reaches
 ``POST /webhooks/github``. Run history is retained when a repository is
 disconnected.
+
+A connected repository also carries the trigger filters the webhook evaluates
+(``branches``, ``path_include``, ``path_exclude``). They are the registry's
+cache of the customer repo's ``robotci.yaml`` ``ci:`` section, which cannot be
+read at webhook time because nothing is cloned yet; stage TRIGGERED refreshes
+them from the checkout. Setting them here marks ``filters_source`` as
+``registry`` — until the next run reads the repo's committed config, which wins.
 """
 
 from __future__ import annotations
@@ -24,6 +31,10 @@ router = APIRouter(prefix="/repos", tags=["repos"])
 
 _FULL_NAME = re.compile(r"^[^/\s]+/[^/\s]+$")
 
+#: Fields whose presence means the caller is asserting its own filters, so the
+#: stored ``filters_source`` stops claiming they came from a checkout.
+_FILTER_FIELDS = ("branch", "branches", "path_include", "path_exclude")
+
 
 def _validate_full_name(value: str) -> str:
     value = value.strip()
@@ -40,6 +51,11 @@ class RepoCreate(BaseModel):
     full_name: str
     branch: str = Field(default="main", min_length=1)
     suite_size: int = Field(default=50, ge=1)
+    branches: list[str] = Field(default_factory=list)
+    #: Omit to leave unset (built-in defaults apply); send ``[]`` to configure
+    #: "no patterns" — the two are stored distinguishably.
+    path_include: list[str] | None = None
+    path_exclude: list[str] | None = None
 
     _full_name = field_validator("full_name")(_validate_full_name)
 
@@ -51,6 +67,9 @@ class RepoPatch(BaseModel):
 
     branch: str | None = Field(default=None, min_length=1)
     suite_size: int | None = Field(default=None, ge=1)
+    branches: list[str] | None = None
+    path_include: list[str] | None = None
+    path_exclude: list[str] | None = None
 
     @model_validator(mode="after")
     def reject_null_updates(self) -> RepoPatch:
@@ -58,6 +77,9 @@ class RepoPatch(BaseModel):
             raise ValueError("branch cannot be null")
         if "suite_size" in self.model_fields_set and self.suite_size is None:
             raise ValueError("suite_size cannot be null")
+        for name in _FILTER_FIELDS:
+            if name in self.model_fields_set and getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be null")
         if not self.model_fields_set:
             raise ValueError("at least one field is required")
         return self
@@ -111,6 +133,14 @@ async def connect_repo(
                 full_name=payload.full_name,
                 branch=payload.branch,
                 suite_size=payload.suite_size,
+                branches=payload.branches,
+                path_include=payload.path_include,
+                path_exclude=payload.path_exclude,
+                filters_source=(
+                    "registry"
+                    if payload.model_fields_set & set(_FILTER_FIELDS)
+                    else "default"
+                ),
             ),
         )
     except IntegrityError as exc:
@@ -151,5 +181,7 @@ async def update_connected_repo(
     if repository is None:
         raise HTTPException(status_code=404, detail="repository not found")
 
+    if set(updates) & set(_FILTER_FIELDS):
+        updates["filters_source"] = "registry"
     updated = repo.update_repo(db, repository.model_copy(update=updates))
     return _response(updated, db)

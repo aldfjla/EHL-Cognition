@@ -9,6 +9,34 @@
 
 version: 1
 
+# ---- When a push should start a run ----------------------------------------
+# Read at the webhook from the values Robot CI cached for this repo, and
+# refreshed from this file on every run (stage TRIGGERED is the first moment
+# there is a checkout to read it from). A change here therefore applies from
+# the next push onward.
+#
+# Omit the whole section to accept the defaults: branch `main`, source and
+# config files included, documentation and media excluded — so a README-only
+# push does not burn a run.
+ci:
+  # Watched branches. Globs allowed (`*` crosses `/`). A push to anything else
+  # is answered 200 with reason_code `branch_not_watched`.
+  branches:
+    - main
+    - release/*
+
+  paths:
+    # A push runs only if at least one changed path is included here...
+    include:
+      - src/*
+      - config/*
+      - robotci.yaml
+    # ...and excludes win, so generated or vendored code cannot trigger a run.
+    # `exclude: []` disables the defaults instead of adding to them.
+    exclude:
+      - src/vendor/*
+      - "*.md"
+
 # ---- Robot identity --------------------------------------------------------
 # How simkit/models/resolver.py finds a physical model for your hardware.
 robot:
