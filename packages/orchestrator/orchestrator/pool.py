@@ -39,6 +39,9 @@ log = logging.getLogger(__name__)
 
 Runner = Callable[..., Any]
 ResultCallback = Callable[[Any], Awaitable[None] | None]
+StartedCallback = Callable[[str, str, int], Awaitable[None] | None]
+PARENT_WATCHDOG_GRACE_S = 10.0
+DEFAULT_SCENARIO_TIMEOUT_S = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +52,7 @@ class _Spec:
     params: dict[str, Any]
 
 
-def _error_result(spec: _Spec, message: str) -> Any:
+def _error_result(spec: _Spec, message: str, *, error_kind: str = "infra") -> Any:
     """Create the same result shape as simkit for infrastructure failures."""
     from simkit.runner import EpisodeResult
 
@@ -58,6 +61,7 @@ def _error_result(spec: _Spec, message: str) -> Any:
         seed=spec.seed,
         status="error",
         error=message,
+        error_kind=error_kind,
     )
 
 
@@ -114,7 +118,9 @@ class SuitePool:
         record_dir: str | Path | None = None,
         repo_dir: str | Path | None = None,
         on_result: ResultCallback | None = None,
+        on_started: StartedCallback | None = None,
         reason: str | None = None,
+        max_wall_s: float | None = None,
     ) -> list[Any]:
         """Submit scenarios independently and return results in index order.
 
@@ -147,6 +153,8 @@ class SuitePool:
                     record_dir=record_dir,
                     repo_dir=repo_dir,
                     on_result=on_result,
+                    on_started=on_started,
+                    max_wall_s=max_wall_s,
                 )
             )
             for spec in normalized
@@ -246,33 +254,73 @@ class SuitePool:
         record_dir: str | Path | None,
         repo_dir: str | Path | None,
         on_result: ResultCallback | None,
+        on_started: StartedCallback | None,
+        max_wall_s: float | None,
     ) -> Any:
-        result: Any
-        slot = await self._acquire(spec.scenario_id, batch_id)
-        watcher: asyncio.Task[None] | None = None
-        try:
-            await self.bus.emit(
-                self.run_id,
-                EventType.SCENARIO_STARTED,
-                {"scenario_id": spec.scenario_id, "worker_id": slot},
+        retries = 0
+        retry_limit = max(0, int(os.environ.get("SCENARIO_INFRA_RETRIES", "2")))
+        while True:
+            slot = await self._acquire(spec.scenario_id, batch_id)
+            watcher: asyncio.Task[None] | None = None
+            try:
+                await self.bus.emit(
+                    self.run_id,
+                    EventType.SCENARIO_STARTED,
+                    {
+                        "scenario_id": spec.scenario_id,
+                        "worker_id": slot,
+                        "attempt": retries + 1,
+                    },
+                )
+                if on_started is not None:
+                    try:
+                        callback_result = on_started(
+                            spec.scenario_id, slot, retries + 1
+                        )
+                        if inspect.isawaitable(callback_result):
+                            await callback_result
+                    except Exception as exc:  # noqa: BLE001 - callback is best effort
+                        log.warning(
+                            "started callback failed for %s: %s",
+                            spec.scenario_id,
+                            exc,
+                        )
+                watcher = asyncio.create_task(self._watch_progress(spec.scenario_id))
+                result = await self._execute(
+                    spec,
+                    model_path=model_path,
+                    harness_path=harness_path,
+                    task=task,
+                    record=record == "all",
+                    record_dir=record_dir,
+                    repo_dir=repo_dir,
+                    max_wall_s=max_wall_s,
+                )
+            finally:
+                if watcher is not None:
+                    watcher.cancel()
+                    await asyncio.gather(watcher, return_exceptions=True)
+                await self._release(slot, spec.scenario_id)
+            try:
+                result.worker_id = slot
+            except AttributeError:
+                pass
+
+            error_kind = getattr(result, "error_kind", None)
+            is_infra = getattr(result, "status", None) == "error" and (
+                error_kind == "infra"
+                or (
+                    error_kind is None
+                    and str(getattr(result, "error", "")).startswith("worker died")
+                )
             )
-            watcher = asyncio.create_task(self._watch_progress(spec.scenario_id))
-            result = await self._execute(
-                spec,
-                model_path=model_path,
-                harness_path=harness_path,
-                task=task,
-                record=record == "all",
-                record_dir=record_dir,
-                repo_dir=repo_dir,
-            )
-        finally:
-            if watcher is not None:
-                watcher.cancel()
-                await asyncio.gather(watcher, return_exceptions=True)
-            await self._release(slot, spec.scenario_id)
+            if not is_infra or retries >= retry_limit:
+                break
+            retries += 1
+
         try:
-            result.worker_id = slot
+            result.retries = retries
+            result.retry_reason = "infra" if retries else None
         except AttributeError:
             pass
 
@@ -285,6 +333,7 @@ class SuitePool:
                 record=True,
                 record_dir=record_dir,
                 repo_dir=repo_dir,
+                max_wall_s=max_wall_s,
             )
             video_path = getattr(replay, "video_path", None)
             if video_path:
@@ -324,6 +373,7 @@ class SuitePool:
         record: bool,
         record_dir: str | Path | None,
         repo_dir: str | Path | None,
+        max_wall_s: float | None,
     ) -> Any:
         slot = await self._acquire(spec.scenario_id, -1)
         try:
@@ -335,6 +385,7 @@ class SuitePool:
                 record=record,
                 record_dir=record_dir,
                 repo_dir=repo_dir,
+                max_wall_s=max_wall_s,
             )
         finally:
             await self._release(slot, spec.scenario_id)
@@ -349,6 +400,7 @@ class SuitePool:
         record: bool,
         record_dir: str | Path | None,
         repo_dir: str | Path | None,
+        max_wall_s: float | None,
     ) -> Any:
         kwargs = {
             "scenario_id": spec.scenario_id,
@@ -357,6 +409,15 @@ class SuitePool:
             "params": spec.params,
             "seed": spec.seed,
             "task": task,
+            "max_wall_s": (
+                float(max_wall_s)
+                if max_wall_s is not None
+                else float(
+                    os.environ.get(
+                        "SCENARIO_TIMEOUT_S", str(DEFAULT_SCENARIO_TIMEOUT_S)
+                    )
+                )
+            ),
             "record": _record_path(
                 self.artifacts_dir, spec.scenario_id, record_dir=record_dir
             )
@@ -377,15 +438,42 @@ class SuitePool:
                 from simkit.runner import run_scenario
 
                 call_kwargs = _supported_kwargs(run_scenario, kwargs)
-                return await asyncio.get_running_loop().run_in_executor(
-                    self._executor, _run_simkit, call_kwargs
+                return await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        self._executor, _run_simkit, call_kwargs
+                    ),
+                    timeout=call_kwargs["max_wall_s"] + PARENT_WATCHDOG_GRACE_S,
                 )
-            return await self._invoke_runner(kwargs)
+            return await asyncio.wait_for(
+                self._invoke_runner(kwargs),
+                timeout=kwargs["max_wall_s"] + PARENT_WATCHDOG_GRACE_S,
+            )
+        except asyncio.TimeoutError:
+            if self._runner is None:
+                self._replace_executor()
+            return _error_result(
+                spec,
+                "parent watchdog expired; worker executor replaced",
+                error_kind="timeout",
+            )
         except Exception as exc:  # noqa: BLE001 - infrastructure stays a result
+            if self._runner is None:
+                self._replace_executor()
             return _error_result(
                 spec,
                 f"worker died: {type(exc).__name__}: {exc}",
+                error_kind="infra",
             )
+
+    def _replace_executor(self) -> None:
+        """Move future jobs to a fresh executor after a wedged worker."""
+        old_executor = self._executor
+        self._executor = ProcessPoolExecutor(max_workers=self._workers)
+        shutdown = asyncio.create_task(
+            asyncio.to_thread(old_executor.shutdown, wait=True, cancel_futures=True)
+        )
+        self._executor_shutdowns.add(shutdown)
+        shutdown.add_done_callback(self._executor_shutdowns.discard)
 
     async def _invoke_runner(self, kwargs: dict[str, Any]) -> Any:
         """Run an injected seam without putting synchronous work on the loop."""

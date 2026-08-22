@@ -1010,13 +1010,30 @@ class Pipeline:
             self._pool = SuitePool(
                 run_id=ctx.run.id,
                 bus=ctx.bus,
-                workers=self._max_parallel,
+                workers=max(
+                    1,
+                    min(
+                        int(os.getenv("SIM_WORKERS", "4")),
+                        os.cpu_count() or 1,
+                    ),
+                ),
                 artifacts_dir=self._artifacts,
             )
+        policy = ctx.config.get("policy", {})
+        max_wall_s = float(
+            policy.get("scenario_timeout_s", os.getenv("SCENARIO_TIMEOUT_S", "60"))
+        )
         completed = 0
         passed = 0
         failed = 0
         by_id = {scenario.id: scenario for scenario in scenarios}
+
+        async def on_started(scenario_id: str, worker_id: str, _attempt: int) -> None:
+            scenario = by_id.get(scenario_id)
+            if scenario is None:
+                return
+            scenario.status = ScenarioStatus.RUNNING
+            scenario.worker_id = worker_id
 
         async def on_result(result: Any) -> None:
             nonlocal completed, passed, failed
@@ -1045,6 +1062,7 @@ class Pipeline:
                         "passed": passed,
                         "failed": failed,
                         "running": snapshot["busy"],
+                        "queued": snapshot["queued"],
                         "workers": snapshot["workers"],
                     },
                 )
@@ -1057,7 +1075,9 @@ class Pipeline:
             record=ctx.config.get("policy", {}).get("record_video", "failures"),
             repo_dir=repo_dir,
             on_result=on_result,
+            on_started=on_started,
             reason=f"{ctx.run.stage.value.lower()}: {len(scenarios)} scenarios",
+            max_wall_s=max_wall_s,
         )
 
     async def _execute_cluster_suite(
@@ -1074,9 +1094,19 @@ class Pipeline:
             self._pool = SuitePool(
                 run_id=ctx.run.id,
                 bus=ctx.bus,
-                workers=self._max_parallel,
+                workers=max(
+                    1,
+                    min(
+                        int(os.getenv("SIM_WORKERS", "4")),
+                        os.cpu_count() or 1,
+                    ),
+                ),
                 artifacts_dir=self._artifacts,
             )
+        policy = ctx.config.get("policy", {})
+        max_wall_s = float(
+            policy.get("scenario_timeout_s", os.getenv("SCENARIO_TIMEOUT_S", "60"))
+        )
         return await self._pool.submit(
             [self._suite_spec(scenario) for scenario in scenarios],
             model_path=self._model_path(),
@@ -1084,6 +1114,7 @@ class Pipeline:
             task=ctx.config.get("task", {}),
             record="none",
             repo_dir=repo_dir,
+            max_wall_s=max_wall_s,
         )
 
     def _apply_results(
@@ -1108,6 +1139,9 @@ class Pipeline:
         scenario.video_path = result.video_path
         scenario.trace_path = result.trace_path
         scenario.error = result.error
+        scenario.error_kind = getattr(result, "error_kind", None)
+        scenario.retries = int(getattr(result, "retries", 0) or 0)
+        scenario.retry_reason = getattr(result, "retry_reason", None)
         scenario.worker_id = getattr(result, "worker_id", scenario.worker_id)
         scenario.criteria = [
             CriterionResult(**criterion) for criterion in result.criteria
@@ -1280,16 +1314,26 @@ class Pipeline:
         finding's ``detail`` — the role API hands the pipeline an ``Agent``, not
         the session's structured output, so the board is the only channel.
         """
+        axes: dict[str, tuple[float, float]] = {}
         for finding in reversed(self._findings_of(agent)):
             axes = _parse_axes(finding.detail)
             if axes:
-                return axes
-        configured = self.ctx.config.get("scenarios", {}).get("randomize", {})
-        return {
-            name: (float(bounds[0]), float(bounds[1]))
-            for name, bounds in configured.items()
-            if isinstance(bounds, (list, tuple)) and len(bounds) == 2
-        }
+                break
+        if not axes:
+            configured = self.ctx.config.get("scenarios", {}).get("randomize", {})
+            axes = {
+                name: (float(bounds[0]), float(bounds[1]))
+                for name, bounds in configured.items()
+                if isinstance(bounds, (list, tuple)) and len(bounds) == 2
+            }
+        if axes and len(axes) < 3:
+            from simkit.scenarios import DEFAULT_AXES
+
+            for name, bounds in DEFAULT_AXES.items():
+                if len(axes) >= 3:
+                    break
+                axes.setdefault(name, bounds)
+        return axes
 
     def _findings_of(self, agent: Agent) -> list[Finding]:
         ids = set(agent.finding_ids)

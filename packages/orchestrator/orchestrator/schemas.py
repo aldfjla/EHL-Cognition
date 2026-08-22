@@ -151,6 +151,11 @@ class ScenarioStatus(str, Enum):
     ERROR = "error"  # the sim broke, distinct from the robot failing the task
 
 
+class ScenarioErrorKind(str, Enum):
+    TIMEOUT = "timeout"
+    INFRA = "infra"
+
+
 class FindingKind(str, Enum):
     ROOT_CAUSE = "root_cause"
     PATCH = "patch"
@@ -431,6 +436,9 @@ class Scenario(_Base):
     )
     trace_path: str | None = None
     error: str | None = None
+    error_kind: ScenarioErrorKind | None = None
+    retries: int = Field(default=0, ge=0)
+    retry_reason: str | None = None
 
 
 class Finding(_Base):
