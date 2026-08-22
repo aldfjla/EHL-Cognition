@@ -133,6 +133,7 @@ CONFIRM_CONFIDENCE = 0.5
 #: Emit ``suite.progress`` at most this often, in completed scenarios.
 PROGRESS_EVERY = 1
 _CLUSTER_TERMINAL = {"resolved", "unresolved", "conflicted"}
+_AGENT_WATCH_INTERVAL_S = 0.01
 
 
 # --------------------------------------------------------------------------- #
@@ -190,6 +191,7 @@ class Pipeline:
     def __init__(self, ctx: PipelineContext) -> None:
         self.ctx = ctx
         self._max_parallel = int(os.getenv("MAX_PARALLEL_AGENTS", "6"))
+        self._max_parallel_agents = max(1, int(os.getenv("MAX_PARALLEL_AGENTS", "6")))
         self._artifacts = Path(os.getenv("ARTIFACTS_DIR", "artifacts")) / ctx.run.id
         #: Suite results before any patch, and after the latest VERIFY, kept as
         #: raw simkit results so ``simkit.suite.compare`` can diff them.
@@ -198,9 +200,7 @@ class Pipeline:
         self._fix_worktrees: list[str] = []
         self._conflicts: list[str] = []
         self._pool: SuitePool | None = None
-        self._agent_gate: asyncio.Semaphore | None = asyncio.Semaphore(
-            self._max_parallel
-        )
+        self._agent_gate = asyncio.Semaphore(self._max_parallel_agents)
         self._cluster_work: dict[str, _ClusterWork] = {}
         self._cluster_tasks: dict[str, asyncio.Task[None]] = {}
         self._cluster_progress = asyncio.Event()
@@ -294,13 +294,13 @@ class Pipeline:
         )
         ctx.config = await workspace_mod.read_config(ctx.workspace)
         policy = ctx.config.get("policy", {})
-        self._max_parallel = max(
+        self._max_parallel_agents = max(
             1,
             int(
                 policy.get("max_parallel_agents", os.getenv("MAX_PARALLEL_AGENTS", "6"))
             ),
         )
-        self._agent_gate = asyncio.Semaphore(self._max_parallel)
+        self._agent_gate = asyncio.Semaphore(self._max_parallel_agents)
         ctx.max_fix_iterations = int(
             ctx.config.get("policy", {}).get(
                 "max_fix_iterations", ctx.max_fix_iterations
@@ -604,11 +604,13 @@ class Pipeline:
             if scenario.id in set(work.cluster.scenario_ids)
         ]
         self._set_cluster_phase(work, "investigating")
-        gate = self._agent_gate or asyncio.Semaphore(self._max_parallel)
+        gate = self._agent_gate
+        role = InvestigatorAgent(ctx)
         async with gate:
-            role = InvestigatorAgent(ctx)
-            agent = await role.dispatch(
-                cluster=work.cluster,
+            agent = await self._dispatch_with_agent_watch(
+                role,
+                issue=_cluster_issue(scenarios),
+                step="investigating",
                 cluster_id=work.cluster.id,
                 cluster_label=work.cluster.label,
                 cluster_size=work.cluster.size,
@@ -617,11 +619,6 @@ class Pipeline:
                 param_correlation=clustering.correlate_params(scenarios),
             )
         work.agent_ids.append(agent.id)
-        await self._emit_agent_update(
-            role,
-            issue=_cluster_issue(scenarios),
-            step="investigating",
-        )
         for finding in self._findings_of(agent):
             if finding.kind is FindingKind.OBSERVATION:
                 await role.relay(finding, Role.INVESTIGATOR, "finding")
@@ -653,10 +650,13 @@ class Pipeline:
         branch = f"robotci/{name}-{ctx.run.commit_sha[:7]}"
         path = await workspace_mod.create_worktree(ctx.workspace, name, branch)
         self._set_cluster_phase(work, "fixing")
-        gate = self._agent_gate or asyncio.Semaphore(self._max_parallel)
+        gate = self._agent_gate
         role = FixerAgent(ctx)
         async with gate:
-            agent = await role.dispatch(
+            agent = await self._dispatch_with_agent_watch(
+                role,
+                issue=work.cause.summary,
+                step="fixing",
                 root_cause=work.cause.summary,
                 finding_id=work.cause.id,
                 cluster_id=work.cluster.id,
@@ -666,11 +666,6 @@ class Pipeline:
                 iteration=ctx.fix_iteration,
             )
         work.agent_ids.append(agent.id)
-        await self._emit_agent_update(
-            role,
-            issue=work.cause.summary,
-            step="fixing",
-        )
         if "patched" in role.output and not role.output["patched"]:
             work.outcome = "unresolved"
             self._set_cluster_phase(work, "unresolved")
@@ -695,7 +690,7 @@ class Pipeline:
                 work.outcome = "unresolved"
                 self._set_cluster_phase(work, "conflicted")
                 return
-            results = await self._execute_suite(
+            results = await self._execute_cluster_suite(
                 self._cluster_scenarios(work),
                 repo_dir=self.ctx.workspace.worktree("verify"),
             )
@@ -756,6 +751,55 @@ class Pipeline:
             self._cluster_progress.clear()
             await self._cluster_progress.wait()
 
+    async def _dispatch_with_agent_watch(
+        self,
+        role: InvestigatorAgent | FixerAgent,
+        *,
+        issue: str,
+        step: str,
+        **kwargs: Any,
+    ) -> Agent:
+        """Dispatch a role while streaming its public session fields."""
+        finished = asyncio.Event()
+        watcher = asyncio.create_task(
+            self._watch_agent(role, issue=issue, step=step, finished=finished)
+        )
+        try:
+            return await role.dispatch(**kwargs)
+        finally:
+            finished.set()
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+            await self._safe_emit_agent_update(role, issue=issue, step=step)
+
+    async def _watch_agent(
+        self,
+        role: InvestigatorAgent | FixerAgent,
+        *,
+        issue: str,
+        step: str,
+        finished: asyncio.Event,
+    ) -> None:
+        """Poll public session state without coupling it to dispatch success."""
+        while not finished.is_set():
+            await self._safe_emit_agent_update(role, issue=issue, step=step)
+            try:
+                await asyncio.wait_for(finished.wait(), timeout=_AGENT_WATCH_INTERVAL_S)
+            except TimeoutError:
+                continue
+
+    async def _safe_emit_agent_update(
+        self,
+        role: InvestigatorAgent | FixerAgent,
+        *,
+        issue: str,
+        step: str,
+    ) -> None:
+        try:
+            await self._emit_agent_update(role, issue=issue, step=step)
+        except Exception as exc:  # noqa: BLE001 - telemetry is best effort
+            log.warning("agent update failed: %s", exc)
+
     async def _emit_agent_update(
         self,
         role: InvestigatorAgent | FixerAgent,
@@ -768,16 +812,20 @@ class Pipeline:
         if session is None:
             return
         agent = session.agent
-        handle = getattr(session, "handle", None) or getattr(session, "_handle", None)
+        handle = getattr(session, "handle", None)
+        previous = self._agent_updates.setdefault(agent.id, {})
+        agent_step = getattr(agent, "step", None)
+        step_value = (
+            agent_step if agent_step and agent_step != previous.get("step") else step
+        )
         values = {
             "session_url": getattr(agent, "session_url", None),
             "desktop_url": _optional_field(handle, "desktop_url")
             or getattr(agent, "desktop_url", None),
             "issue": issue or None,
-            "step": step or None,
+            "step": step_value or None,
         }
         patch: dict[str, Any] = {"agent_id": agent.id}
-        previous = self._agent_updates.setdefault(agent.id, {})
         for name, value in values.items():
             if value is None or previous.get(name) == value:
                 continue
@@ -934,6 +982,32 @@ class Pipeline:
             repo_dir=repo_dir,
             on_result=on_result,
             reason=f"{ctx.run.stage.value.lower()}: {len(scenarios)} scenarios",
+        )
+
+    async def _execute_cluster_suite(
+        self, scenarios: list[Scenario], repo_dir: Path
+    ) -> list[Any]:
+        """Verify cluster seeds through the pool without changing run records.
+
+        Cluster checks are private evidence for deciding whether one patch is
+        safe. The authoritative Scenario records and suite progress belong to
+        the original suite and final full-suite verification only.
+        """
+        ctx = self.ctx
+        if self._pool is None:
+            self._pool = SuitePool(
+                run_id=ctx.run.id,
+                bus=ctx.bus,
+                workers=self._max_parallel,
+                artifacts_dir=self._artifacts,
+            )
+        return await self._pool.submit(
+            [self._suite_spec(scenario) for scenario in scenarios],
+            model_path=self._model_path(),
+            harness_path=str(self._artifacts / HARNESS_FILENAME),
+            task=ctx.config.get("task", {}),
+            record="none",
+            repo_dir=repo_dir,
         )
 
     def _apply_results(

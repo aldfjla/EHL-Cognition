@@ -11,11 +11,14 @@ from orchestrator import pipeline as pipeline_mod
 from orchestrator.blackboard import Blackboard
 from orchestrator.bus import EventBus
 from orchestrator.pipeline import Pipeline, PipelineContext
+from orchestrator.pool import SuitePool
 from orchestrator.schemas import (
     Agent,
     EventType,
     Finding,
     FindingKind,
+    ModelSource,
+    RobotModel,
     Role,
     Run,
     Scenario,
@@ -143,7 +146,7 @@ async def test_cluster_b_verifies_while_cluster_a_is_stalled(
     monkeypatch.setattr(pipeline_mod, "FixerAgent", Fixer)
     monkeypatch.setattr(pipeline_mod.workspace_mod, "create_worktree", create_worktree)
     monkeypatch.setattr(pipeline_mod.workspace_mod, "merge_patches", merge_patches)
-    monkeypatch.setattr(pipe, "_execute_suite", execute_suite)
+    monkeypatch.setattr(pipe, "_execute_cluster_suite", execute_suite)
 
     pipe._start_cluster_workflows()
     await a_started.wait()
@@ -206,7 +209,7 @@ async def test_fixer_claim_does_not_resolve_failed_cluster(
     monkeypatch.setattr(pipeline_mod, "FixerAgent", Fixer)
     monkeypatch.setattr(pipeline_mod.workspace_mod, "create_worktree", create_worktree)
     monkeypatch.setattr(pipeline_mod.workspace_mod, "merge_patches", merge_patches)
-    monkeypatch.setattr(pipe, "_execute_suite", execute_suite)
+    monkeypatch.setattr(pipe, "_execute_cluster_suite", execute_suite)
 
     await pipe._fix_cluster(work)
     await pipe._verify_cluster(work)
@@ -267,7 +270,7 @@ async def test_one_fixer_failure_does_not_cancel_other_clusters(
     monkeypatch.setattr(pipeline_mod, "FixerAgent", Fixer)
     monkeypatch.setattr(pipeline_mod.workspace_mod, "create_worktree", create_worktree)
     monkeypatch.setattr(pipeline_mod.workspace_mod, "merge_patches", merge_patches)
-    monkeypatch.setattr(pipe, "_execute_suite", execute_suite)
+    monkeypatch.setattr(pipe, "_execute_cluster_suite", execute_suite)
 
     pipe._start_cluster_workflows()
     await asyncio.gather(*pipe._cluster_tasks.values())
@@ -346,7 +349,7 @@ async def test_agent_gate_bounds_investigators_and_fixers(
     monkeypatch.setattr(pipeline_mod, "FixerAgent", Fixer)
     monkeypatch.setattr(pipeline_mod.workspace_mod, "create_worktree", create_worktree)
     monkeypatch.setattr(pipeline_mod.workspace_mod, "merge_patches", merge_patches)
-    monkeypatch.setattr(pipe, "_execute_suite", execute_suite)
+    monkeypatch.setattr(pipe, "_execute_cluster_suite", execute_suite)
     pipe._start_cluster_workflows()
     await asyncio.sleep(0.005)
     assert maximum == 1
@@ -385,7 +388,7 @@ async def test_conflicting_applies_are_serialized_and_unresolved(
         return [result(scenario.id, scenario.seed, "passed") for scenario in scenarios]
 
     monkeypatch.setattr(pipeline_mod.workspace_mod, "merge_patches", merge_patches)
-    monkeypatch.setattr(pipe, "_execute_suite", execute_suite)
+    monkeypatch.setattr(pipe, "_execute_cluster_suite", execute_suite)
 
     await asyncio.gather(*(pipe._verify_cluster(work) for work in works))
     await pipe._retry_conflicted_clusters()
@@ -426,3 +429,161 @@ async def test_agent_updated_contains_only_new_optional_fields(tmp_path: Path) -
         "step": "investigating",
     }
     assert updates[1].data == {"agent_id": agent.id, "step": "fixing"}
+
+
+async def test_cluster_verification_is_read_only_and_has_no_suite_progress(
+    tmp_path: Path,
+) -> None:
+    ctx = make_context(tmp_path)
+    ctx.run.robot_model = RobotModel(
+        source=ModelSource.REPO,
+        model_path="model.xml",
+    )
+    pipe = Pipeline(ctx)
+    await pipe.stage_cluster_failures()
+    work = next(iter(pipe._cluster_work.values()))
+    work.phase = "ready_to_verify"
+    work.worktree = "fix-cluster"
+    scenario = ctx.scenarios[0]
+    scenario.video_path = "before.mp4"
+    before = scenario.model_copy(deep=True)
+    observed: list[dict[str, object]] = []
+
+    async def runner(**kwargs: object) -> SimpleNamespace:
+        observed.append(kwargs)
+        return result(str(kwargs["scenario_id"]), int(kwargs["seed"]), "passed")
+
+    pipe._pool = SuitePool(
+        run_id=ctx.run.id,
+        bus=ctx.bus,
+        workers=2,
+        artifacts_dir=tmp_path,
+        runner=runner,
+    )
+    try:
+        original_merge = pipeline_mod.workspace_mod.merge_patches
+
+        async def merge_patches(*_args: object, **_kwargs: object) -> list[str]:
+            return []
+
+        pipeline_mod.workspace_mod.merge_patches = merge_patches
+        try:
+            await pipe._verify_cluster(work)
+        finally:
+            pipeline_mod.workspace_mod.merge_patches = original_merge
+    finally:
+        await pipe._pool.aclose()
+
+    assert work.phase == "resolved"
+    assert [int(item["seed"]) for item in observed] == [scenario.seed]
+    assert all(item["record"] is False for item in observed)
+    assert scenario == before
+    assert not any(
+        event.type in {EventType.SCENARIO_FINISHED, EventType.SUITE_PROGRESS}
+        for event in ctx.bus.history(ctx.run.id)
+    )
+
+
+async def test_agent_policy_does_not_resize_suite_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MAX_PARALLEL_AGENTS", "4")
+    ctx = make_context(tmp_path)
+    ctx.workspace.base.mkdir(parents=True)
+    (ctx.workspace.base / "control.py").write_text("")
+    pipe = Pipeline(ctx)
+
+    async def clone(*_args: object, **_kwargs: object) -> Workspace:
+        return ctx.workspace
+
+    async def read_config(_workspace: Workspace) -> dict[str, object]:
+        return {
+            "policy": {"max_parallel_agents": 1},
+            "control": {"entrypoint": "control:main"},
+            "task": {},
+        }
+
+    async def set_status(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def runner(**kwargs: object) -> SimpleNamespace:
+        return result(str(kwargs["scenario_id"]), int(kwargs["seed"]), "passed")
+
+    monkeypatch.setattr(pipeline_mod.workspace_mod, "clone", clone)
+    monkeypatch.setattr(pipeline_mod.workspace_mod, "read_config", read_config)
+    monkeypatch.setattr(pipeline_mod.github, "set_commit_status", set_status)
+    await pipe.stage_triggered()
+    ctx.run.robot_model = RobotModel(
+        source=ModelSource.REPO,
+        model_path="model.xml",
+    )
+    pipe._pool = SuitePool(
+        run_id=ctx.run.id,
+        bus=ctx.bus,
+        workers=pipe._max_parallel,
+        artifacts_dir=tmp_path,
+        runner=runner,
+    )
+    try:
+        await pipe._execute_suite([ctx.scenarios[0]])
+        assert pipe._max_parallel == 4
+        assert pipe._max_parallel_agents == 1
+        assert pipe._pool.snapshot()["workers"] == 4
+    finally:
+        await pipe._pool.aclose()
+
+
+async def test_agent_watcher_publishes_session_fields_before_dispatch_finishes(
+    tmp_path: Path,
+) -> None:
+    ctx = make_context(tmp_path)
+    pipe = Pipeline(ctx)
+    ready = asyncio.Event()
+    release = asyncio.Event()
+    agent = Agent(run_id=ctx.run.id, role=Role.INVESTIGATOR)
+
+    class RoleStub:
+        session: SimpleNamespace | None = None
+
+        async def dispatch(self, **_kwargs: object) -> Agent:
+            self.session = SimpleNamespace(
+                agent=agent,
+                handle=SimpleNamespace(desktop_url="desktop://one"),
+            )
+            agent.session_url = "session://one"
+            ready.set()
+            await release.wait()
+            self.session.handle.desktop_url = "desktop://two"
+            agent.step = "waiting"
+            return agent
+
+    role = RoleStub()
+    dispatch = asyncio.create_task(
+        pipe._dispatch_with_agent_watch(
+            role, issue="oracle issue", step="investigating"
+        )  # type: ignore[arg-type]
+    )
+    await ready.wait()
+    for _ in range(20):
+        if any(
+            event.type is EventType.AGENT_UPDATED
+            for event in ctx.bus.history(ctx.run.id)
+        ):
+            break
+        await asyncio.sleep(0)
+    updates_before_release = [
+        event
+        for event in ctx.bus.history(ctx.run.id)
+        if event.type is EventType.AGENT_UPDATED
+    ]
+    assert updates_before_release
+    assert updates_before_release[0].data["session_url"] == "session://one"
+    release.set()
+    await dispatch
+    updates = [
+        event
+        for event in ctx.bus.history(ctx.run.id)
+        if event.type is EventType.AGENT_UPDATED
+    ]
+    assert any(event.data.get("desktop_url") == "desktop://two" for event in updates)
+    assert any(event.data.get("step") == "waiting" for event in updates)
