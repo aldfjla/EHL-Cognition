@@ -106,10 +106,9 @@ async def ingest_event(
 ) -> dict[str, Any]:
     """Inject an event into this process's bus. Development and replay only.
 
-    The bus is in-process, so ``scripts/seed_mock_run.py`` — a separate
-    process — has no other way to drive a live dashboard. Events arrive already
-    shaped by ``event.json``; ``seq`` is re-stamped by the bus so a replay never
-    collides with a real run's numbering.
+    The bus is in-process, so development clients use this endpoint to drive a
+    live dashboard. Events arrive already shaped by ``event.json``; ``seq`` is
+    re-stamped by the bus so a replay never collides with a real run's numbering.
     """
     event = Event.model_validate({**payload, "run_id": run_id})
     await events.publish(bus, event)

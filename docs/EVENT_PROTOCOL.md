@@ -249,7 +249,7 @@ same commit, and note it here.
 
 ## Testing without a backend
 
-`scripts/seed_mock_run.py` replays a scripted event sequence with realistic
-timing. The entire dashboard can be built and demoed against it before the
-pipeline exists. Seeded runs are prefixed `[REPLAY]` in the title — a replay
+`/runs/run_replay_demo` replays a scripted event sequence with realistic timing
+entirely in the browser. The entire dashboard can be built and demoed against
+it before the pipeline exists. It is explicitly labelled as a replay — a replay
 must never be presentable as a live run.

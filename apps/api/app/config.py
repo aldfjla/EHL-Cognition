@@ -83,7 +83,7 @@ def validate_paths(settings: Settings | None = None) -> list[str]:
 
     Called from the app lifespan. Never raises: a missing model library is a
     reason to warn loudly at startup, not a reason to refuse to boot — the
-    dashboard and the seeded replay work without it.
+    dashboard and its browser replay work without it.
     """
     settings = settings or get_settings()
     warnings: list[str] = []

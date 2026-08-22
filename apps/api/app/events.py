@@ -55,7 +55,7 @@ async def emit(
 
 
 async def publish(bus: EventBus, event: Event) -> None:
-    """Publish an already-built event (the seeded-replay ingest path)."""
+    """Publish an already-built event from the ingest path."""
     try:
         await bus.publish(event)
     except Exception:

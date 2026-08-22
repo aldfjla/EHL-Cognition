@@ -12,7 +12,6 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import * as api from "@/lib/api";
-import { LIVE_MOCK_RUN_ID } from "@/lib/mockLive";
 import { MOCK_RUN_ID } from "@/lib/mockRun";
 import type { Run } from "@/lib/types";
 
@@ -40,12 +39,6 @@ const STATIC_COMMANDS: Command[] = [
     label: "Demo: scripted run replay",
     href: `/runs/${MOCK_RUN_ID}`,
   },
-  {
-    id: "demo-live",
-    label: "Demo: live simulation wall",
-    href: `/runs/${LIVE_MOCK_RUN_ID}`,
-  },
-  { id: "demo-agents", label: "Demo: agent ops harness", href: "/agents-demo" },
 ];
 
 function matches(query: string, text: string): boolean {

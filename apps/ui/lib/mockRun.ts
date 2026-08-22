@@ -1111,7 +1111,7 @@ export function mockClusters(runId: string = MOCK_RUN_ID): Cluster[] {
 export interface ReplayOptions {
   /** Multiply every scripted delay. 1 is demo pace; 0 replays instantly. */
   speed?: number;
-  /** Restart from the top once the script ends (`seed_mock_run.py --loop`). */
+  /** Restart from the top once the script ends. */
   loop?: boolean;
 }
 

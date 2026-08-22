@@ -17,7 +17,6 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 
 import RepositoriesSection from "@/components/repos/RepositoriesSection";
 import * as api from "@/lib/api";
-import { LIVE_MOCK_RUN_ID } from "@/lib/mockLive";
 import { MOCK_RUN_ID } from "@/lib/mockRun";
 import type { Run, Stage } from "@/lib/types";
 import { WS_BASE } from "@/lib/useEventStream";
@@ -149,9 +148,14 @@ export default function RunsIndexPage() {
         </div>
         {runs.length === 0 ? (
           <p className="mt-2 text-sm text-slate-400">
-            No runs yet. Trigger one with{" "}
-            <code className="font-mono text-slate-300">make seed</code> or push
-            to the watched repo.
+            No runs yet. Push to the watched repo, or open the{" "}
+            <Link
+              href={`/runs/${MOCK_RUN_ID}`}
+              className="text-sky-300 hover:underline"
+            >
+              scripted replay
+            </Link>
+            .
           </p>
         ) : (
           <ul className="mt-3 divide-y divide-surface-border">
@@ -196,14 +200,7 @@ export default function RunsIndexPage() {
         >
           /runs/{MOCK_RUN_ID}
         </Link>{" "}
-        plays a scripted run entirely in the browser, and{" "}
-        <Link
-          href={`/runs/${LIVE_MOCK_RUN_ID}`}
-          className="font-mono text-sky-400 hover:underline"
-        >
-          /runs/{LIVE_MOCK_RUN_ID}
-        </Link>{" "}
-        demos the live simulation wall. Both are labelled as replays.
+        plays a scripted run entirely in the browser.
       </p>
     </main>
   );

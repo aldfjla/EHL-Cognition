@@ -18,7 +18,6 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import CommandPalette from "./CommandPalette";
-import { LIVE_MOCK_RUN_ID } from "@/lib/mockLive";
 import { MOCK_RUN_ID } from "@/lib/mockRun";
 
 const NAV = [
@@ -27,8 +26,6 @@ const NAV = [
 
 const DEMOS = [
   { href: `/runs/${MOCK_RUN_ID}`, label: "Scripted run replay" },
-  { href: `/runs/${LIVE_MOCK_RUN_ID}`, label: "Live wall demo" },
-  { href: "/agents-demo", label: "Agent ops harness" },
 ] as const;
 
 const SHORTCUTS: Array<{ keys: string; does: string }> = [

@@ -245,8 +245,8 @@ async def _persist_scenario_events(run_id: str, bus: EventBus) -> None:
 def _devin_or_none() -> Any:
     """The Devin client, or None when no key is configured.
 
-    A missing key must not stop the API from booting or a seeded replay from
-    running; it stops agent stages, which report it as an infrastructure error.
+    A missing key must not stop the API from booting; it stops agent stages,
+    which report it as an infrastructure error.
     """
     try:
         return get_devin()

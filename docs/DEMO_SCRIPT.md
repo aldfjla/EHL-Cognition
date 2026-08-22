@@ -15,7 +15,7 @@ The demo must show three things, in this order, and nothing else:
       hardcoded `GRIP_TIMEOUT = 2.0`, which fails whenever a low-friction or
       heavy-payload approach takes longer than that
 - [ ] One full run completed **that morning**, its artifacts on disk
-- [ ] `scripts/seed_mock_run.py --loop` verified working as the fallback
+- [ ] Browser replay at `/runs/run_replay_demo` verified working as the fallback
 - [ ] Browser: terminal + dashboard side by side, dashboard zoomed for the room
 - [ ] Menagerie model cached — no downloading on stage
 
@@ -114,7 +114,7 @@ Decide the fallback *before* you start, not mid-demo.
 |---|---|
 | Devin API slow/down | Cut to the morning's completed run. Say "this ran an hour ago" — never imply it's live. |
 | A session hangs > 20s | Keep talking through the fan-out explanation; the pipeline is bounded and will move. |
-| Venue wifi dies | `scripts/seed_mock_run.py --loop`. Runs are labelled `[REPLAY]` and you say so out loud. |
+| Venue wifi dies | Open `/runs/run_replay_demo` in the browser. Say "this is a replay" out loud. |
 | Suite passes clean (no bug!) | You pushed the wrong commit. Have the broken SHA in your paste buffer. |
 | Dashboard blank | Reload — `?since=0` replays the buffer. Do not debug on stage. |
 
