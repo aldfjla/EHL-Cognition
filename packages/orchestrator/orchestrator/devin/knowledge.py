@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -47,6 +48,8 @@ KEEP_OBSERVATION_PATTERN = re.compile(
 
 #: Cap on how much recalled knowledge is spliced into a prompt.
 MAX_PREAMBLE_ENTRIES = 8
+KNOWLEDGE_PAGE_SIZE = 100
+MAX_KNOWLEDGE_PAGES = 100
 
 
 def _tag(repo: str) -> str:
@@ -54,20 +57,27 @@ def _tag(repo: str) -> str:
     return f"[{NAME_PREFIX}:{repo}]"
 
 
-def _api() -> tuple[str, str]:
-    """``(api_base, api_key)`` from the environment, or raise."""
+def _api() -> tuple[str, str, str | None]:
+    """``(api_base, api_key, org_id)`` from the environment, or raise."""
     key = os.environ.get("DEVIN_API_KEY", "").strip()
     if not key:
         raise DevinError("DEVIN_API_KEY unset; copy .env.example to .env")
-    base = os.environ.get("DEVIN_API_BASE", "https://api.devin.ai/v1").rstrip("/")
-    return base, key
+    org_id = os.environ.get("DEVIN_ORG_ID", "").strip() or None
+    default_base = "https://api.devin.ai/v3" if org_id else "https://api.devin.ai/v1"
+    base = os.environ.get("DEVIN_API_BASE", "").strip() or default_base
+    return base.rstrip("/"), key, org_id
+
+
+def _org_id() -> str | None:
+    """Return the configured organization, if v3 mode is enabled."""
+    return os.environ.get("DEVIN_ORG_ID", "").strip() or None
 
 
 async def _request(
     method: str, path: str, body: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """One knowledge-API call. Raises :class:`DevinError` on any failure."""
-    base, key = _api()
+    base, key, _ = _api()
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     try:
         async with httpx.AsyncClient(timeout=30.0, headers=headers) as http:
@@ -86,7 +96,7 @@ async def _request(
 
 def _entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """The list of knowledge notes out of a GET /knowledge response."""
-    for key in ("knowledge", "notes", "data"):
+    for key in ("knowledge", "notes", "items", "data"):
         value = payload.get(key)
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
@@ -106,13 +116,31 @@ def _render(finding: Finding) -> str:
 
 async def recall(repo: str) -> list[str]:
     """Knowledge entries relevant to ``repo``, newest first."""
-    payload = await _request("GET", "/knowledge")
+    org_id = _org_id()
+    if not org_id:
+        payload = await _request("GET", "/knowledge")
+        entries = _entries(payload)
+    else:
+        entries = []
+        path = f"/organizations/{org_id}/knowledge/notes?first={KNOWLEDGE_PAGE_SIZE}"
+        for _ in range(MAX_KNOWLEDGE_PAGES):
+            payload = await _request("GET", path)
+            entries.extend(_entries(payload))
+            if not payload.get("has_next_page"):
+                break
+            cursor = str(payload.get("end_cursor") or "")
+            if not cursor:
+                break
+            path = (
+                f"/organizations/{org_id}/knowledge/notes?"
+                f"first={KNOWLEDGE_PAGE_SIZE}&after={quote(cursor, safe='')}"
+            )
     tag = _tag(repo)
     matching = [
         entry
-        for entry in _entries(payload)
+        for entry in entries
         if tag in str(entry.get("name", ""))
-        or tag in str(entry.get("trigger_description", ""))
+        or tag in str(entry.get("trigger_description", entry.get("trigger", "")))
     ]
     matching.sort(key=lambda e: str(e.get("created_at", "")), reverse=True)
     return [
@@ -123,19 +151,30 @@ async def recall(repo: str) -> list[str]:
 async def remember(repo: str, finding: Finding) -> str:
     """Persist one finding as durable knowledge. Returns the entry id."""
     summary = finding.summary.strip().replace("\n", " ")
+    org_id = _org_id()
+    path = "/knowledge"
+    trigger_key = "trigger_description"
+    if org_id:
+        path = f"/organizations/{org_id}/knowledge/notes"
+        trigger_key = "trigger"
     payload = await _request(
         "POST",
-        "/knowledge",
+        path,
         {
             "name": f"{_tag(repo)} {finding.kind.value}: {summary[:80]}",
             "body": _render(finding),
-            "trigger_description": (
+            trigger_key: (
                 f"When running Robot CI against {repo} {_tag(repo)} — read before "
                 f"resolving a model, building a harness or designing scenarios."
             ),
         },
     )
-    entry_id = str(payload.get("id") or payload.get("knowledge_id") or "")
+    entry_value = (
+        payload.get("note_id")
+        if org_id
+        else payload.get("id") or payload.get("knowledge_id") or ""
+    )
+    entry_id = str(entry_value or "")
     if not entry_id:
         raise DevinError(f"POST /knowledge returned no id: {payload}")
     return entry_id

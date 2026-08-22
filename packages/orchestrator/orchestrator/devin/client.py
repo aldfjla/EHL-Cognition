@@ -28,9 +28,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from tenacity import (
@@ -54,8 +56,13 @@ TERMINAL_STATUSES = frozenset(
         "completed",
         "failed",
         "cancelled",
+        "exit",
+        "error",
     }
 )
+
+#: Status details that mean the session is done for orchestration purposes.
+TERMINAL_STATUS_DETAILS = frozenset({"finished", "waiting_for_user"})
 
 #: Sent once when a session finishes without a parseable structured output.
 STRUCTURED_OUTPUT_REMINDER = (
@@ -66,6 +73,16 @@ STRUCTURED_OUTPUT_REMINDER = (
 #: How long to keep polling after the reminder above before giving up.
 REMINDER_TIMEOUT_S = 120.0
 
+#: Maximum number of transcript pages fetched for one poll or output scrape.
+MAX_TRANSCRIPT_PAGES = 100
+
+#: Response marker returned while a newly created session is booting.
+SESSION_INITIALIZING_MARKER = "session still initializing"
+
+#: Warm-up retry bounds for sending the first message to a new session.
+SESSION_WARMUP_INTERVAL_S = 5.0
+SESSION_WARMUP_TIMEOUT_S = 180.0
+
 _JSON_BLOCK = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
@@ -75,6 +92,10 @@ class DevinError(RuntimeError):
 
 class _Retryable(RuntimeError):
     """Internal: a transport error or 429/5xx that is worth trying again."""
+
+
+class _SessionInitializing(DevinError):
+    """Internal: the session has not finished booting yet."""
 
 
 @dataclass
@@ -154,10 +175,12 @@ class DevinClient:
         api_base: str = "https://api.devin.ai/v1",
         max_parallel: int = 6,
         timeout_s: float = 60.0,
+        org_id: str | None = None,
     ) -> None:
         if not api_key:
             raise DevinError("DEVIN_API_KEY unset; copy .env.example to .env")
         self.api_base = api_base.rstrip("/")
+        self.org_id = org_id if org_id is not None else os.environ.get("DEVIN_ORG_ID")
         self.max_parallel = max_parallel
         self.timeout_s = timeout_s
         self._http = httpx.AsyncClient(
@@ -185,6 +208,14 @@ class DevinClient:
         if response.status_code == 429 or response.status_code >= 500:
             raise _Retryable(f"{method} {path} -> HTTP {response.status_code}")
         if response.status_code >= 400:
+            if (
+                response.status_code == 400
+                and SESSION_INITIALIZING_MARKER in response.text.casefold()
+            ):
+                raise _SessionInitializing(
+                    f"{method} {path} -> HTTP {response.status_code}: "
+                    f"{response.text[:500]}"
+                )
             raise DevinError(
                 f"{method} {path} -> HTTP {response.status_code}: {response.text[:500]}"
             )
@@ -219,6 +250,69 @@ class DevinClient:
             self._slots.discard(session_id)
             self._sem.release()
 
+    # -- paths ------------------------------------------------------------- #
+
+    def _sessions_path(self) -> str:
+        """Path for the sessions collection in the configured API flavour."""
+        if self.org_id:
+            return f"/organizations/{self.org_id}/sessions"
+        return "/sessions"
+
+    def _devin_id(self, session_id: str) -> str:
+        """Return the v3 path identifier, including its required prefix."""
+        if session_id.startswith("devin-"):
+            return session_id
+        return f"devin-{session_id}"
+
+    def _session_path(self, session_id: str) -> str:
+        """Path for one session in the configured API flavour."""
+        if self.org_id:
+            return f"{self._sessions_path()}/{self._devin_id(session_id)}"
+        return f"/session/{session_id}"
+
+    def _message_path(self, session_id: str) -> str:
+        """Path for sending one message in the configured API flavour."""
+        if self.org_id:
+            return f"{self._session_path(session_id)}/messages"
+        return f"/session/{session_id}/message"
+
+    def _transcript_path(self, session_id: str) -> str:
+        """Path for the v3 transcript endpoint."""
+        return f"{self._session_path(session_id)}/messages"
+
+    async def _fetch_transcript(self, session_id: str) -> list[dict[str, Any]]:
+        """Fetch a bounded v3 transcript, or no messages for v1."""
+        if not self.org_id:
+            return []
+        messages: list[dict[str, Any]] = []
+        path = self._transcript_path(session_id)
+        for _ in range(MAX_TRANSCRIPT_PAGES):
+            page = await self._request("GET", path)
+            items = page.get("items")
+            if isinstance(items, list):
+                messages.extend(item for item in items if isinstance(item, dict))
+            if not page.get("has_next_page"):
+                break
+            cursor = str(page.get("end_cursor") or "")
+            if not cursor:
+                break
+            path = f"{self._transcript_path(session_id)}?after={quote(cursor, safe='')}"
+        return messages
+
+    async def _merge_transcript(
+        self, session_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Best-effort transcript merge that preserves the session response."""
+        if not self.org_id:
+            return payload
+        try:
+            messages = await self._fetch_transcript(session_id)
+        except DevinError:
+            return payload
+        merged = dict(payload)
+        merged["messages"] = messages
+        return merged
+
     # -- lifecycle --------------------------------------------------------- #
 
     async def create_session(
@@ -250,7 +344,7 @@ class DevinClient:
         # MAX_PARALLEL_AGENTS bounds how many agents are alive at once.
         await self._sem.acquire()
         try:
-            payload = await self._request("POST", "/sessions", body)
+            payload = await self._request("POST", self._sessions_path(), body)
         except BaseException:
             self._sem.release()
             raise
@@ -271,22 +365,35 @@ class DevinClient:
 
     async def ping(self) -> dict[str, Any]:
         """Cheap authenticated call, so a bad key fails before a session does."""
-        return await self._request("GET", "/sessions", None)
+        path = self._sessions_path()
+        if self.org_id:
+            path += "?limit=1"
+        return await self._request("GET", path, None)
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
-        """GET /session/{id} — full state including status and messages."""
-        return await self._request("GET", f"/session/{session_id}")
+        """GET one session's state; v3 transcripts are fetched separately."""
+        return await self._request("GET", self._session_path(session_id))
 
     async def send_message(self, session_id: str, message: str) -> None:
-        """POST /session/{id}/message — the relay channel.
+        """POST a message into a session — the relay channel.
 
         Every agent-to-agent exchange in this system is ultimately this call:
         the orchestrator reads one session's finding and speaks it into
         another. See ``docs/AGENT_ROLES.md``.
         """
-        await self._request(
-            "POST", f"/session/{session_id}/message", {"message": message}
-        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SESSION_WARMUP_TIMEOUT_S
+        while True:
+            try:
+                await self._request(
+                    "POST", self._message_path(session_id), {"message": message}
+                )
+                return
+            except _SessionInitializing as exc:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise DevinError(str(exc)) from exc
+                await asyncio.sleep(min(SESSION_WARMUP_INTERVAL_S, remaining))
 
     async def wait_until_done(
         self,
@@ -308,6 +415,8 @@ class DevinClient:
         seen = 0
         while True:
             payload = await self.get_session(session_id)
+            if on_activity is not None:
+                payload = await self._merge_transcript(session_id, payload)
             lines = transcript_lines(payload)
             for line in lines[seen:]:
                 if on_activity is not None:
@@ -317,7 +426,11 @@ class DevinClient:
             seen = max(seen, len(lines))
 
             status = str(payload.get("status_enum") or payload.get("status") or "")
-            if status.lower() in TERMINAL_STATUSES:
+            status_detail = str(payload.get("status_detail") or "")
+            if (
+                status.lower() in TERMINAL_STATUSES
+                or status_detail.lower() in TERMINAL_STATUS_DETAILS
+            ):
                 if _release_slot:
                     self._release(session_id)
                 return payload
@@ -346,6 +459,10 @@ class DevinClient:
         parsed = extract_structured_output(payload)
         if parsed is not None:
             return parsed
+        payload = await self._merge_transcript(session_id, payload)
+        parsed = extract_structured_output(payload)
+        if parsed is not None:
+            return parsed
 
         await self.send_message(session_id, STRUCTURED_OUTPUT_REMINDER)
         try:
@@ -356,6 +473,7 @@ class DevinClient:
             )
         except DevinError:
             payload = await self.get_session(session_id)
+        payload = await self._merge_transcript(session_id, payload)
         parsed = extract_structured_output(payload)
         if parsed is None:
             raise DevinError(
