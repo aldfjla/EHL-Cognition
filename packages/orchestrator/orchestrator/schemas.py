@@ -305,6 +305,17 @@ class Repo(_Base):
     full_name: str
     branch: str = "main"
     suite_size: int = Field(default=50, ge=1)
+    #: Extra watched branch patterns beyond ``branch``. Empty means "only
+    #: ``branch``". Populated from the repo's ``robotci.yaml`` ``ci.branches``
+    #: after the first checkout — see :mod:`orchestrator.triggers`.
+    branches: list[str] = Field(default_factory=list)
+    #: Path globs a push must touch to start a run, and globs subtracted from
+    #: them. Empty include means the built-in default set.
+    path_include: list[str] = Field(default_factory=list)
+    path_exclude: list[str] = Field(default_factory=list)
+    #: Where the filters above came from: ``"default"`` until a checkout has
+    #: been read, then ``"robotci.yaml"`` or ``"registry"`` when set by API.
+    filters_source: Literal["default", "registry", "robotci.yaml"] = "default"
     created_at: datetime = Field(default_factory=_now)
     last_push_at: datetime | None = None
     status: Literal["dormant", "running"] = "dormant"

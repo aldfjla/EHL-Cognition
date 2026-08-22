@@ -227,6 +227,10 @@ def _repo_to_row(repository: Repo) -> RepoRow:
         full_name=repository.full_name,
         branch=repository.branch,
         suite_size=repository.suite_size,
+        branches_json=json.dumps(repository.branches),
+        path_include_json=json.dumps(repository.path_include),
+        path_exclude_json=json.dumps(repository.path_exclude),
+        filters_source=repository.filters_source,
         created_at=repository.created_at,
         last_push_at=repository.last_push_at,
     )
@@ -239,6 +243,10 @@ def _row_to_repo(row: RepoRow) -> Repo:
         "full_name": row.full_name,
         "branch": row.branch,
         "suite_size": row.suite_size,
+        "branches": json.loads(row.branches_json or "[]"),
+        "path_include": json.loads(row.path_include_json or "[]"),
+        "path_exclude": json.loads(row.path_exclude_json or "[]"),
+        "filters_source": row.filters_source,
         "created_at": row.created_at,
         "last_push_at": row.last_push_at,
     }
@@ -284,6 +292,10 @@ def update_repo(db: Session, repository: Repo) -> Repo:
     row.full_name = repository.full_name
     row.branch = repository.branch
     row.suite_size = repository.suite_size
+    row.branches_json = json.dumps(repository.branches)
+    row.path_include_json = json.dumps(repository.path_include)
+    row.path_exclude_json = json.dumps(repository.path_exclude)
+    row.filters_source = repository.filters_source
     row.created_at = repository.created_at
     row.last_push_at = repository.last_push_at
     db.add(row)

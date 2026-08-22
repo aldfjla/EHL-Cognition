@@ -70,8 +70,11 @@ process:
                                             └──────────────────┘
 ```
 
-Four things run: uvicorn, `npm run dev`, a pool of MuJoCo worker processes, and
-N Devin sessions in the cloud. State lives in SQLite (WAL mode, so the pipeline
+Four things run *during a run*: uvicorn, `npm run dev`, a pool of MuJoCo worker
+processes, and N Devin sessions in the cloud. Between runs only the first two
+exist — the worker pool is constructed per run and the sessions are created and
+released by the pipeline. Measured idle cost and cold-start latency are in
+[`DORMANCY.md`](DORMANCY.md). State lives in SQLite (WAL mode, so the pipeline
 writes while the dashboard reads) and files under `ARTIFACTS_DIR`.
 
 The pipeline runs **in-process** with the API rather than as a worker queue.

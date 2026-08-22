@@ -159,6 +159,12 @@ class PipelineContext:
     blackboard: Blackboard
     devin: DevinClient
     config: dict = field(default_factory=dict)
+    #: Called once with the parsed ``robotci.yaml`` as soon as there is a
+    #: checkout. The transport layer uses it to cache the repo's trigger
+    #: filters, which the webhook cannot read (nothing is cloned yet). The
+    #: pipeline stays ignorant of the store; a failure here is logged, never
+    #: fatal — the run is already legitimately in flight.
+    on_config: Callable[[dict], Awaitable[None]] | None = None
     suite_size: int | None = None
     default_suite_size: int = 50
     scenarios: list[Scenario] = field(default_factory=list)
@@ -301,6 +307,11 @@ class Pipeline:
             run.repo, run.commit_sha, run.id, ctx.workspace.root.parent
         )
         ctx.config = await workspace_mod.read_config(ctx.workspace)
+        if ctx.on_config is not None:
+            try:
+                await ctx.on_config(ctx.config)
+            except Exception:
+                log.exception("caching robotci.yaml for %s failed", run.repo)
         policy = ctx.config.get("policy", {})
         self._max_parallel_agents = max(
             1,
