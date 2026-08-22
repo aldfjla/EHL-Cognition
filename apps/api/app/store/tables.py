@@ -71,6 +71,9 @@ class AgentRow(SQLModel, table=True):
     parent_agent_id: str | None = None
     finding_ids_json: str = "[]"
     last_activity: str | None = None
+    desktop_url: str | None = None
+    issue: str | None = None
+    step: str | None = None
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None = None
@@ -102,6 +105,9 @@ class ScenarioRow(SQLModel, table=True):
     diagnosis: str | None = None
     cluster_id: str | None = Field(default=None, index=True)
     video_path: str | None = None
+    live_frame_path: str | None = None
+    worker_id: str | None = None
+    progress: float | None = None
     trace_path: str | None = None
     error: str | None = None
 
