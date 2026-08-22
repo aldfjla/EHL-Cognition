@@ -256,6 +256,12 @@ def upsert_scenario(db: Session, scenario: Scenario) -> Scenario:
     return _to_model(_merge(db, scenario), Scenario)
 
 
+def get_scenario(db: Session, scenario_id: str) -> Scenario | None:
+    """Fetch one scenario by id, or ``None`` when it is absent."""
+    row = db.get(ScenarioRow, scenario_id)
+    return _to_model(row, Scenario) if row else None
+
+
 def list_scenarios(
     db: Session, run_id: str, attempt: int | None = None
 ) -> list[Scenario]:

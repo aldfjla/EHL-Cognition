@@ -22,6 +22,7 @@ from sqlmodel import Session
 from app import events
 from app.deps import get_bus, get_db, get_run_or_404
 from app.store import repo
+from app.worker_pool import get_worker_pool
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -35,7 +36,11 @@ async def list_runs(
 
 
 @router.get("/{run_id}")
-async def get_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+async def get_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    bus: EventBus = Depends(get_bus),
+) -> dict[str, Any]:
     """One run with its scenarios, clusters and report id.
 
     Returns everything the mission control page needs for first paint; the
@@ -49,7 +54,19 @@ async def get_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, Any]:
             s.model_dump(mode="json") for s in repo.list_scenarios(db, run_id)
         ],
         "clusters": [c.model_dump(mode="json") for c in repo.list_clusters(db, run_id)],
+        "worker_pool": get_worker_pool(db, run_id, bus),
     }
+
+
+@router.get("/{run_id}/workers")
+async def get_workers(
+    run_id: str,
+    db: Session = Depends(get_db),
+    bus: EventBus = Depends(get_bus),
+) -> dict[str, Any]:
+    """Return measured worker-pool state for cheap dashboard polling."""
+    await get_run_or_404(run_id, db)
+    return get_worker_pool(db, run_id, bus)
 
 
 @router.get("/{run_id}/scenarios")
