@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     suite_size: int = 24
     max_parallel_agents: int = 6
     max_agent_iterations: int = 3
+    sim_workers: int = 4
+    max_live_streams: int = 12
+    live_stream_fps: float = 6.0
+    live_stream_idle_timeout_s: float = 30.0
 
     def require_devin(self) -> str:
         """Return the Devin key or raise a startup-time error naming the fix."""

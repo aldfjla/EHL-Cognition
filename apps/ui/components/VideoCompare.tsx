@@ -9,7 +9,7 @@
  * nothing — that constraint is why simkit's determinism is non-negotiable.
  */
 
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { artifactUrl } from "@/lib/api";
 import type { Incident } from "@/lib/types";
@@ -23,6 +23,13 @@ export interface VideoCompareProps {
 function Pair({ incident }: { incident: Incident }) {
   const before = useRef<HTMLVideoElement | null>(null);
   const after = useRef<HTMLVideoElement | null>(null);
+  const [missing, setMissing] = useState({ before: false, after: false });
+
+  const markMissing = useCallback((side: "before" | "after") => {
+    setMissing((current) =>
+      current[side] ? current : { ...current, [side]: true },
+    );
+  }, []);
 
   const sync = useCallback((action: "play" | "pause" | "restart") => {
     for (const node of [before.current, after.current]) {
@@ -78,9 +85,9 @@ function Pair({ incident }: { incident: Incident }) {
         ).map(([side, path, ref, tone]) => (
           <div key={side}>
             <div className={`stub-label ${tone}`}>{side}</div>
-            {path === null ? (
+            {path === null || missing[side] ? (
               <div className="mt-1 flex aspect-video items-center justify-center rounded bg-slate-900 text-xs text-slate-500">
-                no clip
+                No video evidence yet.
               </div>
             ) : (
               <video
@@ -91,6 +98,7 @@ function Pair({ incident }: { incident: Incident }) {
                 playsInline
                 controls
                 onPlay={() => sync("play")}
+                onError={() => markMissing(side)}
                 className="mt-1 w-full rounded bg-black"
               />
             )}
