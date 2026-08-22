@@ -448,11 +448,10 @@ class Pipeline:
             harness_out_path=str(harness_path),
         )
         if not harness_path.exists():
-            status = getattr(agent.status, "value", agent.status)
-            session_url = agent.session_url or "unknown"
             raise PipelineError(
                 f"Harness Builder wrote no harness at {harness_path} "
-                f"(agent status {status}, session {session_url})"
+                f"(agent status {agent.status.value}, "
+                f"session {agent.session_url or 'unknown'})"
             )
 
         # Prove the harness by executing it once. An `error` here is ours.
