@@ -94,6 +94,40 @@ export default function MissionControlPage({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  if (state.missing) {
+    return (
+      <main className="px-6 py-8">
+        <div className="mx-auto max-w-2xl rounded border border-surface-border bg-surface-raised p-8">
+          <p className="stub-label text-status-blocked">run lookup · 404</p>
+          <h1 className="mt-3 font-mono text-2xl font-semibold text-slate-100">
+            This run doesn&apos;t exist
+          </h1>
+          <p className="mt-3 text-sm leading-6 text-slate-400">
+            <span className="font-mono text-slate-200">{runId}</span> may have
+            been deleted, or the ID may be mistyped.
+          </p>
+          <div className="mt-8 flex flex-wrap items-center gap-4">
+            <Link
+              href="/runs"
+              className="inline-flex items-center gap-3 rounded-full border border-surface-border px-5 py-2.5 font-mono text-base font-medium text-slate-200 transition-colors hover:border-sky-500/70 hover:bg-surface-raised hover:text-sky-300"
+            >
+              <span aria-hidden className="text-2xl leading-none">
+                ←
+              </span>
+              Back to runs
+            </Link>
+            <Link
+              href="/runs/run_replay_demo"
+              className="font-mono text-xs text-sky-400 hover:underline"
+            >
+              view scripted demo run →
+            </Link>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   const onSelectRef = (ref: Ref): void => {
     if (ref.type === "scenario") {
       setSelectedScenario(ref.id);
