@@ -11,6 +11,7 @@ That is also why visual compilation remains driven by ``record`` alone.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -35,6 +36,11 @@ def _safe_scenario_id(scenario_id: str) -> str:
 def live_frame_path(scenario_id: str) -> str:
     """Return the path of a scenario's frame relative to the artifacts root."""
     return f"live/{_safe_scenario_id(scenario_id)}.jpg"
+
+
+def live_progress_path(scenario_id: str) -> str:
+    """Return the path of a scenario's progress sidecar."""
+    return f"live/{_safe_scenario_id(scenario_id)}.progress.json"
 
 
 def live_frame_file(scenario_id: str) -> Path:
@@ -186,5 +192,71 @@ class LiveFrameWriter:
         self._disable()
         try:
             live_frame_file(self.scenario_id).unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 - cleanup is best effort
+            return
+
+
+class LiveProgressWriter:
+    """Wall-clock throttled writer for one scenario's progress sidecar."""
+
+    def __init__(self, path: str | Path, *, fps: float | None = None) -> None:
+        self.path = Path(path)
+        self.fps = LiveFrameWriter._parse_fps(fps)
+        self._last_write: float | None = None
+        self._disabled = not _enabled_from_environment() or self.fps <= 0
+        self._closed = False
+
+    @property
+    def enabled(self) -> bool:
+        return not self._disabled and not self._closed
+
+    def maybe_write(
+        self,
+        *,
+        progress: float,
+        sim_time_s: float,
+        force: bool = False,
+    ) -> bool:
+        """Publish progress atomically, degrading permanently on any failure."""
+        if not self.enabled:
+            return False
+        now = time.monotonic()
+        interval = 1.0 / self.fps
+        if (
+            not force
+            and self._last_write is not None
+            and now - self._last_write < interval
+        ):
+            return False
+        self._last_write = now
+        temporary: Path | None = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+            temporary.write_text(
+                json.dumps(
+                    {"progress": float(progress), "sim_time_s": float(sim_time_s)},
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            os.replace(temporary, self.path)
+            return True
+        except Exception:  # noqa: BLE001 - progress is best effort
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except Exception:  # noqa: BLE001 - cleanup is best effort
+                    temporary = None
+            self._disabled = True
+            return False
+
+    def close(self) -> None:
+        """Remove the transient progress sidecar."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.path.unlink(missing_ok=True)
         except Exception:  # noqa: BLE001 - cleanup is best effort
             return

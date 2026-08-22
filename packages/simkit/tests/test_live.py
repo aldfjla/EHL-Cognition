@@ -272,3 +272,17 @@ def test_suite_is_deterministic_across_pool_width_and_live(
                     expected.worker_id,
                     actual.worker_id,
                 )
+
+
+def test_progress_sidecar_is_atomic_and_transient(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.setenv("SIMKIT_LIVE_FRAMES", "1")
+    writer = live.LiveProgressWriter(tmp_path / "live/s0.progress.json", fps=30)
+
+    assert writer.maybe_write(progress=0.25, sim_time_s=1.5, force=True)
+    sidecar = tmp_path / "live/s0.progress.json"
+    assert sidecar.read_text() == '{"progress":0.25,"sim_time_s":1.5}'
+    assert not list(sidecar.parent.glob("*.tmp"))
+
+    writer.close()
+    assert not sidecar.exists()

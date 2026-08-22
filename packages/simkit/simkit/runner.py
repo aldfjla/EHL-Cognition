@@ -43,7 +43,7 @@ import numpy as np
 
 from simkit import scene as scene_mod
 from simkit import scoring
-from simkit.live import LiveFrameWriter
+from simkit.live import LiveFrameWriter, LiveProgressWriter
 
 #: Control rate used when ``robotci.yaml`` does not say.
 DEFAULT_RATE_HZ = 100
@@ -94,6 +94,7 @@ def run_scenario(
     record: bool = False,
     max_wall_s: float = 120.0,
     live: bool = False,
+    progress_path: str | None = None,
     on_observe: Callable[[dict[str, Any]], None] | None = None,
     observe_hz: float = 2.0,
     worker_id: str | None = None,
@@ -126,6 +127,9 @@ def run_scenario(
 
     recorder = None
     live_writer = LiveFrameWriter(scenario_id) if live else None
+    progress_writer = (
+        LiveProgressWriter(progress_path) if live and progress_path else None
+    )
     scene = None
     try:
         harness = load_harness(harness_path)
@@ -159,6 +163,7 @@ def run_scenario(
             deadline=started + float(max_wall_s),
             recorder=recorder,
             live_writer=live_writer,
+            progress_writer=progress_writer,
             on_observe=on_observe,
             observe_hz=observe_hz,
             scenario_id=scenario_id,
@@ -214,6 +219,8 @@ def run_scenario(
             recorder.close()
         if live_writer is not None:
             live_writer.close()
+        if progress_writer is not None:
+            progress_writer.close()
         result.duration_s = round(time.perf_counter() - started, 4)
     return result
 
@@ -336,6 +343,7 @@ class _EpisodeLoop:
         deadline: float,
         recorder: Any = None,
         live_writer: LiveFrameWriter | None = None,
+        progress_writer: LiveProgressWriter | None = None,
         on_observe: Callable[[dict[str, Any]], None] | None = None,
         observe_hz: float = 2.0,
         scenario_id: str = "",
@@ -349,6 +357,7 @@ class _EpisodeLoop:
         self.deadline = deadline
         self.recorder = recorder
         self.live_writer = live_writer
+        self.progress_writer = progress_writer
         self.on_observe = on_observe
         self.observe_hz = float(observe_hz)
         self.scenario_id = scenario_id
@@ -411,6 +420,17 @@ class _EpisodeLoop:
             self.live_writer.maybe_capture(self.scene, force=force)
 
     def _observe(self, force: bool = False) -> None:
+        progress = 0.0
+        if self.sim_limit_s > 0:
+            progress = min(
+                max(float(self.scene.data.time) / self.sim_limit_s, 0.0), 1.0
+            )
+        if self.progress_writer is not None:
+            self.progress_writer.maybe_write(
+                progress=progress,
+                sim_time_s=float(self.scene.data.time),
+                force=force,
+            )
         if self.on_observe is None:
             return
         now = time.monotonic()
@@ -419,11 +439,6 @@ class _EpisodeLoop:
         if not force and last is not None and now - last < interval:
             return
         self._last_observe = now
-        progress = 0.0
-        if self.sim_limit_s > 0:
-            progress = min(
-                max(float(self.scene.data.time) / self.sim_limit_s, 0.0), 1.0
-            )
         try:
             self.on_observe(
                 {

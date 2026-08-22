@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import threading
 import time
@@ -11,8 +12,10 @@ from types import SimpleNamespace
 
 import pytest
 from orchestrator.bus import EventBus
-from orchestrator.pool import SuitePool
+from orchestrator.pool import SuitePool, _normalize_spec, _scenario_kwargs
 from orchestrator.schemas import EventType
+from simkit.live import live_frame_path
+from simkit.runner import run_scenario
 
 
 def specs(count: int, *, start: int = 0) -> list[dict[str, int | str]]:
@@ -208,12 +211,15 @@ async def test_progress_watcher_emits_only_changed_frames(
     progress_interval = "0.02"
     runner_started = threading.Event()
 
-    def runner(*, live_frame_path: str, progress_path: str, **_: object):
+    def runner(*, live: bool, progress_path: str, **_: object):
         runner_started.set()
-        Path(live_frame_path).write_bytes(b"one")
+        assert live
+        frame_path = tmp_path / live_frame_path("s0")
+        frame_path.parent.mkdir(parents=True, exist_ok=True)
+        frame_path.write_bytes(b"one")
         Path(progress_path).write_text(json.dumps({"progress": 0.4, "sim_time_s": 1.2}))
         time.sleep(0.03)
-        Path(live_frame_path).write_bytes(b"two")
+        frame_path.write_bytes(b"two")
         time.sleep(0.03)
         return SimpleNamespace(
             scenario_id="s0",
@@ -256,6 +262,87 @@ async def test_progress_watcher_emits_only_changed_frames(
     assert any(event.data["progress"] == pytest.approx(0.4) for event in events)
     assert any(event.data["sim_time_s"] == pytest.approx(1.2) for event in events)
     assert runner_started.is_set()
+
+
+def test_runner_kwargs_match_live_runner_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SIMKIT_LIVE_FRAMES", "1")
+    spec = _normalize_spec({"id": "s0", "index": 0, "seed": 0}, 0)
+    kwargs = _scenario_kwargs(
+        tmp_path,
+        spec,
+        model_path="m",
+        harness_path="h",
+        task={},
+        record=False,
+        worker_id="w0",
+    )
+    accepted = set(inspect.signature(run_scenario).parameters)
+    assert set(kwargs) <= accepted
+    assert kwargs["live"] is True
+    assert kwargs["worker_id"] == "w0"
+    assert kwargs["progress_path"] == str(tmp_path / "live/s0.progress.json")
+
+
+async def test_real_runner_through_suite_pool_emits_live_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.setenv("SIMKIT_LIVE_FRAMES", "1")
+    monkeypatch.setenv("SIMKIT_LIVE_FPS", "30")
+    model = tmp_path / "toy.xml"
+    model.write_text(
+        """<mujoco model="toy">
+  <option timestep="0.002"/>
+  <worldbody><body><joint name="hinge" type="hinge" axis="0 1 0"/>
+    <geom type="capsule" fromto="0 0 0 0.2 0 0" size="0.03"/>
+  </body></worldbody>
+  <actuator><position joint="hinge" kp="20"/></actuator>
+</mujoco>"""
+    )
+    harness = tmp_path / "harness.py"
+    harness.write_text(
+        """import time
+
+def run_episode(model, data, params):
+    for _ in range(20):
+        params["step"]()
+        time.sleep(0.03)
+"""
+    )
+    bus = EventBus()
+    pool = SuitePool(
+        run_id="run",
+        bus=bus,
+        workers=2,
+        artifacts_dir=tmp_path,
+    )
+    try:
+        results = await pool.submit(
+            specs(2),
+            model_path=str(model),
+            harness_path=str(harness),
+            task={"rate_hz": 20, "success": [{"id": "within_time", "limit_s": 1}]},
+        )
+    finally:
+        await pool.aclose()
+
+    progress = [
+        event
+        for event in bus.history("run")
+        if event.type is EventType.SCENARIO_PROGRESS
+    ]
+    started = [
+        event
+        for event in bus.history("run")
+        if event.type is EventType.SCENARIO_STARTED
+    ]
+    assert len(results) == 2
+    assert {event.data["worker_id"] for event in started} == {"w0", "w1"}
+    assert progress
+    assert {event.data["scenario_id"] for event in progress} == {"s0", "s1"}
+    assert all(event.data["live_frame_path"].startswith("live/") for event in progress)
 
 
 async def test_no_progress_event_without_frame_and_resize_reason(

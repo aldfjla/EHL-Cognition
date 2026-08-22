@@ -13,9 +13,9 @@ Outputs: deterministic per-scenario results, worker lifecycle events, and
 artifact notifications. Physics execution remains in worker processes; live
 frames are only a filesystem side channel.
 
-The current simkit runner does not accept live-frame arguments, so no frames or
-progress events are produced by it today. The watcher is implemented against
-the documented paths and becomes active when simkit's renderer lands.
+Simkit owns live-frame and progress-sidecar publication in each worker process.
+The parent watches those filesystem side channels and emits lightweight
+progress events without carrying frame bytes through the event bus.
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from simkit.live import live_frame_path, live_progress_path
 
 from orchestrator.bus import EventBus
 from orchestrator.schemas import EventType
@@ -68,6 +70,11 @@ def _run_simkit(kwargs: dict[str, Any]) -> Any:
     return run_scenario(**kwargs)
 
 
+def _configure_worker(artifacts_dir: str) -> None:
+    """Point simkit's process-local artifact root at this run's directory."""
+    os.environ["ARTIFACTS_DIR"] = artifacts_dir
+
+
 class SuitePool:
     """Run scenarios through one resizeable, shared process budget."""
 
@@ -94,7 +101,11 @@ class SuitePool:
         self._waiters: dict[int, deque[tuple[str, asyncio.Future[str]]]] = {}
         self._batch_order: deque[int] = deque()
         self._queued = 0
-        self._executor = ProcessPoolExecutor(max_workers=workers)
+        self._executor = ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_configure_worker,
+            initargs=(str(self.artifacts_dir),),
+        )
         self._executor_shutdowns: set[asyncio.Task[None]] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._closed = False
@@ -182,7 +193,11 @@ class SuitePool:
                 # Keep executor resizing off-loop; each generation drains its
                 # in-flight work while the new high-water executor takes over.
                 old_executor = self._executor
-                self._executor = ProcessPoolExecutor(max_workers=workers)
+                self._executor = ProcessPoolExecutor(
+                    max_workers=workers,
+                    initializer=_configure_worker,
+                    initargs=(str(self.artifacts_dir),),
+                )
                 shutdown = asyncio.create_task(
                     asyncio.to_thread(
                         old_executor.shutdown, wait=True, cancel_futures=True
@@ -261,6 +276,7 @@ class SuitePool:
                 task=task,
                 record=record == "all",
                 repo_dir=repo_dir,
+                worker_id=slot,
             )
         finally:
             if watcher is not None:
@@ -280,6 +296,7 @@ class SuitePool:
                 task=task,
                 record=True,
                 repo_dir=repo_dir,
+                worker_id=slot,
             )
             video_path = getattr(replay, "video_path", None)
             if video_path:
@@ -318,6 +335,7 @@ class SuitePool:
         task: dict[str, Any],
         record: bool,
         repo_dir: str | Path | None,
+        worker_id: str,
     ) -> Any:
         slot = await self._acquire(spec.scenario_id, -1)
         try:
@@ -328,6 +346,7 @@ class SuitePool:
                 task=task,
                 record=record,
                 repo_dir=repo_dir,
+                worker_id=slot,
             )
         finally:
             await self._release(slot, spec.scenario_id)
@@ -341,32 +360,28 @@ class SuitePool:
         task: dict[str, Any],
         record: bool,
         repo_dir: str | Path | None,
+        worker_id: str,
     ) -> Any:
-        kwargs = {
-            "scenario_id": spec.scenario_id,
-            "model_path": model_path,
-            "harness_path": harness_path,
-            "params": spec.params,
-            "seed": spec.seed,
-            "task": task,
-            "record": _record_path(self.artifacts_dir, spec.scenario_id)
-            if record
-            else False,
-        }
-        live_dir = self.artifacts_dir / "live"
-        kwargs.update(
-            {
-                "live_frame_path": str(live_dir / f"{spec.scenario_id}.jpg"),
-                "progress_path": str(live_dir / f"{spec.scenario_id}.progress.json"),
-            }
+        kwargs = _scenario_kwargs(
+            self.artifacts_dir,
+            spec,
+            model_path=model_path,
+            harness_path=harness_path,
+            task=task,
+            record=record,
+            worker_id=worker_id,
         )
-        if repo_dir is not None:
-            kwargs["repo_dir"] = str(repo_dir)
         try:
             if self._runner is None:
                 from simkit.runner import run_scenario
 
                 call_kwargs = _supported_kwargs(run_scenario, kwargs)
+                missing = {"live", "progress_path", "worker_id"} - set(call_kwargs)
+                if missing:
+                    raise TypeError(
+                        "simkit runner is missing live seam kwargs: "
+                        + ", ".join(sorted(missing))
+                    )
                 return await asyncio.get_running_loop().run_in_executor(
                     self._executor, _run_simkit, call_kwargs
                 )
@@ -476,8 +491,8 @@ class SuitePool:
 
     async def _watch_progress(self, scenario_id: str) -> None:
         """Announce changed JPEGs without ever carrying frame bytes in events."""
-        frame = self.artifacts_dir / "live" / f"{scenario_id}.jpg"
-        sidecar = self.artifacts_dir / "live" / f"{scenario_id}.progress.json"
+        frame = self.artifacts_dir / live_frame_path(scenario_id)
+        sidecar = self.artifacts_dir / live_progress_path(scenario_id)
         last_mtime: int | None = None
         interval = max(0.001, self._progress_interval / 2)
         while True:
@@ -531,6 +546,36 @@ def _supported_kwargs(runner: Runner, kwargs: dict[str, Any]) -> dict[str, Any]:
         return kwargs
     return {
         name: value for name, value in kwargs.items() if name in signature.parameters
+    }
+
+
+def _live_enabled() -> bool:
+    value = os.environ.get("SIMKIT_LIVE_FRAMES", "")
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _scenario_kwargs(
+    artifacts_dir: Path,
+    spec: _Spec,
+    *,
+    model_path: str,
+    harness_path: str,
+    task: dict[str, Any],
+    record: bool,
+    worker_id: str,
+) -> dict[str, Any]:
+    """Build only arguments accepted by simkit's scenario runner."""
+    return {
+        "scenario_id": spec.scenario_id,
+        "model_path": model_path,
+        "harness_path": harness_path,
+        "params": spec.params,
+        "seed": spec.seed,
+        "task": task,
+        "record": _record_path(artifacts_dir, spec.scenario_id) if record else False,
+        "live": _live_enabled(),
+        "progress_path": str(artifacts_dir / live_progress_path(spec.scenario_id)),
+        "worker_id": worker_id,
     }
 
 
