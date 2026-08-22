@@ -61,8 +61,20 @@ TERMINAL_STATUSES = frozenset(
     }
 )
 
+#: Statuses that indicate the session may still make progress.
+LIVE_STATUSES = frozenset(
+    {"new", "claimed", "running", "resuming", "working", "starting"}
+)
+
 #: Status details that mean the session is done for orchestration purposes.
-TERMINAL_STATUS_DETAILS = frozenset({"finished", "waiting_for_user"})
+TERMINAL_STATUS_DETAILS = frozenset({"finished"})
+
+#: An idle session will not progress by itself; stop waiting after this grace
+#: period so a question that nobody answers cannot hold a slot forever.
+SESSION_WAITING_ON_USER_GRACE_PERIOD_S = 120.0
+
+#: Status details that mean the session is waiting for external input.
+IDLE_STATUS_DETAILS = frozenset({"waiting_for_user", "waiting_for_approval"})
 
 #: Sent once when a session finishes without a parseable structured output.
 STRUCTURED_OUTPUT_REMINDER = (
@@ -413,6 +425,7 @@ class DevinClient:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
         seen = 0
+        idle_since: float | None = None
         while True:
             payload = await self.get_session(session_id)
             if on_activity is not None:
@@ -427,10 +440,24 @@ class DevinClient:
 
             status = str(payload.get("status_enum") or payload.get("status") or "")
             status_detail = str(payload.get("status_detail") or "")
-            if (
-                status.lower() in TERMINAL_STATUSES
-                or status_detail.lower() in TERMINAL_STATUS_DETAILS
-            ):
+            status_lower = status.lower()
+            status_detail_lower = status_detail.lower()
+            if status_detail_lower in TERMINAL_STATUS_DETAILS:
+                if _release_slot:
+                    self._release(session_id)
+                return payload
+            if status_lower in LIVE_STATUSES:
+                if status_detail_lower in IDLE_STATUS_DETAILS:
+                    now = loop.time()
+                    if idle_since is None:
+                        idle_since = now
+                    elif now - idle_since >= SESSION_WAITING_ON_USER_GRACE_PERIOD_S:
+                        if _release_slot:
+                            self._release(session_id)
+                        return payload
+                else:
+                    idle_since = None
+            elif status_lower in TERMINAL_STATUSES:
                 if _release_slot:
                     self._release(session_id)
                 return payload

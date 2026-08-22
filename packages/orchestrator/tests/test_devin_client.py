@@ -293,16 +293,72 @@ async def test_v3_transcript_pages_are_merged_for_activity_streaming() -> None:
     assert any("after=cursor-1" in call for call in calls)
 
 
-async def test_v3_status_detail_waiting_for_user_is_terminal() -> None:
-    client = make_client(
-        lambda request: httpx.Response(
-            200, json={"status": "running", "status_detail": "waiting_for_user"}
-        ),
-        org_id="org-test",
-    )
+async def test_v3_idle_status_detail_keeps_polling_until_finished() -> None:
+    polls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        polls["n"] += 1
+        detail = "waiting_for_user" if polls["n"] < 3 else "finished"
+        return httpx.Response(200, json={"status": "running", "status_detail": detail})
+
+    client = make_client(handler, org_id="org-test")
     payload = await client.wait_until_done("s-1", poll_interval_s=0)
     await client.aclose()
-    assert payload["status_detail"] == "waiting_for_user"
+    assert payload["status_detail"] == "finished"
+    assert polls["n"] == 3
+
+
+async def test_v3_finished_status_detail_is_terminal() -> None:
+    polls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        polls["n"] += 1
+        return httpx.Response(
+            200, json={"status": "running", "status_detail": "finished"}
+        )
+
+    client = make_client(handler, org_id="org-test")
+    payload = await client.wait_until_done("s-1", poll_interval_s=0)
+    await client.aclose()
+
+    assert payload["status_detail"] == "finished"
+    assert polls["n"] == 1
+
+
+async def test_v3_idle_status_detail_returns_after_grace_period(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client_module, "SESSION_WAITING_ON_USER_GRACE_PERIOD_S", 0.0)
+    polls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        polls["n"] += 1
+        return httpx.Response(
+            200, json={"status": "running", "status_detail": "waiting_for_approval"}
+        )
+
+    client = make_client(handler, org_id="org-test")
+    payload = await client.wait_until_done("s-1", poll_interval_s=0)
+    await client.aclose()
+
+    assert payload["status_detail"] == "waiting_for_approval"
+    assert polls["n"] == 2
+
+
+@pytest.mark.parametrize("status", ["exit", "error"])
+async def test_v3_terminal_statuses_return_immediately(status: str) -> None:
+    polls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        polls["n"] += 1
+        return httpx.Response(200, json={"status": status})
+
+    client = make_client(handler, org_id="org-test")
+    payload = await client.wait_until_done("s-1", poll_interval_s=0)
+    await client.aclose()
+
+    assert payload["status"] == status
+    assert polls["n"] == 1
 
 
 async def test_wait_until_done_times_out() -> None:

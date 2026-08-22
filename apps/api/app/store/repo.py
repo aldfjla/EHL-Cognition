@@ -416,6 +416,12 @@ def upsert_finding(db: Session, finding: Finding) -> Finding:
     return _to_model(_merge(db, finding), Finding)
 
 
+def get_finding(db: Session, finding_id: str) -> Finding | None:
+    """One finding, or None."""
+    row = db.get(FindingRow, finding_id)
+    return _to_model(row, Finding) if row else None
+
+
 def list_findings(db: Session, run_id: str, status: str | None = None) -> list[Finding]:
     """A run's findings, optionally filtered by status."""
     statement = select(FindingRow).where(FindingRow.run_id == run_id)
