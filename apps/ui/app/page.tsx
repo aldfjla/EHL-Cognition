@@ -1,15 +1,18 @@
 /**
  * Landing page — the front door.
  *
- * Static and server-rendered: the only client code is the scroll chrome
- * (progress hairline, reveal-on-scroll), so the page carries no dependency on
- * the API being up. The dashboard lives at `/runs`.
+ * Static and server-rendered: the only client code is the motion layer (Lenis
+ * smooth scroll, progress hairline, reveal-on-scroll, the anime.js hero scene),
+ * so the page carries no dependency on the API being up. The dashboard lives at
+ * `/runs`.
  */
 
 import Link from "next/link";
 
 import Reveal from "@/components/landing/Reveal";
 import ScrollProgress from "@/components/landing/ScrollProgress";
+import SimStack from "@/components/landing/SimStack";
+import SmoothScroll from "@/components/landing/SmoothScroll";
 import { MOCK_RUN_ID } from "@/lib/mockRun";
 
 const STAGES: { id: string; title: string; detail: string }[] = [
@@ -87,6 +90,7 @@ make dev               # api :8000 · dashboard :3000`;
 export default function LandingPage() {
   return (
     <>
+      <SmoothScroll />
       <ScrollProgress />
 
       {/* No `overflow-hidden` on this wrapper: it would clip the sticky
@@ -131,49 +135,56 @@ export default function LandingPage() {
 
         <main>
           {/* Hero */}
-          <section className="mx-auto flex min-h-[86vh] max-w-6xl flex-col justify-center px-6 py-24">
-            <Reveal>
-              <p className="font-mono text-[11px] uppercase tracking-[0.3em] text-slate-500">
-                Autonomous CI for robotics
-              </p>
-            </Reveal>
-            <Reveal delay={80}>
-              <h1 className="mt-6 max-w-4xl text-balance text-5xl font-semibold leading-[1.05] tracking-tight text-slate-50 sm:text-6xl md:text-7xl">
-                Push robot control code.
-                <span className="block text-slate-500">
-                  Get it back proven.
-                </span>
-              </h1>
-            </Reveal>
-            <Reveal delay={160}>
-              <p className="mt-8 max-w-xl text-lg leading-relaxed text-slate-400">
-                An autonomous engineering team simulates every commit, finds what
-                breaks, fixes it, and opens a pull request with video proof — no
-                human in the loop.
-              </p>
-            </Reveal>
-            <Reveal delay={240}>
-              <div className="mt-10 flex flex-wrap items-center gap-3">
-                <Link
-                  href="/runs"
-                  className="rounded-full bg-slate-100 px-6 py-2.5 text-sm font-medium text-slate-900 transition-colors hover:bg-white"
-                >
-                  Open mission control
-                </Link>
-                <Link
-                  href={`/runs/${MOCK_RUN_ID}`}
-                  className="rounded-full border border-surface-border px-6 py-2.5 text-sm text-slate-300 transition-colors hover:border-slate-500 hover:text-slate-100"
-                >
-                  Watch a replay
-                </Link>
-              </div>
-            </Reveal>
-            <Reveal delay={320}>
-              <div className="mt-20 flex items-center gap-3 font-mono text-[11px] uppercase tracking-widest text-slate-600">
-                <span className="h-8 w-px animate-pulse bg-gradient-to-b from-slate-600 to-transparent" />
-                Scroll
-              </div>
-            </Reveal>
+          <section className="mx-auto grid min-h-[86vh] max-w-6xl items-center gap-16 px-6 py-24 lg:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
+            <div>
+              <Reveal>
+                <p className="font-mono text-[11px] uppercase tracking-[0.3em] text-slate-500">
+                  Autonomous CI for robotics
+                </p>
+              </Reveal>
+              <Reveal delay={80}>
+                <h1 className="mt-6 max-w-4xl text-balance text-5xl font-semibold leading-[1.05] tracking-tight text-slate-50 sm:text-6xl md:text-7xl">
+                  Push robot control code.
+                  <span className="block text-slate-500">
+                    Get it back proven.
+                  </span>
+                </h1>
+              </Reveal>
+              <Reveal delay={160}>
+                <p className="mt-8 max-w-xl text-lg leading-relaxed text-slate-400">
+                  An autonomous engineering team simulates every commit, finds what
+                  breaks, fixes it, and opens a pull request with video proof — no
+                  human in the loop.
+                </p>
+              </Reveal>
+              <Reveal delay={240}>
+                <div className="mt-10 flex flex-wrap items-center gap-3">
+                  <Link
+                    href="/runs"
+                    className="rounded-full bg-slate-100 px-6 py-2.5 text-sm font-medium text-slate-900 transition-colors hover:bg-white"
+                  >
+                    Open mission control
+                  </Link>
+                  <Link
+                    href={`/runs/${MOCK_RUN_ID}`}
+                    className="rounded-full border border-surface-border px-6 py-2.5 text-sm text-slate-300 transition-colors hover:border-slate-500 hover:text-slate-100"
+                  >
+                    Watch a replay
+                  </Link>
+                </div>
+              </Reveal>
+              <Reveal delay={320}>
+                <div className="mt-20 flex items-center gap-3 font-mono text-[11px] uppercase tracking-widest text-slate-600">
+                  <span className="h-8 w-px animate-pulse bg-gradient-to-b from-slate-600 to-transparent" />
+                  Scroll
+                </div>
+              </Reveal>
+            </div>
+            {/* min-w-0 keeps the 3D scene from widening the grid track when it
+                tilts toward the pointer. */}
+            <div className="min-w-0">
+              <SimStack />
+            </div>
           </section>
 
           {/* The gap */}
