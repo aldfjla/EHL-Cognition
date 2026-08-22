@@ -17,9 +17,8 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState } from "react";
 
 import * as api from "@/lib/api";
+import { normalizeRepoInput } from "@/lib/repoInput";
 import type { ConnectedRepo, ConnectRepoResponse } from "@/lib/types";
-
-const FULL_NAME = /^[\w.-]+\/[\w.-]+$/;
 
 function since(iso: string | null): string {
   if (iso === null) return "never";
@@ -130,16 +129,18 @@ function ConnectDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const normalized = normalizeRepoInput(fullName);
+
   const submit = async (): Promise<void> => {
-    if (!FULL_NAME.test(fullName.trim())) {
-      setError("Repository must look like owner/name.");
+    if (normalized === null) {
+      setError("Paste a GitHub repository URL, or type owner/name.");
       return;
     }
     setBusy(true);
     setError(null);
     try {
       const result = await api.connectRepo({
-        full_name: fullName.trim(),
+        full_name: normalized,
         branch: branch.trim() || "main",
         suite_size: suiteSize,
       });
@@ -166,15 +167,20 @@ function ConnectDialog({
         <div className="stub-label mb-4">Connect a repository</div>
 
         <label className="block text-xs text-slate-400">
-          GitHub repository
+          GitHub repository — paste the URL
           <input
             autoFocus
             value={fullName}
             onChange={(event) => setFullName(event.target.value)}
-            placeholder="owner/robot-firmware"
+            placeholder="https://github.com/owner/robot-firmware"
             className="mt-1 w-full rounded border border-surface-border bg-surface px-3 py-2 font-mono text-sm text-slate-100 outline-none focus:border-sky-600"
           />
         </label>
+        <p className="mt-1 font-mono text-[10px] text-slate-500">
+          {normalized === null
+            ? "URL, git@ remote or owner/name — all accepted."
+            : `will watch ${normalized}`}
+        </p>
 
         <div className="mt-3 grid grid-cols-2 gap-3">
           <label className="block text-xs text-slate-400">
@@ -340,6 +346,13 @@ function RepositoriesPage() {
           <p className="mt-1 text-xs text-slate-500">
             Connect one and Robot CI will watch it while you sleep.
           </p>
+          <button
+            type="button"
+            onClick={() => setDialogOpen(true)}
+            className="mt-4 rounded bg-sky-600 px-3 py-1.5 font-mono text-xs font-semibold text-white hover:bg-sky-500"
+          >
+            + Connect repository
+          </button>
         </div>
       ) : (
         <div className="space-y-3">
