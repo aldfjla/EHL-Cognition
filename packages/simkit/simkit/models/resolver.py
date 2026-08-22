@@ -86,6 +86,41 @@ _IMPORT_RE = re.compile(
     r"^\s*(?:from\s+([A-Za-z_][A-Za-z0-9_.]*)|import\s+([A-Za-z_][A-Za-z0-9_.]*))",
     re.MULTILINE,
 )
+_NAME_TOKENS_RE = re.compile(r"[a-z0-9]+")
+_GENERIC_NAME_TOKENS = {
+    "arm",
+    "base",
+    "cart",
+    "cartpole",
+    "gripper",
+    "hand",
+    "mobile",
+    "robot",
+    "robotics",
+    "ros",
+    "vehicle",
+    "wheel",
+}
+_PROSE_MATCH_SCORE = 0.55
+# This keeps a lone prose/name guess below kinematic and SDK evidence.
+_IDENTIFICATION_ACCEPTANCE_THRESHOLD = 0.5
+_MODEL_MANIFESTS = {
+    "package.xml",
+    "pyproject.toml",
+    "requirements.txt",
+    "setup.py",
+}
+_MODEL_MESH_SUFFIXES = {
+    ".3ds",
+    ".dae",
+    ".fbx",
+    ".glb",
+    ".gltf",
+    ".obj",
+    ".off",
+    ".ply",
+    ".stl",
+}
 
 
 @dataclass
@@ -121,6 +156,7 @@ def resolve(
     robot = (config or {}).get("robot") or {}
     library = menagerie.default_dir()
     tried: list[str] = []
+    rejected_explicit: str | None = None
     identity = repo_identity or str(repo_dir.resolve())
     fingerprint = fingerprint_inputs(repo_dir, robot)
 
@@ -175,9 +211,10 @@ def resolve(
                     report=f"robotci.yaml named in-repo model {explicit!r}; used as-is.",
                 )
                 return _store_cache(result, cache_dir, identity, fingerprint)
-            tried.append(
-                f"robotci.yaml model_path {explicit!r} is unavailable: {detail}"
+            rejected_explicit = (
+                f"robotci.yaml model_path {explicit!r} was rejected: {detail}"
             )
+            tried.append(rejected_explicit)
         else:
             tried.append(f"robotci.yaml named robot.model_path {explicit!r}, absent")
 
@@ -202,6 +239,9 @@ def resolve(
                 "it compiled, contains bodies and actuators, and passed validation."
             ),
         )
+        if rejected_explicit:
+            result.provenance = f"{rejected_explicit}; {result.provenance}"
+            result.report = f"{rejected_explicit}\n{result.report}"
         return _store_cache(result, cache_dir, identity, fingerprint)
 
     if output_dir is not None:
@@ -210,6 +250,9 @@ def resolve(
         )
         tried.extend(conversion_notes)
         if converted is not None:
+            if rejected_explicit:
+                converted.provenance = f"{rejected_explicit}; {converted.provenance}"
+                converted.report = f"{rejected_explicit}\n{converted.report}"
             return _store_cache(converted, cache_dir, identity, fingerprint)
     elif find_urdfs(repo_dir):
         tried.append("URDF/xacro found but no output_dir was supplied for conversion")
@@ -217,6 +260,8 @@ def resolve(
     identified = identify(repo_dir)
     if identified.found:
         identified.report = "\n".join([*tried, identified.report]).strip()
+        if rejected_explicit:
+            identified.provenance = f"{rejected_explicit}; {identified.provenance}"
         return _store_cache(identified, cache_dir, identity, fingerprint)
 
     tried.append(identified.report)
@@ -285,11 +330,11 @@ def identify(repo_dir: Path) -> Resolution:
 
     for model, source, matched in scan_name_matches(repo_dir, library):
         notes.append(f"{source} mentions {matched!r}")
-        scored[model.name] = max(scored.get(model.name, 0.0), 0.35)
+        scored[model.name] = max(scored.get(model.name, 0.0), _PROSE_MATCH_SCORE)
 
     ranked = sorted(scored.items(), key=lambda item: (-item[1], item[0]))
     candidates = [name for name, _ in ranked[:5]]
-    if ranked and ranked[0][1] >= 0.3:
+    if ranked and ranked[0][1] >= _IDENTIFICATION_ACCEPTANCE_THRESHOLD:
         best = menagerie.get(ranked[0][0], library)
         if best is not None:
             return Resolution(
@@ -354,14 +399,34 @@ def find_mjcf(repo_dir: Path) -> list[Path]:
 
 def fingerprint_inputs(repo_dir: Path, robot_config: dict) -> str:
     """Hash model-relevant checkout inputs and the robot config block."""
+    repo_dir = Path(repo_dir).resolve()
     digest = hashlib.sha256()
     digest.update(
         json.dumps(robot_config or {}, sort_keys=True, separators=(",", ":")).encode()
     )
     for path in _walk(repo_dir):
+        suffix = path.suffix.lower()
+        is_mesh = suffix in _MODEL_MESH_SUFFIXES
+        is_mjcf = False
+        if suffix == ".xml":
+            try:
+                is_mjcf = ET.parse(path).getroot().tag.rsplit("}", 1)[-1] == "mujoco"
+            except (OSError, ET.ParseError):
+                continue
+        is_content_input = (
+            suffix in {".py", ".urdf", ".xacro"}
+            or is_mjcf
+            or _is_name_signal_file(path, repo_dir)
+        )
+        if not is_content_input and not is_mesh:
+            continue
         try:
             relative = path.relative_to(repo_dir).as_posix()
-            payload = path.read_bytes()
+            if is_mesh:
+                stat = path.stat()
+                payload = f"metadata:{stat.st_size}:{stat.st_mtime_ns}".encode()
+            else:
+                payload = path.read_bytes()
         except (OSError, ValueError):
             continue
         digest.update(relative.encode())
@@ -385,25 +450,7 @@ def scan_name_matches(
     repo_dir: Path, menagerie_dir: Path
 ) -> list[tuple[menagerie.MenagerieModel, str, str]]:
     """Match distinctive model/vendor names in manifests and prose."""
-    files = [
-        path
-        for path in _walk(repo_dir)
-        if path.name.lower()
-        in {
-            "readme",
-            "readme.md",
-            "readme.rst",
-            "requirements.txt",
-            "pyproject.toml",
-            "setup.py",
-            "package.xml",
-        }
-        or path.name.lower().startswith("readme.")
-        or (
-            path.suffix.lower() in {".md", ".rst"}
-            and "docs" in {part.lower() for part in path.relative_to(repo_dir).parts}
-        )
-    ]
+    files = [path for path in _walk(repo_dir) if _is_name_signal_file(path, repo_dir)]
     matches: list[tuple[menagerie.MenagerieModel, str, str]] = []
     for path in files:
         try:
@@ -416,15 +463,48 @@ def scan_name_matches(
         }
         source = "README/docs" if is_prose else "dependency manifest"
         for model in menagerie.index(menagerie_dir):
-            tokens = [
-                token
-                for token in re.split(r"[^a-z0-9]+", model.name.lower())
-                if len(token) >= 4
-            ]
-            matched = next((token for token in tokens if token in text), None)
+            matched = _distinctive_name_match(text, model.name)
             if matched is not None:
                 matches.append((model, source, matched))
     return matches
+
+
+def _is_name_signal_file(path: Path, repo_dir: Path) -> bool:
+    """Whether a manifest or prose file participates in model identification."""
+    name = path.name.lower()
+    return (
+        name in {"readme", "readme.md", "readme.rst"}
+        or name.startswith("readme.")
+        or name in _MODEL_MANIFESTS
+        or (
+            path.suffix.lower() in {".md", ".rst"}
+            and "docs" in {part.lower() for part in path.relative_to(repo_dir).parts}
+        )
+    )
+
+
+def _distinctive_name_match(text: str, model_name: str) -> str | None:
+    """Return a distinctive model-name match, ignoring generic robotics words."""
+    name_tokens = _NAME_TOKENS_RE.findall(model_name.lower())
+    distinctive = [
+        token
+        for token in name_tokens
+        if len(token) >= 4 and token not in _GENERIC_NAME_TOKENS
+    ]
+    if not distinctive:
+        return None
+    text_tokens = set(_NAME_TOKENS_RE.findall(text.lower()))
+    if re.search(
+        rf"(?<![a-z0-9]){re.escape(model_name.lower())}(?![a-z0-9])",
+        text.lower(),
+    ):
+        return model_name
+    hits = [token for token in distinctive if token in text_tokens]
+    if len(hits) >= 2:
+        return "+".join(hits)
+    if hits:
+        return hits[0]
+    return None
 
 
 def _convert_urdfs(
@@ -521,7 +601,8 @@ def _validate_mjcf(path: Path, require_actuators: bool) -> tuple[bool, str, int 
     ok, detail = generator.validate(path)
     if not ok:
         return False, detail, None
-    return True, detail, int(model.nv)
+    dof = menagerie.count_joints(path)
+    return True, detail, dof if dof is not None else int(model.nv)
 
 
 def _cache_path(cache_dir: Path, identity: str, fingerprint: str) -> Path:

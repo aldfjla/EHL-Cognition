@@ -315,15 +315,20 @@ def read_license(model: MenagerieModel, menagerie_dir: Path) -> str | None:
     lowered = text.lower()
     if "mit license" in lowered:
         return "MIT License"
-    if "apache license" in lowered:
+    if re.search(r"apache license\s+version\s+2(?:\.0)?", lowered):
         return "Apache License 2.0"
-    if "gnu general public license" in lowered:
-        return "GNU General Public License"
-    if "bsd" in lowered:
-        for line in text.splitlines():
-            if "bsd" in line.lower():
-                return line.strip()
-        return "BSD License"
+    gpl_match = re.search(
+        r"gnu general public license[\s,]*(?:version|v)\s*([23])(?:\.([0-9]+))?",
+        lowered,
+    )
+    if gpl_match:
+        major, minor = gpl_match.groups()
+        return f"GNU General Public License v{major}.{minor or '0'}"
+    if re.search(r"\bclear bsd license\b", lowered):
+        return "Clear BSD License"
+    bsd_match = re.search(r"\bbsd\s+([0-4])-clause license\b", lowered)
+    if bsd_match:
+        return f"BSD {bsd_match.group(1)}-Clause License"
     return None
 
 
