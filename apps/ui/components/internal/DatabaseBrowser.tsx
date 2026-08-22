@@ -51,12 +51,13 @@ export default function DatabaseBrowser() {
   const [rows, setRows] = useState<InternalDbRow[]>([]);
   const [columns, setColumns] = useState<InternalDbColumn[]>([]);
   const [total, setTotal] = useState(0);
-  const [offset, setOffset] = useState(0);
+  const [pageRequest, setPageRequest] = useState({ offset: 0, revision: 0 });
   const [loadingTables, setLoadingTables] = useState(true);
   const [loadingRows, setLoadingRows] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [edit, setEdit] = useState<EditState | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const offset = pageRequest.offset;
 
   const selectedTable = useMemo(
     () => tables.find((table) => table.name === selectedName) ?? null,
@@ -113,11 +114,11 @@ export default function DatabaseBrowser() {
 
   useEffect(() => {
     if (selectedName) void loadRows(selectedName, offset);
-  }, [loadRows, offset, selectedName]);
+  }, [loadRows, offset, pageRequest.revision, selectedName]);
 
   const selectTable = (name: string) => {
     setSelectedName(name);
-    setOffset(0);
+    setPageRequest((current) => ({ ...current, offset: 0 }));
   };
 
   const saveCell = async () => {
@@ -155,7 +156,20 @@ export default function DatabaseBrowser() {
     setError(null);
     try {
       await api.deleteInternalDbRow(selectedTable.name, pk);
-      await loadRows(selectedTable.name, offset);
+      if (rows.length === 1 && offset > 0) {
+        const remainingTotal = Math.max(0, total - 1);
+        const lastOffset =
+          Math.floor(Math.max(0, remainingTotal - 1) / PAGE_SIZE) * PAGE_SIZE;
+        setPageRequest((current) => ({
+          offset: Math.min(current.offset, lastOffset),
+          revision: current.revision + 1,
+        }));
+      } else {
+        setPageRequest((current) => ({
+          ...current,
+          revision: current.revision + 1,
+        }));
+      }
       setTables((current) =>
         current.map((table) =>
           table.name === selectedTable.name
@@ -256,7 +270,12 @@ export default function DatabaseBrowser() {
                   <button
                     type="button"
                     disabled={!canPrevious || loadingRows}
-                    onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+                    onClick={() =>
+                      setPageRequest((current) => ({
+                        ...current,
+                        offset: Math.max(0, current.offset - PAGE_SIZE),
+                      }))
+                    }
                     className="rounded border border-surface-border px-2 py-1 enabled:hover:border-slate-500 enabled:hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     Previous
@@ -267,7 +286,12 @@ export default function DatabaseBrowser() {
                   <button
                     type="button"
                     disabled={!canNext || loadingRows}
-                    onClick={() => setOffset(offset + PAGE_SIZE)}
+                    onClick={() =>
+                      setPageRequest((current) => ({
+                        ...current,
+                        offset: current.offset + PAGE_SIZE,
+                      }))
+                    }
                     className="rounded border border-surface-border px-2 py-1 enabled:hover:border-slate-500 enabled:hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     Next
