@@ -55,15 +55,32 @@ RUNTIME_PARAMS = frozenset(
     }
 )
 
-#: Nominal geometry of the generated pick-and-place cell, metres.
+#: Reference cell geometry, metres. Robot-specific geometry is derived below.
 TABLE_HEIGHT = 0.4
 TABLE_HALF = (0.3, 0.4, 0.02)
-#: Table centre in the robot's frame, far enough out to clear the base.
 TABLE_POS = (0.6, 0.0)
 OBJECT_HALF = 0.025
 BIN_HALF = (0.09, 0.09, 0.05)
 BIN_NOMINAL_POS = (0.55, -0.22)
 OBJECT_NOMINAL_POS = (0.55, 0.12)
+REFERENCE_REACH = 0.85
+WORKING_SURFACE_HEIGHT = 0.0
+
+
+@dataclass(frozen=True)
+class CellGeometry:
+    """Task-cell dimensions derived from one robot model."""
+
+    reach_m: float
+    scale: float
+    table_height: float
+    table_half: tuple[float, float, float]
+    table_pos: tuple[float, float]
+    object_half: float
+    object_mass_kg: float
+    object_nominal_pos: tuple[float, float]
+    bin_half: tuple[float, float, float]
+    bin_nominal_pos: tuple[float, float]
 
 
 @dataclass
@@ -86,10 +103,79 @@ class Scene:
     #: Named body/site/geom ids resolved once at build time, e.g.
     #: ``{"object": 12, "bin": 19, "gripper_site": 4}``.
     handles: dict[str, int] = field(default_factory=dict)
+    geometry: CellGeometry | None = None
 
 
 class SceneError(RuntimeError):
     """The world could not be built, or a parameter could not be applied."""
+
+
+def estimate_robot_reach(model: Any) -> float:
+    """Estimate radial tool reach by summing offsets along its body chain."""
+    tool_site = _gripper_site(model)
+    if tool_site is not None:
+        body_id = int(model.site_bodyid[tool_site])
+    else:
+        body_id = _end_effector_body(model)
+    if body_id is None:
+        return 0.0
+
+    reach = 0.0
+    body = body_id
+    while body > 0:
+        reach += float(np.linalg.norm(np.asarray(model.body_pos[body])[:2]))
+        body = int(model.body_parentid[body])
+    if tool_site is not None:
+        reach += float(np.linalg.norm(np.asarray(model.site_pos[tool_site])[:2]))
+    return reach
+
+
+def derive_cell_geometry(model: Any) -> CellGeometry:
+    """Scale the reference task cell to the model's radial tool reach."""
+    reach = estimate_robot_reach(model)
+    scale = max(reach / REFERENCE_REACH, 0.1)
+    return CellGeometry(
+        reach_m=reach,
+        scale=scale,
+        table_height=WORKING_SURFACE_HEIGHT,
+        table_half=(
+            TABLE_HALF[0] * scale,
+            TABLE_HALF[1] * scale,
+            max(0.01, TABLE_HALF[2] * scale),
+        ),
+        table_pos=(TABLE_POS[0] * scale, TABLE_POS[1] * scale),
+        object_half=max(0.006, OBJECT_HALF * scale),
+        object_mass_kg=max(0.005, 0.3 * scale**3),
+        object_nominal_pos=(
+            OBJECT_NOMINAL_POS[0] * scale,
+            OBJECT_NOMINAL_POS[1] * scale,
+        ),
+        bin_half=(
+            max(0.03, BIN_HALF[0] * scale),
+            max(0.03, BIN_HALF[1] * scale),
+            max(0.03, BIN_HALF[2] * scale),
+        ),
+        bin_nominal_pos=(
+            BIN_NOMINAL_POS[0] * scale,
+            BIN_NOMINAL_POS[1] * scale,
+        ),
+    )
+
+
+def _reference_cell_geometry() -> CellGeometry:
+    """Return the unscaled cell for compatibility with manually-built Scenes."""
+    return CellGeometry(
+        reach_m=REFERENCE_REACH,
+        scale=1.0,
+        table_height=TABLE_HEIGHT,
+        table_half=TABLE_HALF,
+        table_pos=TABLE_POS,
+        object_half=OBJECT_HALF,
+        object_mass_kg=0.3,
+        object_nominal_pos=OBJECT_NOMINAL_POS,
+        bin_half=BIN_HALF,
+        bin_nominal_pos=BIN_NOMINAL_POS,
+    )
 
 
 def build(spec: SceneSpec) -> Scene:
@@ -98,7 +184,9 @@ def build(spec: SceneSpec) -> Scene:
     if not robot_path.is_file():
         raise SceneError(f"robot model not found: {robot_path}")
 
-    xml = task_world_xml(robot_path, spec)
+    robot_model = mujoco.MjModel.from_xml_path(str(robot_path))
+    geometry = derive_cell_geometry(robot_model)
+    xml = task_world_xml(robot_path, spec, geometry)
     # The world file must sit beside the robot XML: Menagerie models declare
     # `meshdir="assets"` relative to the *main* file, so a world compiled from
     # anywhere else cannot find their meshes.
@@ -116,22 +204,35 @@ def build(spec: SceneSpec) -> Scene:
         staged.unlink(missing_ok=True)
 
     data = mujoco.MjData(model)
-    scene = Scene(model=model, data=data, spec=spec, handles=_resolve_handles(model))
+    scene = Scene(
+        model=model,
+        data=data,
+        spec=spec,
+        handles=_resolve_handles(model),
+        geometry=geometry,
+    )
     apply_params(scene, spec.params)
     reset(scene, int(spec.params.get("seed", 0) or 0))
     return scene
 
 
-def task_world_xml(robot_path: Path, spec: SceneSpec) -> str:
+def task_world_xml(
+    robot_path: Path, spec: SceneSpec, geometry: CellGeometry | None = None
+) -> str:
     """The task MJCF that includes the robot model without modifying it."""
+    if geometry is None:
+        geometry = derive_cell_geometry(mujoco.MjModel.from_xml_path(str(robot_path)))
     task = spec.task_name or "pick_and_place"
     mjcf = ET.Element("mujoco", model=f"robotci_{task}")
     include = ET.SubElement(mjcf, "include")
     include.set("file", robot_path.name)
 
     statistic = ET.SubElement(mjcf, "statistic")
-    statistic.set("center", f"{TABLE_POS[0]:.2f} 0 {TABLE_HEIGHT:.2f}")
-    statistic.set("extent", "1.4")
+    statistic.set(
+        "center",
+        f"{geometry.table_pos[0]:.6f} 0 {geometry.table_height:.6f}",
+    )
+    statistic.set("extent", f"{max(1.0, 1.4 * geometry.scale):.6f}")
 
     if spec.include_visuals:
         visual = ET.SubElement(mjcf, "visual")
@@ -157,27 +258,28 @@ def task_world_xml(robot_path: Path, spec: SceneSpec) -> str:
     table = ET.SubElement(worldbody, "body", name="robotci_table")
     table.set(
         "pos",
-        f"{TABLE_POS[0]:.4f} {TABLE_POS[1]:.4f} {TABLE_HEIGHT - TABLE_HALF[2]:.4f}",
+        f"{geometry.table_pos[0]:.6f} {geometry.table_pos[1]:.6f} "
+        f"{geometry.table_height - geometry.table_half[2]:.6f}",
     )
     table_geom = ET.SubElement(table, "geom")
     table_geom.set("name", "robotci_table_top")
     table_geom.set("type", "box")
-    table_geom.set("size", " ".join(f"{v:.4f}" for v in TABLE_HALF))
+    table_geom.set("size", " ".join(f"{v:.6f}" for v in geometry.table_half))
     table_geom.set("rgba", "0.55 0.45 0.35 1")
     table_geom.set("friction", "1 0.005 0.0001")
 
     obj = ET.SubElement(worldbody, "body", name="robotci_object")
     obj.set(
         "pos",
-        f"{OBJECT_NOMINAL_POS[0]:.4f} {OBJECT_NOMINAL_POS[1]:.4f} "
-        f"{TABLE_HEIGHT + OBJECT_HALF:.4f}",
+        f"{geometry.object_nominal_pos[0]:.6f} {geometry.object_nominal_pos[1]:.6f} "
+        f"{geometry.table_height + geometry.object_half:.6f}",
     )
     ET.SubElement(obj, "freejoint").set("name", "robotci_object_free")
     obj_geom = ET.SubElement(obj, "geom")
     obj_geom.set("name", "robotci_object_geom")
     obj_geom.set("type", "box")
-    obj_geom.set("size", " ".join([f"{OBJECT_HALF:.4f}"] * 3))
-    obj_geom.set("mass", "0.3")
+    obj_geom.set("size", " ".join([f"{geometry.object_half:.6f}"] * 3))
+    obj_geom.set("mass", f"{geometry.object_mass_kg:.6f}")
     obj_geom.set("rgba", "0.85 0.35 0.25 1")
     obj_geom.set("friction", "1 0.02 0.001")
     ET.SubElement(obj, "site", name="robotci_object_site").set("size", "0.005")
@@ -185,9 +287,10 @@ def task_world_xml(robot_path: Path, spec: SceneSpec) -> str:
     bin_body = ET.SubElement(worldbody, "body", name="robotci_bin")
     bin_body.set(
         "pos",
-        f"{BIN_NOMINAL_POS[0]:.4f} {BIN_NOMINAL_POS[1]:.4f} {TABLE_HEIGHT:.4f}",
+        f"{geometry.bin_nominal_pos[0]:.6f} {geometry.bin_nominal_pos[1]:.6f} "
+        f"{geometry.table_height:.6f}",
     )
-    for name, pos, size in _bin_walls():
+    for name, pos, size in _bin_walls(geometry.bin_half):
         wall = ET.SubElement(bin_body, "geom")
         wall.set("name", name)
         wall.set("type", "box")
@@ -195,7 +298,7 @@ def task_world_xml(robot_path: Path, spec: SceneSpec) -> str:
         wall.set("size", size)
         wall.set("rgba", "0.3 0.5 0.75 1")
     ET.SubElement(bin_body, "site", name="robotci_bin_site").set(
-        "pos", f"0 0 {BIN_HALF[2]:.4f}"
+        "pos", f"0 0 {geometry.bin_half[2]:.4f}"
     )
     ET.SubElement(mjcf, "sensor")
     ET.indent(mjcf, space="  ")
@@ -246,7 +349,10 @@ def apply_params(scene: Scene, params: dict[str, Any]) -> None:
             if body is None or axis is None:
                 unknown.append(key)
                 continue
-            model.body_pos[body, axis] = BIN_NOMINAL_POS[axis] + float(value)
+            nominal = (
+                scene.geometry.bin_nominal_pos if scene.geometry else BIN_NOMINAL_POS
+            )
+            model.body_pos[body, axis] = nominal[axis] + float(value)
         elif key.startswith("object_position."):
             # The object is free: its offset belongs to the reset pose, which
             # reset() reads back out of the spec.
@@ -256,7 +362,8 @@ def apply_params(scene: Scene, params: dict[str, Any]) -> None:
             if body is None:
                 unknown.append(key)
                 continue
-            model.body_pos[body, 2] = float(value) - TABLE_HALF[2]
+            table_half = scene.geometry.table_half if scene.geometry else TABLE_HALF
+            model.body_pos[body, 2] = float(value) - table_half[2]
 
     if unknown:
         raise SceneError(
@@ -283,25 +390,26 @@ def reset(scene: Scene, seed: int) -> None:
         mujoco.mj_resetDataKeyframe(model, data, key)
 
     params = scene.spec.params or {}
+    geometry = scene.geometry or _reference_cell_geometry()
     rng = np.random.default_rng(int(seed) & 0xFFFFFFFF)
     jitter = rng.normal(0.0, 1e-4, size=3)
 
     joint = scene.handles.get("object_free_joint")
     if joint is not None:
         adr = int(model.jnt_qposadr[joint])
-        table_h = float(params.get("table_height_m", TABLE_HEIGHT))
+        table_h = float(params.get("table_height_m", geometry.table_height))
         data.qpos[adr + 0] = (
-            OBJECT_NOMINAL_POS[0]
+            geometry.object_nominal_pos[0]
             + float(params.get("object_position.x", 0.0))
             + jitter[0]
         )
         data.qpos[adr + 1] = (
-            OBJECT_NOMINAL_POS[1]
+            geometry.object_nominal_pos[1]
             + float(params.get("object_position.y", 0.0))
             + jitter[1]
         )
         data.qpos[adr + 2] = (
-            table_h + OBJECT_HALF + float(params.get("object_position.z", 0.0))
+            table_h + geometry.object_half + float(params.get("object_position.z", 0.0))
         )
         data.qpos[adr + 3 : adr + 7] = (1.0, 0.0, 0.0, 0.0)
 
@@ -361,8 +469,10 @@ def robot_joint_ids(scene: Scene) -> list[int]:
     return ids
 
 
-def _bin_walls() -> list[tuple[str, str, str]]:
-    hx, hy, hz = BIN_HALF
+def _bin_walls(
+    bin_half: tuple[float, float, float] = BIN_HALF,
+) -> list[tuple[str, str, str]]:
+    hx, hy, hz = bin_half
     thickness = 0.006
     return [
         ("robotci_bin_floor", f"0 0 {thickness:.4f}", f"{hx:.4f} {hy:.4f} {thickness}"),
@@ -450,20 +560,50 @@ def _end_effector_body(model: Any) -> int | None:
 
 
 def _gripper_site(model: Any) -> int | None:
-    """Whatever site the vendor model uses as the tool attachment point."""
-    for candidate in (
+    """Find a plausible tool site, preferring the deepest attached site."""
+    exact_names = (
         "attachment_site",
         "gripper",
+        "gripper_frame",
+        "gripperframe",
         "grip_site",
+        "gripframe",
         "pinch",
+        "pinch_site",
         "ee_site",
+        "eef",
         "tcp",
-    ):
-        sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, candidate)
-        if sid >= 0:
-            return sid
+        "tcp_site",
+        "tool",
+        "tool_site",
+        "tool0",
+    )
+    exact_rank = {name: index for index, name in enumerate(exact_names)}
+    tokens = ("grip", "tcp", "tool", "pinch", "ee", "end_effector")
+
+    def depth(body_id: int) -> int:
+        value = 0
+        body = body_id
+        while body > 0:
+            value += 1
+            body = int(model.body_parentid[body])
+        return value
+
+    candidates: list[tuple[tuple[int, int, int], int]] = []
     for sid in range(model.nsite):
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, sid) or ""
-        if not name.startswith("robotci_"):
-            return sid
-    return None
+        if name.startswith("robotci_"):
+            continue
+        lowered = name.lower()
+        normalized = lowered.replace("-", "_")
+        body_depth = depth(int(model.site_bodyid[sid]))
+        if normalized in exact_rank:
+            score = (body_depth, 2, -exact_rank[normalized])
+        elif any(token in lowered for token in tokens):
+            score = (body_depth, 1, 0)
+        else:
+            continue
+        candidates.append((score, sid))
+    if not candidates:
+        return None
+    return max(candidates)[1]

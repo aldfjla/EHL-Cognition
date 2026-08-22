@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import mujoco
 import numpy as np
 import pytest
 from simkit import scene as scene_mod
@@ -50,11 +51,11 @@ def test_gravity_and_table_height_are_applied(toy_arm) -> None:
     assert scene.model.opt.gravity[2] == pytest.approx(-3.7)
     # bin_position is an offset from the nominal cell layout.
     assert scene.model.body_pos[scene.handles["bin"], 1] == pytest.approx(
-        scene_mod.BIN_NOMINAL_POS[1] - 0.1
+        scene.geometry.bin_nominal_pos[1] - 0.1
     )
     scene_mod.apply_params(scene, {"table_height_m": 0.5})
     assert scene.model.body_pos[scene.handles["table"], 2] == pytest.approx(
-        0.5 - scene_mod.TABLE_HALF[2]
+        0.5 - scene.geometry.table_half[2]
     )
 
 
@@ -87,3 +88,67 @@ def test_reset_holds_the_home_pose_not_zero(toy_arm) -> None:
     poses = [scene.data.qpos[scene.model.jnt_qposadr[j]] for j in joints]
     assert any(abs(float(p)) > 0.1 for p in poses)
     assert np.any(scene.data.ctrl != 0.0)
+
+
+def test_robot_scale_changes_reach_and_cell_geometry(menagerie_dir) -> None:
+    so_path = menagerie_dir / "robotstudio_so101" / "so101.xml"
+    panda_path = menagerie_dir / "franka_emika_panda" / "panda.xml"
+    so_model = mujoco.MjModel.from_xml_path(str(so_path))
+    panda_model = mujoco.MjModel.from_xml_path(str(panda_path))
+
+    so_geometry = scene_mod.derive_cell_geometry(so_model)
+    panda_geometry = scene_mod.derive_cell_geometry(panda_model)
+
+    assert so_geometry.reach_m < panda_geometry.reach_m
+    assert so_geometry.scale < panda_geometry.scale
+    for geometry in (so_geometry, panda_geometry):
+        object_radius = np.linalg.norm(geometry.object_nominal_pos)
+        assert object_radius < geometry.reach_m
+
+
+def test_scaled_home_poses_have_no_contacts(menagerie_dir) -> None:
+    for model_name in ("robotstudio_so101", "franka_emika_panda"):
+        model_path = menagerie_dir / model_name
+        xml_name = "so101.xml" if model_name == "robotstudio_so101" else "panda.xml"
+        scene = make(model_path / xml_name)
+        mujoco.mj_forward(scene.model, scene.data)
+        for index in range(scene.data.ncon):
+            contact = scene.data.contact[index]
+            names = [
+                mujoco.mj_id2name(
+                    scene.model, mujoco.mjtObj.mjOBJ_GEOM, int(contact.geom1)
+                ),
+                mujoco.mj_id2name(
+                    scene.model, mujoco.mjtObj.mjOBJ_GEOM, int(contact.geom2)
+                ),
+            ]
+            robot_contact = any(
+                name and not name.startswith("robotci_") for name in names
+            )
+            task_contact = any(name and name.startswith("robotci_") for name in names)
+            assert not (robot_contact and task_contact), (model_name, names)
+
+
+def test_gripper_site_prefers_so101_gripperframe(menagerie_dir) -> None:
+    model_path = menagerie_dir / "robotstudio_so101" / "so101.xml"
+    model = mujoco.MjModel.from_xml_path(str(model_path))
+    site_id = scene_mod._gripper_site(model)
+    assert site_id is not None
+    assert mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, site_id) == (
+        "gripperframe"
+    )
+
+
+def test_gripper_site_does_not_use_unrelated_base_site() -> None:
+    model = mujoco.MjModel.from_xml_string(
+        """
+        <mujoco>
+          <worldbody>
+            <body name="base">
+              <site name="baseframe"/>
+            </body>
+          </worldbody>
+        </mujoco>
+        """
+    )
+    assert scene_mod._gripper_site(model) is None
