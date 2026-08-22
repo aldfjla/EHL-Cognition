@@ -68,7 +68,7 @@ export default function MissionControlPage({
   };
 
   return (
-    <main className="p-6">
+    <main className="px-6 py-8">
       {/* A silently stale dashboard is worse than a loud one. */}
       {stale && !replay && (
         <div className="mb-4 rounded border border-status-blocked/60 bg-amber-950/30 px-3 py-2 text-xs text-status-blocked">
@@ -83,14 +83,14 @@ export default function MissionControlPage({
         </div>
       )}
 
-      <header className="mb-4 flex flex-wrap items-baseline justify-between gap-3">
+      <header className="mb-6 flex flex-wrap items-baseline justify-between gap-4">
         <div>
-          <div className="flex items-baseline gap-2">
+          <div className="flex flex-wrap items-center gap-3">
             <Link
               href="/runs"
-              className="font-mono text-xs text-slate-500 hover:text-sky-400"
+              className="inline-flex items-center gap-2 rounded-full border border-surface-border px-4 py-2 font-mono text-sm text-slate-300 transition-colors hover:border-sky-500/70 hover:bg-surface-raised hover:text-sky-300"
             >
-              ← runs
+              <span aria-hidden>←</span> runs
             </Link>
             <h1 className="font-mono text-lg font-semibold">{runId}</h1>
             {replay && (
@@ -99,7 +99,7 @@ export default function MissionControlPage({
               </span>
             )}
           </div>
-          <p className="text-sm text-slate-400">
+          <p className="mt-2 text-sm text-slate-400">
             {state.run?.repo ?? "—"} @ {state.run?.commit_sha?.slice(0, 7) ?? "—"}
             {state.run?.commit_message ? ` · ${state.run.commit_message}` : ""}
           </p>
@@ -137,7 +137,7 @@ export default function MissionControlPage({
       />
 
       {/* 2. The live simulation wall. */}
-      <div className="mt-4">
+      <div className="mt-6">
         <LiveWall
           runId={runId}
           scenarios={state.scenarios}
@@ -147,7 +147,7 @@ export default function MissionControlPage({
       </div>
 
       {/* 3. The working row. */}
-      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[220px_1fr_380px]">
+      <div className="mt-6 grid grid-cols-1 gap-5 xl:grid-cols-[220px_1fr_380px]">
         <aside>
           <PipelineTimeline
             stage={state.run?.stage ?? null}
@@ -156,7 +156,7 @@ export default function MissionControlPage({
           />
         </aside>
 
-        <section className="space-y-4">
+        <section className="space-y-5">
           <AgentGrid
             agents={state.agents}
             activeClusterId={hoveredCluster}
@@ -176,7 +176,7 @@ export default function MissionControlPage({
           />
         </section>
 
-        <aside className="space-y-4">
+        <aside className="space-y-5">
           <TeamChat
             messages={state.messages}
             agents={state.agents}
@@ -191,7 +191,7 @@ export default function MissionControlPage({
       </div>
 
       {/* 4. Evidence, once the run produces it. */}
-      <section className="mt-4 space-y-4">
+      <section className="mt-6 space-y-5">
         <VideoCompare incidents={state.report?.incidents ?? []} />
         <DiffViewer diff={state.report?.diff ?? null} />
         <ReportView report={state.report} />
