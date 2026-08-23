@@ -200,11 +200,18 @@ class DevinClient:
         max_parallel: int = 6,
         timeout_s: float = 60.0,
         org_id: str | None = None,
+        model: str | None = None,
     ) -> None:
         if not api_key:
             raise DevinError("DEVIN_API_KEY unset; copy .env.example to .env")
         self.api_base = api_base.rstrip("/")
         self.org_id = org_id if org_id is not None else os.environ.get("DEVIN_ORG_ID")
+        #: Sent as ``model`` on every session we create. Unset by default so
+        #: the org's own default applies; the API rejects names it does not
+        #: know, so this is opt-in and never guessed.
+        self.model = (
+            model if model is not None else os.environ.get("DEVIN_MODEL", "")
+        ).strip()
         self.max_parallel = max_parallel
         self.timeout_s = timeout_s
         self._http = httpx.AsyncClient(
@@ -363,6 +370,8 @@ class DevinClient:
             body["playbook_id"] = playbook_id
         if tags:
             body["tags"] = list(tags)
+        if self.model:
+            body["model"] = self.model
 
         # The slot is held for the life of the session, not just this request:
         # MAX_PARALLEL_AGENTS bounds how many agents are alive at once.

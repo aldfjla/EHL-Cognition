@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import httpx
@@ -497,3 +498,34 @@ def test_structured_output_never_scrapes_the_prompt_schema() -> None:
         {"source": "devin", "message": '```json\n{"verdict": "iterate"}\n```'}
     )
     assert client_module.extract_structured_output(payload) == {"verdict": "iterate"}
+
+
+def _created_body(**kwargs: Any) -> dict[str, Any]:
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.read().decode()))
+        return httpx.Response(200, json={"session_id": "s-1", "url": "u"})
+
+    client = make_client(handler, **kwargs)
+
+    async def go() -> None:
+        await client.create_session("do the thing")
+        await client.aclose()
+
+    asyncio.run(go())
+    return seen[0]
+
+
+def test_no_model_is_sent_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEVIN_MODEL", raising=False)
+    assert "model" not in _created_body()
+
+
+def test_devin_model_is_passed_through_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVIN_MODEL", " some-model ")
+    assert _created_body()["model"] == "some-model"
+    # An explicit empty argument still means "let the org default apply".
+    assert "model" not in _created_body(model="")

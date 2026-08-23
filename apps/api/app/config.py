@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     devin_api_key: str = ""
     devin_org_id: str = ""
     devin_api_base: str = "https://api.devin.ai/v3"
+    #: Empty means "send no model field", so the org default applies.
+    devin_model: str = ""
 
     # -- GitHub ------------------------------------------------------------ #
     github_token: str = ""

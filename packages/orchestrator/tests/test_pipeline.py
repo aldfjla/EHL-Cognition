@@ -791,3 +791,51 @@ async def test_stage_fix_surfaces_the_cluster_errors(tmp_path: Path) -> None:
     assert stage == Stage.FAILED_UNRESOLVED
     assert "did not finish within 1800s" in (ctx.run.error or "")
     assert "joint failure" in ctx.run.error
+
+
+def test_agent_budgets_are_clamped_to_what_is_left_of_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FIXER_TIMEOUT_S", "3600")
+    ctx = make_ctx(tmp_path)
+    ctx.run_budget_s = 600.0
+    pipeline = Pipeline(ctx)
+
+    assert pipeline._agent_timeout("HARNESS_TIMEOUT_S", 180.0) == 180.0
+    # A role may not ask for more than the run has left.
+    assert pipeline._agent_timeout("FIXER_TIMEOUT_S", 120.0) <= 600.0
+
+
+def test_an_unparseable_budget_falls_back_to_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DESIGNER_TIMEOUT_S", "three minutes")
+    ctx = make_ctx(tmp_path)
+    ctx.run_budget_s = 0.0  # unbounded
+
+    assert Pipeline(ctx)._agent_timeout("DESIGNER_TIMEOUT_S", 180.0) == 180.0
+
+
+def test_live_pacing_shrinks_as_the_run_budget_is_spent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SIMKIT_MIN_EPISODE_WALL_S", "120")
+    ctx = make_ctx(tmp_path)
+    ctx.sim_workers = 4
+    ctx.run_budget_s = 600.0
+    pipeline = Pipeline(ctx)
+
+    # 50 scenarios over a handful of workers cannot each take two minutes.
+    many = pipeline._episode_floor_s(50)
+    assert 0.0 < many < 120.0
+    # A single-scenario cluster check can afford the full floor.
+    assert pipeline._episode_floor_s(1) > many
+
+
+def test_pacing_is_off_when_the_floor_is_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SIMKIT_MIN_EPISODE_WALL_S", "0")
+    ctx = make_ctx(tmp_path)
+
+    assert Pipeline(ctx)._episode_floor_s(50) == 0.0

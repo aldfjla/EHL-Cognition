@@ -195,16 +195,28 @@ def test_per_criterion_gives_each_issue_its_own_cluster() -> None:
     criterion gives each its own investigator and fixer.
     """
     scenarios = [
-        scenario(0, diagnosis="the arm struck the table",
-                 failed=("object_in_bin", "no_collision"), passed=("within_time",)),
-        scenario(1, diagnosis="the arm struck the table",
-                 failed=("object_in_bin", "within_time"), passed=("no_collision",)),
+        scenario(
+            0,
+            diagnosis="the arm struck the table",
+            failed=("object_in_bin", "no_collision"),
+            passed=("within_time",),
+        ),
+        scenario(
+            1,
+            diagnosis="the arm struck the table",
+            failed=("object_in_bin", "within_time"),
+            passed=("no_collision",),
+        ),
     ]
 
-    grouped = clustering.cluster_failures(RUN, scenarios, max_clusters=6, per_criterion=False)
+    grouped = clustering.cluster_failures(
+        RUN, scenarios, max_clusters=6, per_criterion=False
+    )
     assert len(grouped) == 2  # two distinct failed-criterion signatures
 
-    split = clustering.cluster_failures(RUN, scenarios, max_clusters=6, per_criterion=True)
+    split = clustering.cluster_failures(
+        RUN, scenarios, max_clusters=6, per_criterion=True
+    )
     by_signature = {c.signature: sorted(c.scenario_ids) for c in split}
     assert sorted(by_signature) == ["no_collision", "object_in_bin", "within_time"]
     assert len(by_signature["object_in_bin"]) == 2  # both scenarios share it

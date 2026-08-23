@@ -138,3 +138,33 @@ def test_repo_dir_reaches_the_harness(toy_arm, task, tmp_path, monkeypatch) -> N
     result = _run(toy_arm, probe, task, repo_dir=str(repo))
     assert result.status in {"passed", "failed"}, result.error
     assert result.sim_time_s > 0
+
+
+def test_live_episodes_are_paced_to_the_wall_clock_floor(monkeypatch) -> None:
+    monkeypatch.delenv("SIMKIT_REALTIME_FACTOR", raising=False)
+    # A 12s episode stretched over 24s of wall clock runs at half speed.
+    assert runner._realtime_factor(12.0, 24.0) == 2.0
+    # No floor, no pacing: batch suites and tests keep full speed.
+    assert runner._realtime_factor(12.0, 0.0) == 0.0
+
+
+def test_pacing_floor_widens_the_watchdog(monkeypatch) -> None:
+    monkeypatch.setenv("SIMKIT_MIN_EPISODE_WALL_S", "120")
+    assert runner.effective_max_wall_s(60.0) == 120.0 + runner.WATCHDOG_MARGIN_S
+    # An unwatched episode is not paced, so its budget is untouched.
+    assert runner.effective_max_wall_s(60.0, live=False) == 60.0
+    # An explicit floor wins over the environment, and a small one cannot
+    # shrink a budget the caller already asked for.
+    assert runner.effective_max_wall_s(60.0, 10.0) == 60.0
+
+
+def test_min_episode_wall_ignores_an_unparseable_value(monkeypatch) -> None:
+    monkeypatch.setenv("SIMKIT_MIN_EPISODE_WALL_S", "soon")
+    assert runner.min_episode_wall_s() == runner.DEFAULT_MIN_EPISODE_WALL_S
+
+
+def test_unwatched_episodes_are_not_paced(toy_arm, sweep_harness, task, monkeypatch):
+    monkeypatch.setenv("SIMKIT_MIN_EPISODE_WALL_S", "120")
+    result = _run(toy_arm, sweep_harness, task)
+    assert result.status in {"passed", "failed"}
+    assert result.duration_s < 30.0

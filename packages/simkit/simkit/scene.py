@@ -55,6 +55,23 @@ RUNTIME_PARAMS = frozenset(
     }
 )
 
+#: Body-name fragments that mark a body as part of the tool.
+TOOL_BODY_TOKENS = (
+    "grip",
+    "jaw",
+    "finger",
+    "claw",
+    "hand",
+    "pinch",
+    "tcp",
+    "tool",
+    "eef",
+    "end_effector",
+)
+#: Fragments that mark a body as bolted to the tool without being the tool —
+#: a wrist camera sits as deep as the jaw and must never stand in for it.
+PAYLOAD_BODY_TOKENS = ("camera", "lidar", "sensor", "imu", "mount")
+
 #: Reference cell geometry, metres. Robot-specific geometry is derived below.
 TABLE_HEIGHT = 0.4
 TABLE_HALF = (0.3, 0.4, 0.02)
@@ -542,21 +559,53 @@ def _joint(model: Any, name: str) -> int | None:
 
 
 def _end_effector_body(model: Any) -> int | None:
-    """The tip of the robot's longest body chain — used when no site is named."""
-    best: int | None = None
-    best_depth = -1
+    """The body whose subtree is the hand.
+
+    Everything at or below this body counts as the gripper: it is what decides
+    which contacts are the task working as intended, and it is the fallback
+    tool position when no tool site is named. The deepest body in the chain is
+    the wrong answer on its own — a wrist camera hangs off the hand at the same
+    depth as the moving jaw, and picking it whitelists the camera housing while
+    treating the jaw closing on the object as a collision.
+
+    Resolution order: the body carrying the tool site, then the root of the
+    shallowest tool-named subtree, then the deepest chain tip that is not a
+    bolted-on payload.
+    """
+    tool_site = _gripper_site(model)
+    if tool_site is not None:
+        return int(model.site_bodyid[tool_site])
+
+    def depth(body_id: int) -> int:
+        value = 0
+        parent = int(model.body_parentid[body_id])
+        while parent > 0 and value < 64:
+            value += 1
+            parent = int(model.body_parentid[parent])
+        return value
+
+    named: list[tuple[int, int]] = []
+    fallback: list[tuple[int, int]] = []
+    payload: list[tuple[int, int]] = []
     for bid in range(1, model.nbody):
-        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, bid) or ""
+        name = (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, bid) or "").lower()
         if name.startswith("robotci_"):
             continue
-        depth = 0
-        parent = int(model.body_parentid[bid])
-        while parent > 0 and depth < 64:
-            depth += 1
-            parent = int(model.body_parentid[parent])
-        if depth > best_depth:
-            best, best_depth = bid, depth
-    return best
+        entry = (depth(bid), bid)
+        if any(token in name for token in PAYLOAD_BODY_TOKENS):
+            payload.append(entry)
+            continue
+        if any(token in name for token in TOOL_BODY_TOKENS):
+            named.append(entry)
+        fallback.append(entry)
+    if named:
+        # The shallowest tool-named body is the root of the hand; its children
+        # are the jaws and whatever else is bolted to them.
+        return min(named)[1]
+    for candidates in (fallback, payload):
+        if candidates:
+            return max(candidates)[1]
+    return None
 
 
 def _gripper_site(model: Any) -> int | None:

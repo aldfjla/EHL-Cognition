@@ -39,7 +39,9 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -47,11 +49,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from simkit.live import live_frame_path
+from simkit.runner import min_episode_wall_s
 
 from orchestrator import clustering, github
 from orchestrator import workspace as workspace_mod
 from orchestrator.devin.hierarchy import AgentTree
 from orchestrator.pool import SuitePool
+from orchestrator.roles import base as base_role
 from orchestrator.roles.base import RoleAgent
 from orchestrator.roles.fixer import FixerAgent
 from orchestrator.roles.harness_builder import HarnessBuilderAgent
@@ -151,10 +155,37 @@ MAX_HANDOFF_FINDINGS = 3
 #: patch does not hold at full-suite scale — the oracle still has the last word.
 CONFIRM_CONFIDENCE = 0.5
 
+#: Wall-clock ceiling for one whole run, seconds. Every agent budget and the
+#: live pacing floor are clamped to what is left of it, so a run that is sold
+#: as ten minutes is ten minutes even when a role goes quiet.
+DEFAULT_RUN_BUDGET_S = 600.0
+
+#: Per-role defaults, all well inside the run budget. The harness and the
+#: scenario matrix are single points of failure with legible outputs — waiting
+#: half an hour for one buys nothing the fallbacks do not already cover.
+DEFAULT_HARNESS_TIMEOUT_S = 180.0
+DEFAULT_DESIGNER_TIMEOUT_S = 180.0
+#: Fixers clone, reproduce, patch and re-test, so they get the largest slice —
+#: but a slice, not the hour they used to take.
+DEFAULT_FIXER_TIMEOUT_S = 120.0
+
+#: Share of the remaining budget a suite may spend slowing episodes down for
+#: the live feed. The rest is left for the stages that follow it.
+PACING_BUDGET_FRACTION = 0.5
+
 #: Emit ``suite.progress`` at most this often, in completed scenarios.
 PROGRESS_EVERY = 1
 _CLUSTER_TERMINAL = {"resolved", "unresolved", "conflicted"}
 _AGENT_WATCH_INTERVAL_S = 0.01
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float from the environment, falling back on anything unusable."""
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        log.warning("%s is not a number; using %s", name, default)
+        return default
 
 
 def _conflict_worktree(
@@ -207,6 +238,17 @@ class PipelineContext:
     #: Guards the FIX <-> VERIFY loop against running forever.
     fix_iteration: int = 0
     max_fix_iterations: int = 3
+    #: Wall-clock budget for the whole run, seconds. ``None`` reads
+    #: ``RUN_BUDGET_S``; 0 or negative means unbounded.
+    run_budget_s: float | None = None
+    #: Monotonic instant the run must be over by. Set by :class:`Pipeline`.
+    deadline: float | None = None
+
+    def remaining_s(self) -> float | None:
+        """Seconds left in the run budget, or ``None`` when unbounded."""
+        if self.deadline is None:
+            return None
+        return max(0.0, self.deadline - time.monotonic())
 
 
 @dataclass
@@ -238,6 +280,13 @@ class Pipeline:
 
     def __init__(self, ctx: PipelineContext) -> None:
         self.ctx = ctx
+        if ctx.deadline is None:
+            budget = (
+                ctx.run_budget_s
+                if ctx.run_budget_s is not None
+                else _env_float("RUN_BUDGET_S", DEFAULT_RUN_BUDGET_S)
+            )
+            ctx.deadline = time.monotonic() + budget if budget > 0 else None
         self._max_parallel = int(os.getenv("MAX_PARALLEL_AGENTS", "6"))
         self._max_parallel_agents = max(1, int(os.getenv("MAX_PARALLEL_AGENTS", "6")))
         self._artifacts = Path(os.getenv("ARTIFACTS_DIR", "artifacts")) / ctx.run.id
@@ -483,14 +532,24 @@ class Pipeline:
         rejection: str | None = None
         for attempt in range(1, HARNESS_ATTEMPTS + 1):
             builder = HarnessBuilderAgent(ctx)
-            agent = await builder.dispatch(
-                entrypoint=control.get("entrypoint", ""),
-                interface=control.get("interface", ""),
-                rate_hz=control.get("rate_hz", 100),
-                model_path=self._model_path(),
-                harness_out_path=str(harness_path),
-                rejection=rejection,
-            )
+            try:
+                agent = await builder.dispatch(
+                    entrypoint=control.get("entrypoint", ""),
+                    interface=control.get("interface", ""),
+                    rate_hz=control.get("rate_hz", 100),
+                    model_path=self._model_path(),
+                    harness_out_path=str(harness_path),
+                    rejection=rejection,
+                    timeout_s=self._agent_timeout(
+                        "HARNESS_TIMEOUT_S", DEFAULT_HARNESS_TIMEOUT_S
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - a lost builder is retryable
+                rejection = f"{type(exc).__name__}: {exc}"
+                await self._nonfatal(
+                    f"harness attempt {attempt}/{HARNESS_ATTEMPTS}", exc
+                )
+                continue
             rejection = await self._reject_harness(builder, agent, harness_path)
             if rejection is None:
                 # Speak the handoff so the dashboard reads as a team: the QA
@@ -576,13 +635,25 @@ class Pipeline:
                 task_description=task.get("description", task.get("name", "")),
                 success_criteria=task.get("success", []),
                 suite_size=self._suite_size(),
+                timeout_s=self._agent_timeout(
+                    "DESIGNER_TIMEOUT_S", DEFAULT_DESIGNER_TIMEOUT_S
+                ),
             )
 
     async def _collect_designer(self) -> Any:
-        """Await the early dispatch, or run it now if it never started."""
-        if self._designer_task is None:
-            return await self._dispatch_designer()
-        return await self._designer_task
+        """Await the early dispatch, or run it now if it never started.
+
+        A Designer that times out or dies is not fatal: ``_axes`` falls back to
+        ``robotci.yaml`` and then to simkit's defaults, which is a worse suite
+        than a designed one but a far better outcome than no run at all.
+        """
+        try:
+            if self._designer_task is None:
+                return await self._dispatch_designer()
+            return await self._designer_task
+        except Exception as exc:  # noqa: BLE001 - fall back to configured axes
+            await self._nonfatal("scenario designer", exc)
+            return None
 
     async def stage_design_scenarios(self) -> Stage:
         """Design the randomized world matrix.
@@ -857,7 +928,9 @@ class Pipeline:
                 parent_agent_id=parent_id,
                 # Fixers clone, reproduce every seed, patch and re-test; the
                 # default agent budget starves them mid-reproduction.
-                timeout_s=float(os.getenv("FIXER_TIMEOUT_S", "3600")),
+                timeout_s=self._agent_timeout(
+                    "FIXER_TIMEOUT_S", DEFAULT_FIXER_TIMEOUT_S
+                ),
             )
         work.agent_ids.append(agent.id)
         self._agent_tree.register_child(parent_id, agent.id)
@@ -1374,6 +1447,7 @@ class Pipeline:
             on_started=on_started,
             reason=f"{ctx.run.stage.value.lower()}: {len(scenarios)} scenarios",
             max_wall_s=max_wall_s,
+            min_wall_s=self._episode_floor_s(len(scenarios)),
         )
 
     async def _execute_cluster_suite(
@@ -1405,6 +1479,7 @@ class Pipeline:
             record="none",
             repo_dir=repo_dir,
             max_wall_s=max_wall_s,
+            min_wall_s=self._episode_floor_s(len(scenarios)),
         )
 
     def _apply_results(
@@ -1635,7 +1710,30 @@ class Pipeline:
     def _base_seed(self) -> int:
         return int(self.ctx.config.get("scenarios", {}).get("seed", 1337))
 
-    def _axes(self, agent: Agent) -> dict[str, tuple[float, float]]:
+    def _agent_timeout(self, env_name: str, default: float) -> float:
+        """A role's budget, never longer than what is left of the run."""
+        budget = _env_float(env_name, default)
+        remaining = self.ctx.remaining_s()
+        if remaining is None:
+            return budget
+        return max(base_role.MIN_AGENT_TIMEOUT_S, min(budget, remaining))
+
+    def _episode_floor_s(self, count: int) -> float:
+        """Per-episode wall-clock floor that still fits the run's budget.
+
+        Pacing exists so a viewer sees an episode play; it must not be the
+        reason a run misses its ceiling. Later suites see a smaller remainder
+        and therefore pace less — VERIFY runs closer to full speed than the
+        first suite did.
+        """
+        configured = min_episode_wall_s()
+        remaining = self.ctx.remaining_s()
+        if configured <= 0.0 or remaining is None:
+            return configured
+        waves = max(1, math.ceil(max(1, count) / self._worker_count()))
+        return max(0.0, min(configured, remaining * PACING_BUDGET_FRACTION / waves))
+
+    def _axes(self, agent: Agent | None) -> dict[str, tuple[float, float]]:
         """Randomization axes: the Designer's, else ``robotci.yaml``.
 
         The Designer publishes them as a JSON object in an ``observation``
@@ -1643,7 +1741,7 @@ class Pipeline:
         the session's structured output, so the board is the only channel.
         """
         axes: dict[str, tuple[float, float]] = {}
-        for finding in reversed(self._findings_of(agent)):
+        for finding in reversed(self._findings_of(agent) if agent else []):
             axes = _parse_axes(finding.detail)
             if axes:
                 break

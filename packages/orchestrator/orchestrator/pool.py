@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from simkit.live import live_frame_path
+from simkit.runner import effective_max_wall_s
 
 from orchestrator.bus import EventBus
 from orchestrator.schemas import EventType
@@ -122,6 +123,7 @@ class SuitePool:
         on_started: StartedCallback | None = None,
         reason: str | None = None,
         max_wall_s: float | None = None,
+        min_wall_s: float | None = None,
     ) -> list[Any]:
         """Submit scenarios independently and return results in index order.
 
@@ -156,6 +158,7 @@ class SuitePool:
                     on_result=on_result,
                     on_started=on_started,
                     max_wall_s=max_wall_s,
+                    min_wall_s=min_wall_s,
                 )
             )
             for spec in normalized
@@ -257,6 +260,7 @@ class SuitePool:
         on_result: ResultCallback | None,
         on_started: StartedCallback | None,
         max_wall_s: float | None,
+        min_wall_s: float | None = None,
     ) -> Any:
         retries = 0
         retry_limit = max(0, int(os.environ.get("SCENARIO_INFRA_RETRIES", "2")))
@@ -300,6 +304,7 @@ class SuitePool:
                     record_dir=record_dir,
                     repo_dir=repo_dir,
                     max_wall_s=max_wall_s,
+                    min_wall_s=min_wall_s,
                 )
             finally:
                 if watcher is not None:
@@ -339,6 +344,7 @@ class SuitePool:
                 record_dir=record_dir,
                 repo_dir=repo_dir,
                 max_wall_s=max_wall_s,
+                min_wall_s=min_wall_s,
             )
             video_path = getattr(replay, "video_path", None)
             if video_path:
@@ -379,6 +385,7 @@ class SuitePool:
         record_dir: str | Path | None,
         repo_dir: str | Path | None,
         max_wall_s: float | None,
+        min_wall_s: float | None = None,
     ) -> Any:
         slot = await self._acquire(spec.scenario_id, -1)
         try:
@@ -391,6 +398,7 @@ class SuitePool:
                 record_dir=record_dir,
                 repo_dir=repo_dir,
                 max_wall_s=max_wall_s,
+                min_wall_s=min_wall_s,
             )
         finally:
             await self._release(slot, spec.scenario_id)
@@ -406,7 +414,18 @@ class SuitePool:
         record_dir: str | Path | None,
         repo_dir: str | Path | None,
         max_wall_s: float | None,
+        min_wall_s: float | None = None,
     ) -> Any:
+        # Everything this pool runs is live, so a pacing floor applies and the
+        # parent guard has to be measured against the widened budget or it
+        # kills episodes we ourselves asked to run slowly.
+        budget = (
+            float(max_wall_s)
+            if max_wall_s is not None
+            else float(
+                os.environ.get("SCENARIO_TIMEOUT_S", str(DEFAULT_SCENARIO_TIMEOUT_S))
+            )
+        )
         kwargs = {
             "scenario_id": spec.scenario_id,
             "model_path": model_path,
@@ -414,15 +433,8 @@ class SuitePool:
             "params": spec.params,
             "seed": spec.seed,
             "task": task,
-            "max_wall_s": (
-                float(max_wall_s)
-                if max_wall_s is not None
-                else float(
-                    os.environ.get(
-                        "SCENARIO_TIMEOUT_S", str(DEFAULT_SCENARIO_TIMEOUT_S)
-                    )
-                )
-            ),
+            "max_wall_s": effective_max_wall_s(budget, min_wall_s),
+            "min_wall_s": min_wall_s,
             "record": _record_path(
                 self.artifacts_dir, spec.scenario_id, record_dir=record_dir
             )
