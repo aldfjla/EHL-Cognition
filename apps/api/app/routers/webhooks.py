@@ -549,13 +549,7 @@ async def manual_trigger(
         try:
             sha, commit_message = await resolve_branch_head(repo_name, branch)
         except GitHubError as exc:
-            message = str(exc).lower()
-            if exc.status_code == 404 or "repository or branch not found" in message:
-                status_code = 404
-            elif "github_token unset" in message:
-                status_code = 422
-            else:
-                status_code = 502
+            status_code = exc.status_code or 502
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     return await _start_run(

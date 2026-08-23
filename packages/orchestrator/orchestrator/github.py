@@ -187,7 +187,8 @@ async def resolve_branch_head(repo: str, branch: str) -> tuple[str, str]:
     token = os.getenv("GITHUB_TOKEN", "")
     if not token:
         raise GitHubError(
-            "GITHUB_TOKEN unset; add GITHUB_TOKEN to .env to trigger a run"
+            "GITHUB_TOKEN unset; add GITHUB_TOKEN to .env to trigger a run",
+            status_code=422,
         )
 
     url = f"https://api.github.com/repos/{repo}/commits/{branch}"
@@ -204,10 +205,11 @@ async def resolve_branch_head(repo: str, branch: str) -> tuple[str, str]:
     except httpx.HTTPError as exc:
         raise GitHubError(
             f"could not reach GitHub while resolving {repo}@{branch}; "
-            "check the server network connection and try again"
+            "check the server network connection and try again",
+            status_code=502,
         ) from exc
 
-    if response.status_code == 404:
+    if response.status_code in (404, 422):
         raise GitHubError(
             f"GitHub repository or branch not found for {repo}@{branch}; "
             "check the connected repository name and branch",
@@ -216,7 +218,8 @@ async def resolve_branch_head(repo: str, branch: str) -> tuple[str, str]:
     if response.status_code >= 300:
         raise GitHubError(
             f"GitHub could not resolve {repo}@{branch} "
-            f"({response.status_code}); check GITHUB_TOKEN access and try again"
+            f"({response.status_code}); check GITHUB_TOKEN access and try again",
+            status_code=502,
         )
 
     try:
@@ -226,7 +229,8 @@ async def resolve_branch_head(repo: str, branch: str) -> tuple[str, str]:
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise GitHubError(
             f"GitHub returned an invalid commit for {repo}@{branch}; "
-            "check repository access and try again"
+            "check repository access and try again",
+            status_code=502,
         ) from exc
     return sha, message
 

@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from orchestrator.github import GitHubError
 from orchestrator.schemas import Agent, AgentStatus, EventType, Repo, Role, Run, Stage
 
 from app.routers.webhooks import _drive_pipeline, _persist_run_events, verify_signature
@@ -233,24 +234,16 @@ def test_manual_trigger_explicit_sha_skips_github_resolution(
 @pytest.mark.parametrize(
     ("error", "status_code"),
     [
-        ("GITHUB_TOKEN unset; add GITHUB_TOKEN to .env to trigger a run", 422),
-        (
-            (
-                "GitHub repository or branch not found for acme/robot@main; "
-                "check the connected repository name and branch"
-            ),
-            404,
-        ),
+        ("token is unavailable", 422),
+        ("the branch does not exist", 404),
         ("GitHub API unavailable; try again", 502),
     ],
 )
 def test_manual_trigger_maps_github_errors(
     client: TestClient, monkeypatch: Any, error: str, status_code: int
 ) -> None:
-    from orchestrator.github import GitHubError
-
     async def fail(*args: Any) -> tuple[str, str]:
-        raise GitHubError(error)
+        raise GitHubError(error, status_code=status_code)
 
     monkeypatch.setattr("app.routers.webhooks.resolve_branch_head", fail)
 

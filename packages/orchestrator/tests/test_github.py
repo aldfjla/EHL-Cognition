@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Self
+
+import httpx
 import pytest
 from orchestrator import github
 from orchestrator.schemas import Incident, Report, Run, SuiteStats, Verdict
@@ -75,6 +78,69 @@ async def test_dry_run_performs_no_writes(monkeypatch: pytest.MonkeyPatch) -> No
 async def test_set_commit_status_rejects_unknown_states() -> None:
     with pytest.raises(ValueError, match="state must be one of"):
         await github.set_commit_status("acme/x", "a" * 40, "greenish", "ok")
+
+
+async def test_resolve_branch_head_returns_sha_and_subject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = httpx.Response(
+        200,
+        json={
+            "sha": "b" * 40,
+            "commit": {"message": "tune the grasp\nwith more detail"},
+        },
+        request=httpx.Request("GET", "https://api.github.com"),
+    )
+
+    class FakeClient:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def get(self, *args: object, **kwargs: object) -> httpx.Response:
+            return response
+
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setattr(github.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+
+    assert await github.resolve_branch_head("acme/arm-control", "main") == (
+        "b" * 40,
+        "tune the grasp",
+    )
+
+
+async def test_resolve_branch_head_maps_github_422_to_branch_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = httpx.Response(
+        422,
+        json={"message": "No commit found for SHA: missing-branch"},
+        request=httpx.Request("GET", "https://api.github.com"),
+    )
+
+    class FakeClient:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def get(self, *args: object, **kwargs: object) -> httpx.Response:
+            return response
+
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setattr(github.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+
+    with pytest.raises(github.GitHubError) as caught:
+        await github.resolve_branch_head("acme/arm-control", "missing-branch")
+
+    assert caught.value.status_code == 404
+    assert str(caught.value) == (
+        "GitHub repository or branch not found for acme/arm-control@missing-branch; "
+        "check the connected repository name and branch"
+    )
 
 
 def test_render_pr_body_contains_the_before_after_evidence() -> None:
