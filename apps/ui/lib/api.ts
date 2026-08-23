@@ -19,6 +19,7 @@ import type {
   InternalDbTable,
   InternalDbValue,
   Message,
+  MenagerieModelInfo,
   Report,
   Run,
   RunDetail,
@@ -147,6 +148,11 @@ export async function listRepos(): Promise<ConnectedRepo[]> {
   return request<ConnectedRepo[]>("/repos");
 }
 
+/** Available MuJoCo Menagerie models for repository defaults. */
+export async function listModels(): Promise<MenagerieModelInfo[]> {
+  return request<MenagerieModelInfo[]>("/models");
+}
+
 /** Connect a repo. Returns the repo plus webhook setup instructions. */
 export async function connectRepo(body: {
   full_name: string;
@@ -163,7 +169,7 @@ export async function connectRepo(body: {
 /** Update a connected repo's branch or suite size. */
 export async function updateRepo(
   repoId: string,
-  body: { branch?: string; suite_size?: number },
+  body: { branch?: string; suite_size?: number; robot_menagerie?: string },
 ): Promise<ConnectedRepo> {
   return request<ConnectedRepo>(`/repos/${repoId}`, {
     method: "PATCH",

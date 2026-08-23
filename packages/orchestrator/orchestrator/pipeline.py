@@ -186,6 +186,7 @@ class PipelineContext:
     on_config: Callable[[dict], Awaitable[None]] | None = None
     suite_size: int | None = None
     default_suite_size: int = 50
+    default_robot_menagerie: str | None = None
     scenarios: list[Scenario] = field(default_factory=list)
     clusters: list[Cluster] = field(default_factory=list)
     report: Report | None = None
@@ -329,6 +330,13 @@ class Pipeline:
             run.repo, run.commit_sha, run.id, ctx.workspace.root.parent
         )
         ctx.config = await workspace_mod.read_config(ctx.workspace)
+        robot = ctx.config.setdefault("robot", {})
+        if (
+            ctx.default_robot_menagerie
+            and "menagerie" not in robot
+            and "model_path" not in robot
+        ):
+            robot["menagerie"] = ctx.default_robot_menagerie
         if ctx.on_config is not None:
             try:
                 await ctx.on_config(ctx.config)

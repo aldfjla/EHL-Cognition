@@ -104,10 +104,17 @@ export interface ConnectedRepo {
   full_name: string;
   branch: string;
   suite_size: number;
+  robot_menagerie: string;
   created_at: string;
   last_push_at: string | null;
   status: RepoStatus;
   latest_run: { id: string; stage: Stage; created_at: string } | null;
+}
+
+export interface MenagerieModelInfo {
+  name: string;
+  dof: number | null;
+  kind: string;
 }
 
 /** POST /repos response: the repo plus what to paste into GitHub settings. */
