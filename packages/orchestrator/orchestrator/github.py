@@ -1,14 +1,14 @@
-"""GitHub side effects: branches, pull requests and commit status checks.
+"""GitHub operations: branch metadata, branches, pull requests and statuses.
 
 Responsibility
 --------------
-Everything Robot CI writes back to the customer repo. Isolated in one module so
-the blast radius of a bug is one file, and so a dry-run mode can neuter every
-outbound write during rehearsal.
+Everything Robot CI reads from or writes back to the customer repo. Isolated in
+one module so the blast radius of a bug is one file, and so a dry-run mode can
+neuter every outbound write during rehearsal.
 
 Inputs:  a :class:`~orchestrator.workspace.Workspace`, a
          :class:`~orchestrator.schemas.Report`, ``GITHUB_TOKEN``.
-Outputs: a pushed branch, an open PR url, a commit status on the pushed SHA.
+Outputs: a branch HEAD, pushed branch, open PR url, or commit status.
 
 Implementation note: ``gh`` for anything with a CLI equivalent (auth is already
 solved), ``httpx`` against the REST API for status checks, which ``gh`` exposes
@@ -40,11 +40,15 @@ _VALID_STATES = ("pending", "success", "failure", "error")
 
 
 class GitHubError(RuntimeError):
-    """An outbound GitHub write failed. Infrastructure, not a robot failure."""
+    """A GitHub API operation failed. Infrastructure, not a robot failure."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
-async def branch_head(repo: str, branch: str) -> str:
-    """Resolve the current commit at ``branch`` from GitHub."""
+async def branch_head(repo: str, branch: str) -> tuple[str, str]:
+    """Resolve a branch to its current commit SHA and subject line."""
     token = os.getenv("GITHUB_TOKEN", "")
     headers = {
         "Accept": "application/vnd.github+json",
@@ -60,7 +64,10 @@ async def branch_head(repo: str, branch: str) -> str:
                 headers=headers,
             )
     except httpx.HTTPError as exc:
-        raise GitHubError(f"branch head request failed: {exc}") from exc
+        raise GitHubError(
+            f"branch head request failed: {exc}",
+            status_code=502,
+        ) from exc
 
     try:
         payload = response.json()
@@ -71,15 +78,38 @@ async def branch_head(repo: str, branch: str) -> str:
         if isinstance(payload, dict) and payload.get("message")
         else response.text
     )
+    if response.status_code in (404, 422):
+        raise GitHubError(
+            f"GitHub repository or branch not found for {repo}@{branch}; "
+            "check the connected repository name and branch",
+            status_code=404,
+        )
+    if response.status_code in (401, 403):
+        raise GitHubError(
+            f"branch head failed ({response.status_code}): {message}; "
+            "check GITHUB_TOKEN in .env and try again",
+            status_code=502,
+        )
     if not 200 <= response.status_code < 300:
-        raise GitHubError(f"branch head failed ({response.status_code}): {message}")
+        raise GitHubError(
+            f"branch head failed ({response.status_code}): {message}",
+            status_code=502,
+        )
 
     sha = payload.get("sha") if isinstance(payload, dict) else None
     if not isinstance(sha, str) or not sha.strip():
         raise GitHubError(
-            f"branch head failed ({response.status_code}): response missing sha"
+            f"branch head failed ({response.status_code}): response missing sha",
+            status_code=502,
         )
-    return sha.strip()
+    commit = payload.get("commit") if isinstance(payload, dict) else None
+    commit_message = (
+        commit.get("message")
+        if isinstance(commit, dict) and isinstance(commit.get("message"), str)
+        else ""
+    )
+    subject = commit_message.splitlines()[0] if commit_message else ""
+    return sha.strip(), subject
 
 
 def dry_run() -> bool:

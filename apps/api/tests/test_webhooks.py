@@ -13,6 +13,7 @@ import hmac
 import json
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from orchestrator import github
 from orchestrator.schemas import Agent, AgentStatus, EventType, Repo, Role, Run, Stage
@@ -168,6 +169,46 @@ def test_manual_trigger_accepts_json_and_form(client: TestClient) -> None:
     assert from_json.json()["run_id"] != from_form.json()["run_id"]
 
 
+def test_manual_trigger_resolves_connected_branch_head(
+    client: TestClient, db: Any, monkeypatch: Any
+) -> None:
+    connected = repo.create_repo(
+        db, Repo(full_name="acme/robot", branch="develop", suite_size=7)
+    )
+    db.commit()
+    captured: dict[str, Any] = {}
+
+    async def resolve(repo_name: str, branch: str) -> tuple[str, str]:
+        captured.update(repo_name=repo_name, branch=branch)
+        return "e" * 40, "resolve the grasp"
+
+    async def fake_drive(
+        run_id: str, bus: Any, settings: Any, suite_size: int | None = None
+    ) -> None:
+        captured.update(run_id=run_id, suite_size=suite_size)
+
+    monkeypatch.setattr(github, "branch_head", resolve)
+    monkeypatch.setattr("app.routers.webhooks._drive_pipeline", fake_drive)
+
+    response = client.post("/webhooks/manual", json={"repo": "acme/robot"})
+
+    assert response.status_code == 200
+    assert captured == {
+        "repo_name": "acme/robot",
+        "branch": "develop",
+        "run_id": response.json()["run_id"],
+        "suite_size": 7,
+    }
+    with session_scope() as check:
+        stored = repo.get_run(check, response.json()["run_id"])
+    assert stored is not None
+    assert stored.commit_sha == "e" * 40
+    assert stored.commit_message == "resolve the grasp"
+    assert stored.branch == "develop"
+    assert stored.pushed_by == "manual"
+    assert connected.full_name == "acme/robot"
+
+
 def test_manual_trigger_requires_a_repo(client: TestClient, monkeypatch: Any) -> None:
     monkeypatch.setenv("TARGET_REPO", "")
     config.get_settings.cache_clear()
@@ -179,9 +220,9 @@ def test_manual_trigger_resolves_branch_head(
 ) -> None:
     calls: list[tuple[str, str]] = []
 
-    async def fake_branch_head(repo_name: str, branch: str) -> str:
+    async def fake_branch_head(repo_name: str, branch: str) -> tuple[str, str]:
         calls.append((repo_name, branch))
-        return "e" * 40
+        return "e" * 40, "resolve the branch"
 
     monkeypatch.setattr(github, "branch_head", fake_branch_head)
     response = client.post(
@@ -195,14 +236,62 @@ def test_manual_trigger_resolves_branch_head(
         run = repo.get_run(db, response.json()["run_id"])
     assert run is not None
     assert run.commit_sha == "e" * 40
+    assert run.commit_message == "resolve the branch"
     assert run.branch == "release"
+
+
+def test_manual_trigger_explicit_sha_skips_github_resolution(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    async def explode(*args: Any) -> tuple[str, str]:
+        raise AssertionError("explicit SHA must not resolve branch HEAD")
+
+    monkeypatch.setattr(github, "branch_head", explode)
+
+    response = client.post(
+        "/webhooks/manual",
+        json={"repo": "acme/robot", "sha": "c" * 40, "branch": "release"},
+    )
+
+    assert response.status_code == 200
+    with session_scope() as check:
+        stored = repo.get_run(check, response.json()["run_id"])
+    assert stored is not None
+    assert stored.commit_sha == "c" * 40
+    assert stored.commit_message == "manual trigger"
+    assert stored.branch == "release"
+    assert stored.pushed_by == "manual"
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code"),
+    [
+        ("the branch does not exist", 404),
+        ("GitHub API unavailable; try again", 502),
+    ],
+)
+def test_manual_trigger_maps_github_errors(
+    client: TestClient, monkeypatch: Any, error: str, status_code: int
+) -> None:
+    async def fail(*args: Any) -> tuple[str, str]:
+        raise github.GitHubError(error, status_code=status_code)
+
+    monkeypatch.setattr(github, "branch_head", fail)
+
+    response = client.post("/webhooks/manual", json={"repo": "acme/robot"})
+
+    assert response.status_code == status_code
+    assert response.json()["detail"] == error
 
 
 def test_manual_trigger_reports_unresolvable_branch_head(
     client: TestClient, monkeypatch: Any
 ) -> None:
-    async def fail_branch_head(_repo_name: str, _branch: str) -> str:
-        raise github.GitHubError("gh failed")
+    async def fail_branch_head(_repo_name: str, _branch: str) -> tuple[str, str]:
+        raise github.GitHubError(
+            "GitHub repository or branch not found",
+            status_code=404,
+        )
 
     monkeypatch.setattr(github, "branch_head", fail_branch_head)
     response = client.post(
@@ -210,10 +299,8 @@ def test_manual_trigger_reports_unresolvable_branch_head(
         json={"repo": "acme/robot", "branch": "release"},
     )
 
-    assert response.status_code == 422
-    assert response.json()["detail"] == (
-        "could not resolve head of release — provide sha"
-    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "GitHub repository or branch not found"
 
 
 def test_run_created_is_published(client: TestClient, bus: Any) -> None:

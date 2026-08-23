@@ -123,6 +123,14 @@ export interface ConnectRepoResponse {
   webhook: { url: string; secret_configured: boolean };
 }
 
+/** POST /webhooks/manual response: a created or already-running run. */
+export interface TriggerRunResponse {
+  run_id: string;
+  dashboard_url: string;
+  ignored?: string;
+  reason_code?: string;
+}
+
 // ---- internal database browser -------------------------------------------
 
 export interface InternalDbColumn {

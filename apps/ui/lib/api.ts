@@ -25,6 +25,7 @@ import type {
   RunDetail,
   RunEvent,
   Scenario,
+  TriggerRunResponse,
 } from "./types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
@@ -231,11 +232,11 @@ export async function triggerRun(
   repo: string,
   sha?: string,
   branch?: string,
-): Promise<{ run_id: string }> {
+): Promise<TriggerRunResponse> {
   const body: { repo: string; sha?: string; branch?: string } = { repo };
   if (sha !== undefined) body.sha = sha;
   if (branch !== undefined) body.branch = branch;
-  return request<{ run_id: string }>("/webhooks/manual", {
+  return request<TriggerRunResponse>("/webhooks/manual", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),

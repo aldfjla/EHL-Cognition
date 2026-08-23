@@ -16,7 +16,7 @@
 import clsx from "clsx";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import * as api from "@/lib/api";
 import { normalizeRepoInput } from "@/lib/repoInput";
@@ -56,10 +56,13 @@ function RepoCard({
 }) {
   const running = repo.status === "running";
   const router = useRouter();
+  const runBusyRef = useRef(false);
   const [runBusy, setRunBusy] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
 
   const runAnalysis = async (): Promise<void> => {
+    if (runBusyRef.current || running) return;
+    runBusyRef.current = true;
     setRunBusy(true);
     setRunError(null);
     try {
@@ -67,6 +70,7 @@ function RepoCard({
       router.push(`/runs/${result.run_id}`);
     } catch (err) {
       setRunError((err as Error).message);
+      runBusyRef.current = false;
       setRunBusy(false);
     }
   };
@@ -101,7 +105,7 @@ function RepoCard({
         <button
           type="button"
           onClick={() => void runAnalysis()}
-          disabled={runBusy}
+          disabled={runBusy || running}
           className="ml-auto rounded border border-sky-700 px-2 py-1 font-mono text-[10px] text-sky-300 hover:border-sky-500 disabled:cursor-wait disabled:opacity-50"
         >
           {runBusy ? "Starting…" : "Run analysis"}

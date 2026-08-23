@@ -533,7 +533,9 @@ async def manual_trigger(
 
     ``repo``/``sha``/``branch`` are read from a JSON body, a form body or the
     query string, in that order — the README triggers this with a bare
-    ``curl -d`` (which sends form encoding) and the dashboard sends JSON.
+    ``curl -d`` (which sends form encoding) and the dashboard sends JSON. When
+    ``sha`` is absent, the connected repository's branch HEAD is resolved from
+    GitHub.
     """
     fields = await _trigger_fields(request)
     repo_name = fields.get("repo") or settings.target_repo
@@ -544,25 +546,25 @@ async def manual_trigger(
         connected.branch if connected is not None else settings.target_branch
     )
     sha = fields.get("sha") or ""
+    commit_message = "manual trigger"
     if not sha:
         try:
-            sha = await github.branch_head(repo_name, branch)
+            sha, commit_message = await github.branch_head(repo_name, branch)
         except github.GitHubError as exc:
-            raise HTTPException(
-                status_code=422,
-                detail=f"could not resolve head of {branch} — provide sha",
-            ) from exc
+            status_code = exc.status_code or 502
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     return await _start_run(
         repo_name=repo_name,
         sha=sha,
         branch=branch,
-        commit_message="manual trigger",
+        commit_message=commit_message,
         pushed_by="manual",
         db=db,
         bus=bus,
         settings=settings,
         background=background,
+        suite_size=connected.suite_size if connected is not None else None,
     )
 
 
