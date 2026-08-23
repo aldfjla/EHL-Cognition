@@ -161,3 +161,27 @@ def test_cluster_labels_are_human_readable() -> None:
     assert cluster.label
     assert cluster.label == cluster.label.strip()
     assert "\n" not in cluster.label
+
+
+def test_criterion_result_accepts_simkit_scoring_dicts() -> None:
+    """``simkit.scoring.evaluate`` emits ``measured`` (and sometimes ``detail``)."""
+    parsed = CriterionResult.model_validate(
+        {
+            "id": "object_in_bin",
+            "passed": False,
+            "measured": 0.1594,
+            "threshold": 0.05,
+        }
+    )
+    assert parsed.value == 0.1594
+    assert parsed.threshold == 0.05
+    unknown = CriterionResult.model_validate(
+        {
+            "id": "bogus",
+            "passed": False,
+            "measured": None,
+            "threshold": None,
+            "detail": "unknown criterion id 'bogus'; nothing was checked",
+        }
+    )
+    assert unknown.detail is not None and "nothing was checked" in unknown.detail

@@ -32,7 +32,8 @@
           "id": { "type": "string" },
           "passed": { "type": "boolean" },
           "value": { "type": ["number", "string", "null"], "description": "Measured value that was compared." },
-          "threshold": { "type": ["number", "string", "null"] }
+          "threshold": { "type": ["number", "string", "null"] },
+          "detail": { "type": ["string", "null"], "description": "Scorer note, e.g. why nothing was checked." }
         }
       }
     },
