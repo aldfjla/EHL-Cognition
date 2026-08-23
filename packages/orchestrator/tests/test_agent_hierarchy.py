@@ -105,7 +105,11 @@ class FakeClient:
         return {"status": "finished", "messages": []}
 
     async def structured_output(self, _session_id: str) -> dict:
-        return {"diff_summary": "patched", "patched": True}
+        return {
+            "diff_summary": "patched",
+            "patched": True,
+            "patch": "diff --git a/x b/x\n",
+        }
 
 
 async def test_role_dispatch_emits_parent_link(tmp_path: Path) -> None:

@@ -550,3 +550,74 @@ async def test_resolve_model_cache_hit_skips_modeler(
     assert ctx.run.robot_model is not None
     assert ctx.run.robot_model.cache_hit is True
     assert ctx.run.robot_model.provenance == "cache source"
+
+
+# -- stage_build_harness() ---------------------------------------------------- #
+
+
+def _harness_stub_builder(output: dict[str, object]):
+    class StubBuilder:
+        def __init__(self, ctx: PipelineContext) -> None:
+            self.ctx = ctx
+            self.output: dict[str, object] = {}
+
+        async def dispatch(self, **_kwargs: object) -> Agent:
+            self.output = dict(output)
+            return Agent(
+                run_id=self.ctx.run.id,
+                role=Role.HARNESS_BUILDER,
+                title="Test Infrastructure Engineer",
+                task="harness",
+            )
+
+    return StubBuilder
+
+
+def _harness_ctx(tmp_path: Path) -> PipelineContext:
+    ctx = make_ctx(tmp_path)
+    ctx.run.robot_model = pipeline_mod.RobotModel(
+        source="repo", model_path=str(tmp_path / "model.xml")
+    )
+    return ctx
+
+
+async def test_build_harness_materializes_returned_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent works remotely: its harness arrives as source, not a file."""
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    ctx = _harness_ctx(tmp_path)
+    pipe = Pipeline(ctx)
+    code = "def run_episode(model, data, params):\n    return None\n"
+    monkeypatch.setattr(
+        pipeline_mod,
+        "HarnessBuilderAgent",
+        _harness_stub_builder({"harness_path": "harness.py", "harness_code": code}),
+    )
+
+    from simkit import runner
+
+    def fake_run_scenario(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(status="passed", error=None)
+
+    monkeypatch.setattr(runner, "run_scenario", fake_run_scenario)
+
+    assert await pipe.stage_build_harness() is Stage.DESIGN_SCENARIOS
+    written = tmp_path / "artifacts" / ctx.run.id / "harness.py"
+    assert written.read_text(encoding="utf-8") == code
+
+
+async def test_build_harness_without_code_is_a_pipeline_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    ctx = _harness_ctx(tmp_path)
+    pipe = Pipeline(ctx)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "HarnessBuilderAgent",
+        _harness_stub_builder({"harness_path": "harness.py"}),
+    )
+
+    with pytest.raises(PipelineError, match="no harness_code"):
+        await pipe.stage_build_harness()
