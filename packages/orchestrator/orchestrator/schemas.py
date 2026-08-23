@@ -20,7 +20,7 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -277,6 +277,18 @@ class CriterionResult(_Base):
     passed: bool
     value: float | str | None = None
     threshold: float | str | None = None
+    detail: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_measured(cls, data: Any) -> Any:
+        """``simkit.scoring`` calls the measured quantity ``measured``."""
+        if isinstance(data, dict) and "measured" in data:
+            data = dict(data)
+            measured = data.pop("measured")
+            if data.get("value") is None:
+                data["value"] = measured
+        return data
 
 
 class Ref(_Base):

@@ -354,6 +354,7 @@ CANNED_OUTPUT: dict[Role, dict[str, Any]] = {
     },
     Role.HARNESS_BUILDER: {
         "harness_path": "harness.py",
+        "harness_code": "def run_episode(model, data, params):\n    ...\n",
         "smoke_passed": True,
         "interface_notes": "joint_position commands map onto position actuators.",
         "shims": ["Faked `arm_driver.ArmClient` with a MuJoCo-backed stub"],

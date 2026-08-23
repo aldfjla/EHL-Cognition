@@ -35,7 +35,7 @@ class HarnessBuilderAgent(RoleAgent):
     role = Role.HARNESS_BUILDER
     prompt_file = "harness_builder.md"
     display_name = "Test Infrastructure Engineer"
-    required_keys = ("harness_path", "interface_notes")
+    required_keys = ("harness_path", "harness_code", "interface_notes")
 
     def template_vars(self, **kwargs: Any) -> dict[str, Any]:
         """Substitutions for ``devin/prompts/harness_builder.md``."""

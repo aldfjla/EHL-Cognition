@@ -247,6 +247,7 @@ export interface CriterionResult {
   passed: boolean;
   value?: number | string | null;
   threshold?: number | string | null;
+  detail?: string | null;
 }
 
 export interface Scenario {

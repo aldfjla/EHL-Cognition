@@ -10,7 +10,13 @@ hardware. Nobody else on the team can start until this works.
 The developer's entrypoint is `{{entrypoint}}`, which expects to talk to
 hardware over the `{{interface}}` interface at {{rate_hz}} Hz.
 
-Write an adapter at `{{harness_out_path}}` that:
+You work on your own machine; the orchestrator cannot read files you write
+there. Develop the adapter locally, then return its **complete source** in the
+`harness_code` field of your structured output — the orchestrator writes it to
+`{{harness_out_path}}` itself and smoke-tests it. The adapter must be a single
+self-contained module.
+
+Write an adapter that:
 
 1. Imports their entrypoint **unmodified**. You may not edit their code — a
    harness that only works after changing the code under test is not a test.
@@ -52,6 +58,7 @@ Paste the joint trajectory of your smoke test into your final message.
 ```json
 {
   "harness_path": "/abs/path/to/harness.py",
+  "harness_code": "# the complete harness module source, JSON-escaped",
   "smoke_passed": true,
   "interface_notes": "How their commands map to actuators",
   "shims": ["Faked `arm_driver.ArmClient` with a MuJoCo-backed stub"],
@@ -61,3 +68,5 @@ Paste the joint trajectory of your smoke test into your final message.
 ```
 
 `constraints` becomes a blackboard entry every later agent must respect.
+`harness_code` is the deliverable: without it the stage fails, no matter how
+well the smoke test went on your machine.

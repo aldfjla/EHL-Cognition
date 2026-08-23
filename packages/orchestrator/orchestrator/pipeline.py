@@ -448,17 +448,24 @@ class Pipeline:
         ctx = self.ctx
         control = ctx.config.get("control", {})
         harness_path = self._artifacts / HARNESS_FILENAME
-        agent = await HarnessBuilderAgent(ctx).dispatch(
+        builder = HarnessBuilderAgent(ctx)
+        agent = await builder.dispatch(
             entrypoint=control.get("entrypoint", ""),
             interface=control.get("interface", ""),
             rate_hz=control.get("rate_hz", 100),
             model_path=self._model_path(),
             harness_out_path=str(harness_path),
         )
+        # The agent works on its own machine: the harness arrives as source in
+        # the structured output, not as a file on this disk.
+        harness_code = str(builder.output.get("harness_code") or "")
+        if harness_code.strip():
+            harness_path.parent.mkdir(parents=True, exist_ok=True)
+            harness_path.write_text(harness_code, encoding="utf-8")
         if not harness_path.exists():
             raise PipelineError(
-                f"Harness Builder wrote no harness at {harness_path} "
-                f"(agent status {agent.status.value}, "
+                f"Harness Builder returned no harness_code and no file exists "
+                f"at {harness_path} (agent status {agent.status.value}, "
                 f"session {agent.session_url or 'unknown'})"
             )
 
@@ -745,7 +752,7 @@ class Pipeline:
                 role,
                 issue=work.cause.summary,
                 step="fixing",
-                root_cause=work.cause.summary,
+                root_cause=work.cause,
                 finding_id=work.cause.id,
                 cluster_id=work.cluster.id,
                 files=work.cause.files,
@@ -760,6 +767,17 @@ class Pipeline:
             work.outcome = "unresolved"
             self._set_cluster_phase(work, "unresolved")
             return
+        # The fixer works on its own machine and hands back a diff; the
+        # worktree only contains the fix once that diff is applied here.
+        patch = str(role.output.get("patch") or "")
+        if patch.strip():
+            try:
+                await workspace_mod.apply_patch(ctx.workspace, name, patch)
+            except Exception as exc:  # noqa: BLE001 - a bad diff is agent error
+                await self._nonfatal(f"cluster {work.cluster.label} patch apply", exc)
+                work.outcome = "unresolved"
+                self._set_cluster_phase(work, "unresolved")
+                return
         cluster_scenarios = self._cluster_scenarios(work)
         seed_results = await self._execute_cluster_suite(
             cluster_scenarios, repo_dir=path

@@ -57,6 +57,16 @@ class FixerAgent(RoleAgent):
             "reviewer_notes": kwargs.get("reviewer_notes"),
         }
 
+    def validate_output(self, output: dict[str, Any]) -> dict[str, Any]:
+        """A claimed fix must carry the diff the orchestrator can apply."""
+        cleaned = super().validate_output(output)
+        if cleaned.get("patched") and not str(cleaned.get("patch") or "").strip():
+            raise ValueError(
+                "patched is true but patch is empty; include the unified git "
+                "diff in the patch field"
+            )
+        return cleaned
+
     def to_findings(self, agent: Agent, output: dict[str, Any]) -> list[Finding]:
         """Convert structured output into blackboard findings."""
         confidence = float(output.get("confidence", 0.5) or 0.5)
