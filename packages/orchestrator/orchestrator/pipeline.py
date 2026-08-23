@@ -752,7 +752,7 @@ class Pipeline:
                 role,
                 issue=work.cause.summary,
                 step="fixing",
-                root_cause=work.cause.summary,
+                root_cause=work.cause,
                 finding_id=work.cause.id,
                 cluster_id=work.cluster.id,
                 files=work.cause.files,

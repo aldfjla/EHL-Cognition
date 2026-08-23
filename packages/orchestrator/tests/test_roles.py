@@ -134,6 +134,26 @@ def test_fixer_rejects_a_claimed_fix_without_a_diff(ctx: PipelineContext) -> Non
     assert role.validate_output(output)["patch"].startswith("diff --git")
 
 
+def test_fixer_template_vars_accept_a_finding_root_cause(
+    ctx: PipelineContext,
+) -> None:
+    """The pipeline hands the Fixer the confirmed root-cause Finding itself."""
+    cause = Finding(
+        run_id=ctx.run.id,
+        author_agent_id="agt-1",
+        author_role=Speaker.INVESTIGATOR,
+        kind=FindingKind.ROOT_CAUSE,
+        summary="wrist target sends radians into a degree field",
+        detail="src/sock_pick.py:33 converts twice",
+        files=["src/sock_pick.py"],
+    )
+    variables = FixerAgent(ctx).template_vars(
+        root_cause=cause, worktree="/tmp/wt", cluster_id="cls-7"
+    )
+    assert variables["root_cause"] == "src/sock_pick.py:33 converts twice"
+    assert variables["files"] == ["src/sock_pick.py"]
+
+
 def test_fixer_confidence_capped_when_not_patched(ctx: PipelineContext) -> None:
     output = dict(CANNED_OUTPUT[Role.FIXER], patched=False, confidence=0.9)
     patch = next(
