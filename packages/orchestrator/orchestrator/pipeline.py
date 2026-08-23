@@ -490,6 +490,7 @@ class Pipeline:
             seed=self._base_seed(),
             task=ctx.config.get("task", {}),
             record=False,
+            repo_dir=str(ctx.workspace.base),
         )
         if smoke.status == "error":
             raise PipelineError(f"harness smoke test errored: {smoke.error}")
@@ -560,7 +561,9 @@ class Pipeline:
         No agents involved. Emits ``suite.progress`` as cells complete so the
         matrix fills in live. Returns ``PASSED_CLEAN`` when nothing failed.
         """
-        results = await self._execute_suite(self.ctx.scenarios)
+        results = await self._execute_suite(
+            self.ctx.scenarios, repo_dir=self.ctx.workspace.base
+        )
         self._before_results = results
         stats = self._apply_results(self.ctx.scenarios, results)
         self.ctx.run.suite = stats

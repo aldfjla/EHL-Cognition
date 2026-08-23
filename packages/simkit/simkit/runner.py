@@ -101,6 +101,7 @@ def run_scenario(
     live: bool = False,
     live_frame_path: str | None = None,
     progress_path: str | None = None,
+    repo_dir: str | None = None,
     on_observe: Callable[[dict[str, Any]], None] | None = None,
     observe_hz: float = 2.0,
     worker_id: str | None = None,
@@ -143,6 +144,8 @@ def run_scenario(
     )
     scene = None
     try:
+        if repo_dir:
+            _expose_repo(repo_dir)
         harness = load_harness(harness_path)
         scene = scene_mod.build(
             scene_mod.SceneSpec(
@@ -235,6 +238,38 @@ def run_scenario(
             live_writer.close()
         result.duration_s = round(time.perf_counter() - started, 4)
     return result
+
+
+def _expose_repo(repo_dir: str) -> None:
+    """Point the harness at the checkout under test.
+
+    Cluster verification runs execute against a patched worktree, not the base
+    clone; the harness imports the customer's code from ``ROBOTCI_REPO_DIR``
+    (or a plain import via ``sys.path``), so both must name that worktree.
+    """
+    resolved = str(Path(repo_dir).resolve())
+    os.environ["ROBOTCI_REPO_DIR"] = resolved
+    if resolved not in sys.path:
+        sys.path.insert(0, resolved)
+    # The customer's modules may already be imported from another checkout in
+    # this worker process; evict them so the harness re-imports from the
+    # requested worktree.
+    for name, module in list(sys.modules.items()):
+        module_file = getattr(module, "__file__", None)
+        if not module_file:
+            continue
+        try:
+            in_repo = Path(module_file).resolve().is_relative_to(resolved)
+        except (OSError, ValueError):
+            continue
+        if not in_repo and _under_any_repo_checkout(module_file):
+            del sys.modules[name]
+
+
+def _under_any_repo_checkout(module_file: str) -> bool:
+    """Whether the module was imported from a workspace checkout/worktree."""
+    parts = Path(module_file).resolve().parts
+    return "workspaces" in parts
 
 
 def load_harness(harness_path: str) -> Any:

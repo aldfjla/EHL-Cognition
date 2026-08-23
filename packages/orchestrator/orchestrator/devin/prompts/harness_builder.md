@@ -18,6 +18,12 @@ self-contained module. The smoke test rejects a harness whose episode never
 advances simulated time: `run_episode` must actually step MuJoCo
 (`mujoco.mj_step`) for the full episode, not return early.
 
+When the orchestrator executes your harness it sets the environment variable
+`ROBOTCI_REPO_DIR` to the checkout under test and puts that directory on
+`sys.path` — later stages run the suite against patched worktrees at other
+paths, so import the developer's code through those, never a path hardcoded
+from your machine.
+
 Write an adapter that:
 
 1. Imports their entrypoint **unmodified**. You may not edit their code — a
@@ -60,7 +66,7 @@ Paste the joint trajectory of your smoke test into your final message.
 ```json
 {
   "harness_path": "/abs/path/to/harness.py",
-  "harness_code": "# the complete harness module source, JSON-escaped",
+  "harness_code": "import mujoco\n...the ENTIRE module source, not a placeholder...\ndef run_episode(model, data, params):\n    ...",
   "smoke_passed": true,
   "interface_notes": "How their commands map to actuators",
   "shims": ["Faked `arm_driver.ArmClient` with a MuJoCo-backed stub"],
@@ -70,5 +76,7 @@ Paste the joint trajectory of your smoke test into your final message.
 ```
 
 `constraints` becomes a blackboard entry every later agent must respect.
-`harness_code` is the deliverable: without it the stage fails, no matter how
-well the smoke test went on your machine.
+`harness_code` is the deliverable: paste the complete text of your harness
+module into that field. It is rejected unless it defines `run_episode`.
+A file attachment or a path on your machine does not count — the orchestrator
+only reads the structured output.
