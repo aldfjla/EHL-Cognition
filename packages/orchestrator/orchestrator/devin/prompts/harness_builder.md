@@ -14,7 +14,9 @@ You work on your own machine; the orchestrator cannot read files you write
 there. Develop the adapter locally, then return its **complete source** in the
 `harness_code` field of your structured output — the orchestrator writes it to
 `{{harness_out_path}}` itself and smoke-tests it. The adapter must be a single
-self-contained module.
+self-contained module. The smoke test rejects a harness whose episode never
+advances simulated time: `run_episode` must actually step MuJoCo
+(`mujoco.mj_step`) for the full episode, not return early.
 
 Write an adapter that:
 

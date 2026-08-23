@@ -218,6 +218,103 @@ async def test_fixer_claim_does_not_resolve_failed_cluster(
     assert work.outcome == "unresolved"
 
 
+async def test_partial_fix_with_a_diff_is_still_applied_and_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An honest ``patched: false`` that carries a diff is not thrown away."""
+    ctx = make_context(tmp_path)
+    pipe = Pipeline(ctx)
+    await pipe.stage_cluster_failures()
+    work = next(iter(pipe._cluster_work.values()))
+    agent = Agent(run_id=ctx.run.id, role=Role.INVESTIGATOR)
+    cause = Finding(
+        run_id=ctx.run.id,
+        author_agent_id=agent.id,
+        author_role=Speaker.INVESTIGATOR,
+        kind=FindingKind.ROOT_CAUSE,
+        summary="partial cause",
+        cluster_id=work.cluster.id,
+        confidence=0.9,
+    )
+    await ctx.blackboard.write(cause)
+    work.cause = cause
+    work.phase = "root_cause"
+
+    class Fixer:
+        def __init__(self, _ctx: PipelineContext) -> None:
+            self.session = None
+            self.output = {"patched": False, "patch": "diff --git a/x b/x\n"}
+
+        async def dispatch(self, **_kwargs: object) -> Agent:
+            return Agent(run_id=ctx.run.id, role=Role.FIXER)
+
+    applied: list[str] = []
+
+    async def create_worktree(*_args: object, **_kwargs: object) -> Path:
+        return tmp_path / "fix"
+
+    async def apply_patch(_ws: object, _name: str, patch: str) -> None:
+        applied.append(patch)
+
+    async def execute_suite(
+        scenarios: list[Scenario], repo_dir: Path | None = None
+    ) -> list[SimpleNamespace]:
+        del repo_dir
+        return [result(scenario.id, scenario.seed, "passed") for scenario in scenarios]
+
+    monkeypatch.setattr(pipeline_mod, "FixerAgent", Fixer)
+    monkeypatch.setattr(pipeline_mod.workspace_mod, "create_worktree", create_worktree)
+    monkeypatch.setattr(pipeline_mod.workspace_mod, "apply_patch", apply_patch)
+    monkeypatch.setattr(pipe, "_execute_cluster_suite", execute_suite)
+
+    await pipe._fix_cluster(work)
+
+    assert applied == ["diff --git a/x b/x\n"]
+    assert work.phase != "unresolved"
+
+
+async def test_fixer_without_patch_or_claim_is_unresolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``patched: false`` with no diff still short-circuits to unresolved."""
+    ctx = make_context(tmp_path)
+    pipe = Pipeline(ctx)
+    await pipe.stage_cluster_failures()
+    work = next(iter(pipe._cluster_work.values()))
+    agent = Agent(run_id=ctx.run.id, role=Role.INVESTIGATOR)
+    cause = Finding(
+        run_id=ctx.run.id,
+        author_agent_id=agent.id,
+        author_role=Speaker.INVESTIGATOR,
+        kind=FindingKind.ROOT_CAUSE,
+        summary="no fix",
+        cluster_id=work.cluster.id,
+        confidence=0.9,
+    )
+    await ctx.blackboard.write(cause)
+    work.cause = cause
+    work.phase = "root_cause"
+
+    class Fixer:
+        def __init__(self, _ctx: PipelineContext) -> None:
+            self.session = None
+            self.output = {"patched": False}
+
+        async def dispatch(self, **_kwargs: object) -> Agent:
+            return Agent(run_id=ctx.run.id, role=Role.FIXER)
+
+    async def create_worktree(*_args: object, **_kwargs: object) -> Path:
+        return tmp_path / "fix"
+
+    monkeypatch.setattr(pipeline_mod, "FixerAgent", Fixer)
+    monkeypatch.setattr(pipeline_mod.workspace_mod, "create_worktree", create_worktree)
+
+    await pipe._fix_cluster(work)
+
+    assert work.phase == "unresolved"
+    assert work.outcome == "unresolved"
+
+
 async def test_one_fixer_failure_does_not_cancel_other_clusters(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
