@@ -29,6 +29,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from app.config import get_settings
 from app.store import tables  # noqa: F401  (registers the tables on SQLModel.metadata)
+from app.store.migrate import repair_schema
 
 #: How long a writer waits on a locked database before giving up.
 BUSY_TIMEOUT_MS = 5000
@@ -74,7 +75,15 @@ def reset_engine() -> None:
 
 def init_db() -> None:
     """Create tables if absent. Called from the app lifespan."""
-    SQLModel.metadata.create_all(get_engine())
+    engine = get_engine()
+    SQLModel.metadata.create_all(engine)
+    if not _is_sqlite(get_settings().database_url):
+        return
+    connection = engine.raw_connection()
+    try:
+        repair_schema(connection, apply=True)
+    finally:
+        connection.close()
 
 
 @contextmanager
@@ -89,8 +98,3 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         session.close()
-
-
-# NOTE: schema evolution is `create_all` only. That is honest while the schema
-# churns; the moment a demo database has to survive a column change, add alembic
-# rather than teaching this module to ALTER TABLE by hand.
