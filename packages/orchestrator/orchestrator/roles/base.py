@@ -63,6 +63,10 @@ PLACEHOLDER = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 #: Rendered in place of a variable no role supplied.
 MISSING = "(not provided)"
 
+#: No role is dispatched with less than this, even when the run deadline is
+#: nearly spent: a session that cannot possibly answer is worse than none.
+MIN_AGENT_TIMEOUT_S = 60.0
+
 #: Sent when the first structured output does not satisfy ``validate_output``.
 RETRY_REMINDER = (
     "Your structured output was rejected: {reason}. Post a single fenced json "
@@ -228,6 +232,12 @@ class RoleAgent(ABC):
         timeout_s = float(
             kwargs.get("timeout_s") or os.getenv("AGENT_TIMEOUT_S", "1800")
         )
+        # The run has a wall-clock ceiling; a role may not outlive it. Waiting
+        # 30 minutes on a session the run will never read is how a pipeline
+        # advertised as ten minutes takes an hour.
+        remaining = self.ctx.remaining_s()
+        if remaining is not None:
+            timeout_s = max(MIN_AGENT_TIMEOUT_S, min(timeout_s, remaining))
         session = await AgentSession.start(
             run_id=self.ctx.run.id,
             role=self.role,

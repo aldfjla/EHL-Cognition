@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from multiprocessing.context import BaseContext
 from typing import Any, Self
 
-from simkit.runner import EpisodeResult, run_scenario
+from simkit.runner import EpisodeResult, effective_max_wall_s, run_scenario
 
 DEFAULT_MP_CONTEXT = "spawn"
 PARENT_WATCHDOG_GRACE_S = 10.0
@@ -47,7 +47,13 @@ class Job:
     live: bool = False
     observe_hz: float = 2.0
     max_wall_s: float = 60.0
+    #: Wall-clock floor for a live episode; ``None`` takes the simkit default.
+    min_wall_s: float | None = None
     job_id: str = ""
+
+    def watchdog_s(self) -> float:
+        """The budget both the worker and the parent guard measure against."""
+        return effective_max_wall_s(self.max_wall_s, self.min_wall_s, live=self.live)
 
 
 def _worker_loop(task_queue: Any, event_queue: Any, worker_id: str) -> None:
@@ -82,6 +88,7 @@ def _worker_loop(task_queue: Any, event_queue: Any, worker_id: str) -> None:
             task=job.task,
             record=job.record,
             max_wall_s=job.max_wall_s,
+            min_wall_s=job.min_wall_s,
             live=job.live,
             on_observe=observe,
             observe_hz=job.observe_hz,
@@ -252,6 +259,9 @@ class WorkerPool:
                         live=bool(job.live),
                         observe_hz=float(job.observe_hz),
                         max_wall_s=float(job.max_wall_s),
+                        min_wall_s=(
+                            None if job.min_wall_s is None else float(job.min_wall_s)
+                        ),
                         job_id=job_id,
                     )
                 )
@@ -493,7 +503,7 @@ class WorkerPool:
             started = slot.job_started_at
             if job is None or started is None:
                 continue
-            if now - started <= float(job.max_wall_s) + PARENT_WATCHDOG_GRACE_S:
+            if now - started <= job.watchdog_s() + PARENT_WATCHDOG_GRACE_S:
                 continue
             entry = self._jobs.pop(job.job_id, None)
             if entry is None:
@@ -506,7 +516,7 @@ class WorkerPool:
                 error_kind="timeout",
                 error=(
                     "parent watchdog expired after "
-                    f"{float(job.max_wall_s) + PARENT_WATCHDOG_GRACE_S:.1f}s"
+                    f"{job.watchdog_s() + PARENT_WATCHDOG_GRACE_S:.1f}s"
                 ),
                 worker_id=slot.worker_id,
             )

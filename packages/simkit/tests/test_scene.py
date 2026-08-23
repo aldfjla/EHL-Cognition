@@ -152,3 +152,37 @@ def test_gripper_site_does_not_use_unrelated_base_site() -> None:
         """
     )
     assert scene_mod._gripper_site(model) is None
+
+
+def test_end_effector_body_is_the_jaw_subtree_not_the_wrist_camera(
+    menagerie_dir,
+) -> None:
+    """The SO-101 hangs a camera off the hand at the same depth as the jaw.
+
+    Picking it makes gripper_object_dist measure the camera housing and lets
+    the jaw closing on the object count as an unintended collision.
+    """
+    model_path = menagerie_dir / "robotstudio_so101" / "so101.xml"
+    model = mujoco.MjModel.from_xml_path(str(model_path))
+    body_id = scene_mod._end_effector_body(model)
+    assert body_id is not None
+    assert mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) == "gripper"
+
+
+def test_end_effector_body_skips_payloads_without_a_tool_site() -> None:
+    model = mujoco.MjModel.from_xml_string(
+        """
+        <mujoco>
+          <worldbody>
+            <body name="base">
+              <body name="link1">
+                <body name="camera_mount"/>
+                <body name="moving_jaw"/>
+              </body>
+            </body>
+          </worldbody>
+        </mujoco>
+        """
+    )
+    body_id = scene_mod._end_effector_body(model)
+    assert mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) == "moving_jaw"

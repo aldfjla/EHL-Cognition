@@ -52,6 +52,16 @@ DEFAULT_RATE_HZ = 100
 DEFAULT_SIM_LIMIT_S = 12.0
 #: Parent and in-worker guards allow a healthy episode generous realtime slack.
 DEFAULT_SCENARIO_TIMEOUT_S = 60.0
+#: Wall-clock an episode should occupy when its frames are being watched.
+#: Physics is far faster than the robot, so an unpaced episode publishes one or
+#: two live frames and is over before the dashboard has drawn the tile. Off by
+#: default like SIMKIT_REALTIME_FACTOR, so batch suites and tests stay fast;
+#: .env.example turns it on for a deployment whose feeds are watched.
+DEFAULT_MIN_EPISODE_WALL_S = 0.0
+#: Head-room between a paced episode's expected length and the watchdog. The
+#: guard exists to catch a controller that is not advancing the simulation; it
+#: must not fire on an episode we ourselves slowed down.
+WATCHDOG_MARGIN_S = 15.0
 
 
 @dataclass
@@ -77,6 +87,44 @@ class EpisodeResult:
     worker_id: str | None = None
 
 
+def _env_float(name: str, default: float) -> float:
+    """Read a non-negative float from the environment, ignoring nonsense."""
+    try:
+        return max(0.0, float(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def min_episode_wall_s(min_wall_s: float | None = None) -> float:
+    """The wall-clock floor for one live episode, in seconds. 0 disables it."""
+    if min_wall_s is not None:
+        return max(0.0, float(min_wall_s))
+    return _env_float("SIMKIT_MIN_EPISODE_WALL_S", DEFAULT_MIN_EPISODE_WALL_S)
+
+
+def effective_max_wall_s(
+    max_wall_s: float, min_wall_s: float | None = None, *, live: bool = True
+) -> float:
+    """Widen a watchdog budget so it outlasts a deliberately paced episode.
+
+    Callers that supervise a scenario from outside the worker — the pools —
+    must agree with :func:`run_scenario` on the budget, or the parent kills a
+    run the worker considers healthy.
+    """
+    floor = min_episode_wall_s(min_wall_s) if live else 0.0
+    if floor <= 0.0:
+        return float(max_wall_s)
+    return max(float(max_wall_s), floor + WATCHDOG_MARGIN_S)
+
+
+def _realtime_factor(sim_limit_s: float, floor_s: float) -> float:
+    """Pacing factor that satisfies both the env override and the floor."""
+    configured = _env_float("SIMKIT_REALTIME_FACTOR", 0.0)
+    if floor_s > 0.0 and sim_limit_s > 0.0:
+        return max(configured, floor_s / sim_limit_s)
+    return configured
+
+
 class WatchdogExpired(RuntimeError):
     """The wall-clock guard fired: our problem, reported as ``error``."""
 
@@ -99,6 +147,7 @@ def run_scenario(
     task: dict[str, Any],
     record: bool = False,
     max_wall_s: float = DEFAULT_SCENARIO_TIMEOUT_S,
+    min_wall_s: float | None = None,
     live: bool = False,
     live_frame_path: str | None = None,
     progress_path: str | None = None,
@@ -110,6 +159,9 @@ def run_scenario(
     """Execute one scenario end to end.
 
     ``record`` turns video on; pass a path string to choose the output file.
+    ``min_wall_s`` is the wall-clock floor for a live episode; it paces the
+    simulation and pushes the watchdog out to match. It is ignored when nothing
+    is watching, because batch suites and tests want full speed.
 
     Deterministic: the same arguments always produce the same result. Any source
     of nondeterminism introduced here (thread scheduling, unseeded RNG, wall
@@ -143,6 +195,10 @@ def run_scenario(
         if live or live_frame_path is not None
         else None
     )
+    paced = live_writer is not None
+    floor_s = min_episode_wall_s(min_wall_s) if paced else 0.0
+    max_wall_s = effective_max_wall_s(max_wall_s, min_wall_s, live=paced)
+
     scene = None
     try:
         if repo_dir:
@@ -176,6 +232,7 @@ def run_scenario(
             rate_hz=rate_hz,
             sim_limit_s=sim_limit,
             deadline=started + float(max_wall_s),
+            realtime_factor=_realtime_factor(sim_limit, floor_s),
             recorder=recorder,
             live_writer=live_writer,
             on_observe=on_observe,
@@ -399,6 +456,7 @@ class _EpisodeLoop:
         rate_hz: int,
         sim_limit_s: float,
         deadline: float,
+        realtime_factor: float | None = None,
         recorder: Any = None,
         live_writer: LiveFrameWriter | None = None,
         on_observe: Callable[[dict[str, Any]], None] | None = None,
@@ -425,10 +483,11 @@ class _EpisodeLoop:
         )
         self._frame_every = max(1, round(rate_hz / 30))
         self._last_observe: float | None = None
-        try:
-            self._realtime_factor = float(os.environ.get("SIMKIT_REALTIME_FACTOR", "0"))
-        except ValueError:
-            self._realtime_factor = 0.0
+        self._realtime_factor = (
+            _env_float("SIMKIT_REALTIME_FACTOR", 0.0)
+            if realtime_factor is None
+            else max(0.0, float(realtime_factor))
+        )
         self._wall_start = time.monotonic()
         collect_trace(scene, 0, trace)
         self._capture(force=True)
@@ -455,7 +514,8 @@ class _EpisodeLoop:
         two frames to publish and nothing for a viewer to watch. Setting
         SIMKIT_REALTIME_FACTOR to 1 makes an episode take about as long as the
         robot would; 2 runs at half speed. Unset or 0 keeps full speed, which
-        is what batch suites and tests want.
+        is what batch suites and tests want. ``min_wall_s`` raises the factor
+        further so a short episode still fills the wall-clock floor.
         """
         if self._realtime_factor <= 0.0:
             return

@@ -76,6 +76,7 @@ def get_devin() -> DevinClient:
             api_base=settings.devin_api_base,
             max_parallel=settings.max_parallel_agents,
             org_id=settings.devin_org_id.strip() or None,
+            model=settings.devin_model.strip(),
         )
     return _devin
 
