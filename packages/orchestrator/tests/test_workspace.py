@@ -38,6 +38,23 @@ def test_layout_separates_the_clone_from_worktrees(tmp_path: Path) -> None:
     assert ws.worktree("fix-cls_1") != ws.worktree("verify")
 
 
+async def test_worktrees_land_outside_base_for_a_relative_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative root must not nest worktrees inside the clone.
+
+    ``git worktree add`` runs with ``cwd=base``, so a relative destination
+    resolves against the clone and later ``cwd=ws.worktree(name)`` misses it.
+    """
+    monkeypatch.chdir(tmp_path)
+    ws = await make_repo(Path("runs"))
+    worktree = await ws_mod.create_worktree(ws, "fix-cls_1", "robotci/fix-cls_1")
+
+    assert worktree == ws.worktree("fix-cls_1")
+    assert worktree.is_dir()
+    assert ws.base not in worktree.parents
+
+
 async def test_read_config_returns_empty_dict_when_absent(tmp_path: Path) -> None:
     ws = await make_repo(tmp_path)
     assert await read_config(ws) == {}

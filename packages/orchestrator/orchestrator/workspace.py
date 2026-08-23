@@ -50,6 +50,12 @@ class Workspace:
     commit_sha: str
     root: Path
 
+    def __post_init__(self) -> None:
+        # Worktrees are created by a ``git worktree add`` run inside ``base``,
+        # so a relative root would place them under ``base`` while every later
+        # ``cwd`` built from it resolves against the process directory instead.
+        self.root = Path(self.root).resolve()
+
     @property
     def base(self) -> Path:
         """Pristine checkout at the pushed SHA. Never written to."""
