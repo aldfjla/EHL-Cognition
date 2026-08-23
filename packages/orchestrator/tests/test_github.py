@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Self
+
+import httpx
 import pytest
 from orchestrator import github
 from orchestrator.schemas import Incident, Report, Run, SuiteStats, Verdict
@@ -75,6 +78,91 @@ async def test_dry_run_performs_no_writes(monkeypatch: pytest.MonkeyPatch) -> No
 async def test_set_commit_status_rejects_unknown_states() -> None:
     with pytest.raises(ValueError, match="state must be one of"):
         await github.set_commit_status("acme/x", "a" * 40, "greenish", "ok")
+
+
+async def test_branch_head_reads_github_api_with_optional_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            seen["timeout"] = timeout
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, url: str, *, headers: dict[str, str]) -> httpx.Response:
+            seen["url"] = url
+            seen["headers"] = headers
+            return httpx.Response(200, json={"sha": "a" * 40})
+
+    monkeypatch.setenv("GITHUB_TOKEN", "secret")
+    monkeypatch.setattr(github.httpx, "AsyncClient", FakeClient)
+
+    assert await github.branch_head("acme/robot", "feature/demo") == "a" * 40
+    assert seen == {
+        "timeout": 10.0,
+        "url": "https://api.github.com/repos/acme/robot/commits/feature/demo",
+        "headers": {
+            "Authorization": "Bearer secret",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    }
+
+
+async def test_branch_head_reports_github_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout == 10.0
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, url: str, *, headers: dict[str, str]) -> httpx.Response:
+            return httpx.Response(404, json={"message": "Not Found"})
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(github.httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(
+        github.GitHubError, match=r"branch head failed \(404\): Not Found"
+    ):
+        await github.branch_head("acme/robot", "missing")
+
+
+async def test_branch_head_rejects_response_without_sha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout == 10.0
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def get(self, url: str, *, headers: dict[str, str]) -> httpx.Response:
+            return httpx.Response(200, json={"message": "sha unavailable"})
+
+    monkeypatch.setattr(github.httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(
+        github.GitHubError,
+        match=r"branch head failed \(200\): response missing sha",
+    ):
+        await github.branch_head("acme/robot", "main")
 
 
 def test_render_pr_body_contains_the_before_after_evidence() -> None:
