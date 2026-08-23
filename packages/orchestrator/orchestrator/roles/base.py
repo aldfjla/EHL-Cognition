@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -224,7 +225,9 @@ class RoleAgent(ABC):
         not this method.
         """
         prompt = self.render_prompt(**kwargs)
-        timeout_s = float(kwargs.get("timeout_s", 1800.0))
+        timeout_s = float(
+            kwargs.get("timeout_s") or os.getenv("AGENT_TIMEOUT_S", "1800")
+        )
         session = await AgentSession.start(
             run_id=self.ctx.run.id,
             role=self.role,

@@ -46,13 +46,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from simkit.live import live_frame_path
+
 from orchestrator import clustering, github
 from orchestrator import workspace as workspace_mod
 from orchestrator.devin.hierarchy import AgentTree
 from orchestrator.pool import SuitePool
 from orchestrator.roles.base import RoleAgent
 from orchestrator.roles.fixer import FixerAgent
-from simkit.live import live_frame_path
 from orchestrator.roles.harness_builder import HarnessBuilderAgent
 from orchestrator.roles.investigator import InvestigatorAgent
 from orchestrator.roles.modeler import ModelerAgent
@@ -656,7 +657,14 @@ class Pipeline:
             lambda work: work.phase in {"ready_to_verify", "verifying", "resolved"}
         ):
             return Stage.VERIFY
-        self.ctx.run.error = "every Fixer failed before producing a patch"
+        details = "; ".join(
+            f"{work.cluster.label}: {work.error}"
+            for work in self._cluster_work.values()
+            if work.error
+        )
+        self.ctx.run.error = "no cluster produced a verifiable patch" + (
+            f" — {details}" if details else ""
+        )
         return Stage.FAILED_UNRESOLVED
 
     async def stage_verify(self) -> Stage:
@@ -813,6 +821,9 @@ class Pipeline:
                 scenario_seeds=work.original_seeds,
                 iteration=ctx.fix_iteration,
                 parent_agent_id=parent_id,
+                # Fixers clone, reproduce every seed, patch and re-test; the
+                # default agent budget starves them mid-reproduction.
+                timeout_s=float(os.getenv("FIXER_TIMEOUT_S", "3600")),
             )
         work.agent_ids.append(agent.id)
         self._agent_tree.register_child(parent_id, agent.id)
@@ -1408,7 +1419,7 @@ class Pipeline:
         for finding in findings[:MAX_HANDOFF_FINDINGS]:
             try:
                 await relay(finding, to_role, "handoff")
-            except Exception:  # noqa: BLE001 - narration, not control flow
+            except Exception:
                 log.exception("handoff relay to %s failed", to_role.value)
                 return
 

@@ -25,6 +25,7 @@ the difference matters, because an error is our problem and a failure is theirs.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import os
@@ -219,6 +220,16 @@ def run_scenario(
         result.status = "error"
         result.error_kind = "timeout"
         result.error = str(exc)
+        # Score whatever the episode did produce: clustering and the agents
+        # need per-criterion evidence even when the wall clock cut it short.
+        if scene is not None:
+            with contextlib.suppress(Exception):  # partial evidence, best-effort
+                episode.finish()
+                result.sim_time_s = float(scene.data.time)
+                result.trace = trace
+                result.criteria, result.diagnosis = scoring.evaluate(
+                    result, criteria, scene
+                )
     except HarnessError as exc:
         result.status = "error"
         result.error_kind = "infra"

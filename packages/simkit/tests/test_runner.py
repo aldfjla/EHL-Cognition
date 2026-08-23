@@ -73,7 +73,10 @@ def test_watchdog_reports_error_not_failure(toy_arm, task, tmp_path) -> None:
     # Our timeout is never the customer's failure.
     assert result.status == "error"
     assert "watchdog" in (result.error or "")
-    assert result.criteria == []
+    # The cut-short episode is still scored so clustering has per-criterion
+    # evidence to work with.
+    assert result.criteria, "watchdog episodes must keep their partial scores"
+    assert any(not c["passed"] for c in result.criteria)
 
 
 def test_missing_harness_is_an_error(toy_arm, task, tmp_path) -> None:

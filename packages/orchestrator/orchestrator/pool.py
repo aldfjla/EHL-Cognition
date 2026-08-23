@@ -19,8 +19,6 @@ watcher announces newly published frames without putting bytes in events.
 
 from __future__ import annotations
 
-from simkit.live import live_frame_path
-
 import asyncio
 import inspect
 import json
@@ -32,6 +30,8 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from simkit.live import live_frame_path
 
 from orchestrator.bus import EventBus
 from orchestrator.schemas import EventType
