@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Report (and optionally repair) drift between robotci.db and the SQLModel tables.
 
-Why this exists: schema evolution is ``create_all`` only, which creates missing
-tables and never alters an existing one (see ``apps/api/app/store/db.py``). A
+Why this exists: the API self-heals safe additive drift at startup, but this
+command makes the same inspection and repair available before starting it. A
 database created before a column was added keeps working until something selects
 that column, and then one endpoint 500s with ``no such column`` while every other
 page looks fine. This turns that landmine into one command.
@@ -28,11 +28,8 @@ sys.path.insert(0, str(REPO_ROOT / "packages" / "orchestrator"))
 
 # Imported after the sys.path bootstrap above so the script runs uninstalled.
 from app.config import get_settings
+from app.store import migrate
 from app.store import tables as _tables  # noqa: F401  (registers the models)
-from sqlalchemy.dialects import sqlite as sqlite_dialect
-from sqlmodel import SQLModel
-
-_DIALECT = sqlite_dialect.dialect()
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,29 +59,6 @@ def resolve_db_path(explicit: str | None) -> Path:
     return Path(url.split("///", 1)[-1])
 
 
-def existing_columns(conn: sqlite3.Connection, table: str) -> set[str] | None:
-    """Column names for ``table``, or ``None`` when the table is absent."""
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    return {row[1] for row in rows} if rows else None
-
-
-def add_column_sql(table: str, column) -> str | None:
-    """``ALTER TABLE`` for one missing column, or ``None`` if it needs a rebuild.
-
-    A NOT NULL column can only be added when it carries a default: existing rows
-    have to be given some value, and inventing one is the caller's decision.
-    """
-    type_sql = column.type.compile(dialect=_DIALECT)
-    clause = f"ALTER TABLE {table} ADD COLUMN {column.name} {type_sql}"
-    if column.nullable:
-        return clause
-    default = getattr(column.default, "arg", None) if column.default else None
-    if default is None:
-        return None
-    literal = f"'{default}'" if isinstance(default, str) else repr(default)
-    return f"{clause} NOT NULL DEFAULT {literal}"
-
-
 def main() -> int:
     """Report drift per table; with --apply, add what can be added."""
     args = parse_args()
@@ -94,55 +68,37 @@ def main() -> int:
         return 2
 
     conn = sqlite3.connect(path)
-    missing_tables: list[str] = []
-    statements: list[str] = []
-    needs_rebuild: list[str] = []
+    drift = migrate.repair_schema(conn, apply=False)
 
-    for name, table in sorted(SQLModel.metadata.tables.items()):
-        present = existing_columns(conn, name)
-        if present is None:
-            missing_tables.append(name)
-            continue
-        for column in table.columns:
-            if column.name in present:
-                continue
-            sql = add_column_sql(name, column)
-            if sql is None:
-                needs_rebuild.append(f"{name}.{column.name} (NOT NULL, no default)")
-            else:
-                statements.append(sql)
-
-    if not statements and not missing_tables and not needs_rebuild:
+    if not drift.has_drift:
         print(f"{path}: schema matches the models.")
         return 0
 
     print(f"{path}: drift detected.\n")
-    if missing_tables:
+    if drift.missing_tables:
         print("Missing tables (the API creates these at startup):")
-        for name in missing_tables:
+        for name in drift.missing_tables:
             print(f"  {name}")
         print()
-    if statements:
+    if drift.statements:
         print("Missing columns:")
-        for sql in statements:
+        for sql in drift.statements:
             print(f"  {sql}")
         print()
-    if needs_rebuild:
+    if drift.needs_rebuild:
         print("Cannot be added in place — recreate the database instead:")
-        for item in needs_rebuild:
+        for item in drift.needs_rebuild:
             print(f"  {item}")
         print()
 
-    if not statements:
+    if not drift.statements:
         return 1
     if not args.apply:
         print("Re-run with --apply to add the missing columns.")
         return 1
 
-    for sql in statements:
-        conn.execute(sql)
-    conn.commit()
-    print(f"Applied {len(statements)} column(s). Restart the API to pick them up.")
+    applied = migrate.apply_schema_repair(conn, drift)
+    print(f"Applied {applied} column(s). Restart the API to pick them up.")
     return 0
 
 
