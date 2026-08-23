@@ -471,9 +471,6 @@ def test_extract_structured_output_prefers_the_last_block() -> None:
 def test_extract_structured_output_parses_a_json_string_field() -> None:
     assert extract_structured_output({"structured_output": '{"a": 1}'}) == {"a": 1}
     assert extract_structured_output({"structured_output": ""}) is None
-def test_extract_structured_output_parses_a_json_string_field() -> None:
-    assert extract_structured_output({"structured_output": '{"a": 1}'}) == {"a": 1}
-    assert extract_structured_output({"structured_output": ""}) is None
 
 
 def test_structured_output_never_scrapes_the_prompt_schema() -> None:
@@ -485,7 +482,10 @@ def test_structured_output_never_scrapes_the_prompt_schema() -> None:
     """
     payload = {
         "messages": [
-            {"source": "user", "message": 'Reply with:\n```json\n{"verdict": "ship | iterate | give_up"}\n```'},
+            {
+                "source": "user",
+                "message": 'Reply with:\n```json\n{"verdict": "ship | iterate | give_up"}\n```',
+            },
             {"source": "devin", "message": "Verdict: iterate (not shippable)."},
             {"source": "user", "message": "Your structured output was rejected."},
             {"source": "devin", "message": "Reposted it above."},
