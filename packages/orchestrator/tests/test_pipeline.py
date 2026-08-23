@@ -598,13 +598,38 @@ async def test_build_harness_materializes_returned_code(
     from simkit import runner
 
     def fake_run_scenario(**_kwargs: object) -> SimpleNamespace:
-        return SimpleNamespace(status="passed", error=None)
+        return SimpleNamespace(status="passed", error=None, sim_time_s=2.5)
 
     monkeypatch.setattr(runner, "run_scenario", fake_run_scenario)
 
     assert await pipe.stage_build_harness() is Stage.DESIGN_SCENARIOS
     written = tmp_path / "artifacts" / ctx.run.id / "harness.py"
     assert written.read_text(encoding="utf-8") == code
+
+
+async def test_build_harness_rejects_a_harness_that_never_steps_the_sim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A smoke run with zero sim time means the harness never drove MuJoCo."""
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    ctx = _harness_ctx(tmp_path)
+    pipe = Pipeline(ctx)
+    code = "def run_episode(model, data, params):\n    pass\n"
+    monkeypatch.setattr(
+        pipeline_mod,
+        "HarnessBuilderAgent",
+        _harness_stub_builder({"harness_path": "harness.py", "harness_code": code}),
+    )
+
+    from simkit import runner
+
+    def fake_run_scenario(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(status="passed", error=None, sim_time_s=0.0)
+
+    monkeypatch.setattr(runner, "run_scenario", fake_run_scenario)
+
+    with pytest.raises(PipelineError, match="never advanced the simulation"):
+        await pipe.stage_build_harness()
 
 
 async def test_build_harness_without_code_is_a_pipeline_error(

@@ -482,6 +482,12 @@ class Pipeline:
         )
         if smoke.status == "error":
             raise PipelineError(f"harness smoke test errored: {smoke.error}")
+        if smoke.sim_time_s <= 0.0:
+            raise PipelineError(
+                "harness smoke test never advanced the simulation "
+                f"(sim_time_s={smoke.sim_time_s}); the harness must step MuJoCo "
+                f"(agent session {agent.session_url or 'unknown'})"
+            )
         return Stage.DESIGN_SCENARIOS
 
     async def stage_design_scenarios(self) -> Stage:
@@ -763,13 +769,19 @@ class Pipeline:
             )
         work.agent_ids.append(agent.id)
         self._agent_tree.register_child(parent_id, agent.id)
-        if "patched" in role.output and not role.output["patched"]:
+        # The fixer works on its own machine and hands back a diff; the
+        # worktree only contains the fix once that diff is applied here. A
+        # partial fix (`patched: false` but a diff present) is still applied
+        # and re-run — the rerun and the Reviewer judge it, not the flag.
+        patch = str(role.output.get("patch") or "")
+        if (
+            not patch.strip()
+            and "patched" in role.output
+            and not role.output["patched"]
+        ):
             work.outcome = "unresolved"
             self._set_cluster_phase(work, "unresolved")
             return
-        # The fixer works on its own machine and hands back a diff; the
-        # worktree only contains the fix once that diff is applied here.
-        patch = str(role.output.get("patch") or "")
         if patch.strip():
             try:
                 await workspace_mod.apply_patch(ctx.workspace, name, patch)

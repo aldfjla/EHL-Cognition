@@ -69,6 +69,9 @@ Notes from the Tech Lead, if this is a repeat attempt: {{reviewer_notes}}
 `patch` is the deliverable: a `patched: true` result without an applicable
 diff in `patch` is rejected.
 
-If the seeds still fail, set `patched` and `cluster_seeds_passing` to false and
-say what you learned. An honest failed attempt is usable by the next iteration;
-a claimed fix the full suite then rejects costs the run a whole pass.
+If the seeds still fail, set `cluster_seeds_passing` to false and say what you
+learned — but still include your diff in `patch` if it improves anything: a
+partial fix is applied and re-verified rather than thrown away. Only set
+`patched: false` with an empty `patch` when you produced no usable change at
+all. An honest failed attempt is usable by the next iteration; a claimed fix
+the full suite then rejects costs the run a whole pass.
