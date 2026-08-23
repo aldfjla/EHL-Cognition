@@ -43,6 +43,15 @@ class GitHubError(RuntimeError):
     """An outbound GitHub write failed. Infrastructure, not a robot failure."""
 
 
+async def branch_head(repo: str, branch: str) -> str:
+    """Resolve the current commit at ``branch`` from GitHub."""
+    sha = await _gh("api", f"repos/{repo}/commits/{branch}", "--jq", ".sha")
+    sha = sha.strip()
+    if not sha:
+        raise GitHubError(f"could not resolve head of {branch}")
+    return sha
+
+
 def dry_run() -> bool:
     """True when every outbound write should be logged instead of performed.
 

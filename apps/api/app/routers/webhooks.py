@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from orchestrator import triggers
+from orchestrator import github, triggers
 from orchestrator.blackboard import Blackboard
 from orchestrator.bus import EventBus
 from orchestrator.pipeline import Pipeline, PipelineContext
@@ -537,14 +537,26 @@ async def manual_trigger(
     """
     fields = await _trigger_fields(request)
     repo_name = fields.get("repo") or settings.target_repo
+    if not repo_name:
+        raise HTTPException(status_code=422, detail="repo is required")
+    connected = repo.get_repo_by_full_name(db, repo_name)
+    branch = fields.get("branch") or (
+        connected.branch if connected is not None else settings.target_branch
+    )
     sha = fields.get("sha") or ""
-    if not repo_name or not sha:
-        raise HTTPException(status_code=422, detail="repo and sha are required")
+    if not sha:
+        try:
+            sha = await github.branch_head(repo_name, branch)
+        except github.GitHubError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"could not resolve head of {branch} — provide sha",
+            ) from exc
 
     return await _start_run(
         repo_name=repo_name,
         sha=sha,
-        branch=fields.get("branch") or settings.target_branch,
+        branch=branch,
         commit_message="manual trigger",
         pushed_by="manual",
         db=db,
