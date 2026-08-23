@@ -82,6 +82,34 @@ def test_reviewer_and_reporter_verdicts_are_constrained(ctx: PipelineContext) ->
     )
 
 
+def test_harness_builder_rejects_placeholder_harness_code(
+    ctx: PipelineContext,
+) -> None:
+    role = HarnessBuilderAgent(ctx)
+    base = {
+        "harness_path": "/tmp/harness.py",
+        "interface_notes": "notes",
+    }
+    with pytest.raises(ValueError, match="run_episode"):
+        role.validate_output(
+            {
+                **base,
+                "harness_code": "# the complete harness module source, JSON-escaped",
+            }
+        )
+    with pytest.raises(ValueError, match="run_episode"):
+        role.validate_output(
+            {**base, "harness_code": "https://app.devin.ai/attachments/abc/harness.py"}
+        )
+    accepted = role.validate_output(
+        {
+            **base,
+            "harness_code": "import mujoco\n\ndef run_episode(model, data, params):\n    ...",
+        }
+    )
+    assert "def run_episode" in accepted["harness_code"]
+
+
 # -- findings --------------------------------------------------------------- #
 
 
