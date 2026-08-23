@@ -294,6 +294,19 @@ def _persist_run_event(
                 )
         return
 
+    if event_type is EventType.SCENARIO_PROGRESS:
+        with session_scope() as db:
+            scenario = repo.get_scenario(db, str(data.get("scenario_id")))
+            if scenario is None:
+                return
+            fields = {"live_frame_path", "progress", "sim_time_s"} & set(
+                Scenario.model_fields
+            )
+            values = scenario.model_dump(mode="json")
+            values.update({name: data[name] for name in fields if name in data})
+            repo.upsert_scenario(db, Scenario.model_validate(values))
+        return
+
     if event_type is EventType.SCENARIO_FINISHED:
         with session_scope() as db:
             repo.upsert_scenario(db, Scenario(**data))

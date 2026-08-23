@@ -71,7 +71,9 @@ function verdictLine(run: Run | null): { text: string; tone: string } {
       return { text: "Fixed — pull request opened", tone: "text-status-passed" };
     case "FAILED_UNRESOLVED":
       return {
-        text: "Unresolved — iteration budget exhausted",
+        text: run.error
+          ? "Failed — infrastructure error"
+          : "Unresolved — iteration budget exhausted",
         tone: "text-status-failed",
       };
     default:

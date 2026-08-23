@@ -11,9 +11,11 @@ That is also why visual compilation remains driven by ``record`` alone.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -70,11 +72,17 @@ class LiveFrameWriter:
         fps: float | None = None,
         size: tuple[int, int] | None = None,
         camera: str | int | None = None,
+        destination: str | Path | None = None,
+        progress_path: str | Path | None = None,
     ) -> None:
         self.scenario_id = str(scenario_id)
         self.fps = self._parse_fps(fps)
         self.width, self.height = size or _size_from_environment()
         self.camera = camera
+        self._destination = Path(destination) if destination is not None else None
+        self._progress_path = Path(progress_path) if progress_path is not None else None
+        self._progress: float | None = None
+        self._sim_time_s = 0.0
         self._renderer: Any = None
         self._last_capture: float | None = None
         self._disabled = not _enabled_from_environment() or self.fps <= 0
@@ -104,12 +112,22 @@ class LiveFrameWriter:
 
     @property
     def rel_path(self) -> str:
-        return live_frame_path(self.scenario_id)
+        if self._destination is None:
+            return live_frame_path(self.scenario_id)
+        try:
+            return self._destination.resolve().relative_to(_artifacts_dir()).as_posix()
+        except ValueError:
+            return self._destination.as_posix()
 
     @property
     def has_frame(self) -> bool:
         """Whether at least one frame has been atomically published."""
         return self._frames > 0
+
+    def set_progress(self, progress: float | None, sim_time_s: float) -> None:
+        """Set the values published alongside the next successful capture."""
+        self._progress = progress
+        self._sim_time_s = float(sim_time_s)
 
     def maybe_capture(self, scene: Any, *, force: bool = False) -> bool:
         """Write a frame when due, degrading permanently on any failure."""
@@ -125,6 +143,7 @@ class LiveFrameWriter:
             return False
         self._last_capture = now
         temporary: Path | None = None
+        progress_temporary: Path | None = None
         try:
             renderer = self._ensure_renderer(scene)
             camera = self.camera if self.camera is not None else -1
@@ -132,7 +151,7 @@ class LiveFrameWriter:
             frame = renderer.render()
             import imageio.v2 as imageio
 
-            destination = live_frame_file(self.scenario_id)
+            destination = self._destination or live_frame_file(self.scenario_id)
             destination.parent.mkdir(parents=True, exist_ok=True)
             temporary = destination.with_name(f"{destination.name}.{os.getpid()}.tmp")
             imageio.imwrite(
@@ -142,15 +161,31 @@ class LiveFrameWriter:
                 quality=85,
             )
             os.replace(temporary, destination)
+            if self._progress_path is not None:
+                self._progress_path.parent.mkdir(parents=True, exist_ok=True)
+                progress_temporary = self._progress_path.with_name(
+                    f"{self._progress_path.name}.{os.getpid()}.tmp"
+                )
+                progress_temporary.write_text(
+                    json.dumps(
+                        {
+                            "progress": self._progress,
+                            "sim_time_s": self._sim_time_s,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                os.replace(progress_temporary, self._progress_path)
             self._frames += 1
             return True
         except Exception:  # noqa: BLE001 - live rendering is best effort
             self.drops += 1
             if temporary is not None:
-                try:
+                with suppress(Exception):
                     temporary.unlink(missing_ok=True)
-                except Exception:  # noqa: BLE001 - cleanup is best effort
-                    return False
+            if progress_temporary is not None:
+                with suppress(Exception):
+                    progress_temporary.unlink(missing_ok=True)
             self._disable()
             return False
 
@@ -185,6 +220,10 @@ class LiveFrameWriter:
         self._closed = True
         self._disable()
         try:
-            live_frame_file(self.scenario_id).unlink(missing_ok=True)
+            (self._destination or live_frame_file(self.scenario_id)).unlink(
+                missing_ok=True
+            )
+            if self._progress_path is not None:
+                self._progress_path.unlink(missing_ok=True)
         except Exception:  # noqa: BLE001 - cleanup is best effort
             return

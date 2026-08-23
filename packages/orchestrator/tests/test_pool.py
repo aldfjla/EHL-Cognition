@@ -204,8 +204,9 @@ async def test_progress_watcher_emits_only_changed_frames(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bus = EventBus()
-    live = tmp_path / "live"
-    live.mkdir()
+    artifacts_root = tmp_path / "artifacts"
+    run_artifacts = artifacts_root / "run"
+    (run_artifacts / "live").mkdir(parents=True)
     progress_interval = "0.02"
     runner_started = threading.Event()
 
@@ -230,11 +231,12 @@ async def test_progress_watcher_emits_only_changed_frames(
         )
 
     monkeypatch.setenv("SCENARIO_PROGRESS_INTERVAL_S", progress_interval)
+    monkeypatch.setenv("ARTIFACTS_DIR", str(artifacts_root))
     pool = SuitePool(
         run_id="run",
         bus=bus,
         workers=1,
-        artifacts_dir=tmp_path,
+        artifacts_dir=run_artifacts,
         runner=runner,
     )
     try:
@@ -253,7 +255,7 @@ async def test_progress_watcher_emits_only_changed_frames(
         if event.type is EventType.SCENARIO_PROGRESS
     ]
     assert len(events) <= 2
-    assert events[0].data["live_frame_path"] == "live/s0.jpg"
+    assert events[0].data["live_frame_path"] == "run/live/s0.jpg"
     assert any(event.data["progress"] == pytest.approx(0.4) for event in events)
     assert any(event.data["sim_time_s"] == pytest.approx(1.2) for event in events)
     assert runner_started.is_set()
