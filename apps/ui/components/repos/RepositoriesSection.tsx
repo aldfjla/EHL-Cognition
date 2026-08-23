@@ -74,6 +74,7 @@ function RepoCard({
       setRunBusy(false);
     }
   };
+
   return (
     <div className="rounded-lg border border-surface-border bg-surface-raised p-4">
       <div className="flex items-center gap-3">
