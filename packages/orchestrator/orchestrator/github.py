@@ -50,54 +50,66 @@ class GitHubError(RuntimeError):
 async def branch_head(repo: str, branch: str) -> tuple[str, str]:
     """Resolve a branch to its current commit SHA and subject line."""
     token = os.getenv("GITHUB_TOKEN", "")
-    if not token:
-        raise GitHubError(
-            "GITHUB_TOKEN unset; add GITHUB_TOKEN to .env to trigger a run",
-            status_code=422,
-        )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
-    url = f"https://api.github.com/repos/{repo}/commits/{branch}"
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
+                f"https://api.github.com/repos/{repo}/commits/{branch}",
+                headers=headers,
             )
     except httpx.HTTPError as exc:
         raise GitHubError(
-            f"could not reach GitHub while resolving {repo}@{branch}; "
-            "check the server network connection and try again",
+            f"branch head request failed: {exc}",
             status_code=502,
         ) from exc
 
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    message = (
+        str(payload.get("message"))
+        if isinstance(payload, dict) and payload.get("message")
+        else response.text
+    )
     if response.status_code in (404, 422):
         raise GitHubError(
             f"GitHub repository or branch not found for {repo}@{branch}; "
             "check the connected repository name and branch",
             status_code=404,
         )
-    if response.status_code >= 300:
+    if response.status_code in (401, 403):
         raise GitHubError(
-            f"GitHub could not resolve {repo}@{branch} "
-            f"({response.status_code}); check GITHUB_TOKEN access and try again",
+            f"branch head failed ({response.status_code}): {message}; "
+            "check GITHUB_TOKEN in .env and try again",
+            status_code=502,
+        )
+    if not 200 <= response.status_code < 300:
+        raise GitHubError(
+            f"branch head failed ({response.status_code}): {message}",
             status_code=502,
         )
 
-    try:
-        payload = response.json()
-        sha = str(payload["sha"])
-        message = str(payload["commit"]["message"]).splitlines()[0]
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
+    sha = payload.get("sha") if isinstance(payload, dict) else None
+    if not isinstance(sha, str) or not sha.strip():
         raise GitHubError(
-            f"GitHub returned an invalid commit for {repo}@{branch}; "
-            "check repository access and try again",
+            f"branch head failed ({response.status_code}): response missing sha",
             status_code=502,
-        ) from exc
-    return sha, message
+        )
+    commit = payload.get("commit") if isinstance(payload, dict) else None
+    commit_message = (
+        commit.get("message")
+        if isinstance(commit, dict) and isinstance(commit.get("message"), str)
+        else ""
+    )
+    subject = commit_message.splitlines()[0] if commit_message else ""
+    return sha.strip(), subject
 
 
 def dry_run() -> bool:

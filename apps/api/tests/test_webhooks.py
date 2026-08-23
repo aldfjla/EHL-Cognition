@@ -266,7 +266,6 @@ def test_manual_trigger_explicit_sha_skips_github_resolution(
 @pytest.mark.parametrize(
     ("error", "status_code"),
     [
-        ("token is unavailable", 422),
         ("the branch does not exist", 404),
         ("GitHub API unavailable; try again", 502),
     ],
