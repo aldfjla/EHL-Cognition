@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from simkit.live import live_frame_path
+
 from orchestrator.bus import EventBus
 from orchestrator.schemas import EventType
 
@@ -269,6 +271,10 @@ class SuitePool:
                         "scenario_id": spec.scenario_id,
                         "worker_id": slot,
                         "attempt": retries + 1,
+                        # Published now, not on completion: the live routes serve
+                        # scenario.live_frame_path, and a feed that only resolves
+                        # after the episode ends is not a live feed.
+                        "live_frame_path": live_frame_path(spec.scenario_id),
                     },
                 )
                 if on_started is not None:
@@ -428,6 +434,10 @@ class SuitePool:
             {
                 "live_frame_path": str(live_dir / f"{spec.scenario_id}.jpg"),
                 "progress_path": str(live_dir / f"{spec.scenario_id}.progress.json"),
+                # simkit takes a bool, not paths: LiveFrameWriter derives its own
+                # location from the scenario id. The two path kwargs above are
+                # dropped by _supported_kwargs and kept only for the watcher.
+                "live": True,
             }
         )
         if repo_dir is not None:

@@ -60,7 +60,7 @@ class RepoRow(SQLModel, table=True):
     id: str = Field(primary_key=True)
     full_name: str = Field(index=True)
     branch: str = "main"
-    suite_size: int = 50
+    suite_size: int | None = None
     # Trigger filters. Stored as JSON lists for the same reason as the run's
     # nested objects: they are read as a unit and never queried into.
     # ``"null"`` (unset) and ``"[]"`` (configured as empty) are different

@@ -471,3 +471,29 @@ def test_extract_structured_output_prefers_the_last_block() -> None:
 def test_extract_structured_output_parses_a_json_string_field() -> None:
     assert extract_structured_output({"structured_output": '{"a": 1}'}) == {"a": 1}
     assert extract_structured_output({"structured_output": ""}) is None
+
+
+def test_structured_output_never_scrapes_the_prompt_schema() -> None:
+    """The role prompt embeds the schema as a fenced json example.
+
+    Scraping it makes an agent whose real answer is unparseable look like it
+    returned placeholder values ("ship | iterate | give_up"), which surfaces as
+    a misleading validation error instead of "no parseable structured output".
+    """
+    payload = {
+        "messages": [
+            {
+                "source": "user",
+                "message": 'Reply with:\n```json\n{"verdict": "ship | iterate | give_up"}\n```',
+            },
+            {"source": "devin", "message": "Verdict: iterate (not shippable)."},
+            {"source": "user", "message": "Your structured output was rejected."},
+            {"source": "devin", "message": "Reposted it above."},
+        ]
+    }
+    assert client_module.extract_structured_output(payload) is None
+
+    payload["messages"].append(
+        {"source": "devin", "message": '```json\n{"verdict": "iterate"}\n```'}
+    )
+    assert client_module.extract_structured_output(payload) == {"verdict": "iterate"}

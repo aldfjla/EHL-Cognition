@@ -341,7 +341,11 @@ class Repo(_Base):
     id: str = Field(default_factory=lambda: _new_id("repo"))
     full_name: str
     branch: str = "main"
-    suite_size: int = Field(default=50, ge=1)
+    suite_size: int | None = Field(
+        default=None,
+        ge=1,
+        description="Override for robotci.yaml scenarios.count; None defers to it.",
+    )
     #: Extra watched branch patterns beyond ``branch``. Empty means "only
     #: ``branch``". Populated from the repo's ``robotci.yaml`` ``ci.branches``
     #: after the first checkout — see :mod:`orchestrator.triggers`.

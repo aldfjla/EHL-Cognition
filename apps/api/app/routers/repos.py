@@ -57,7 +57,11 @@ class RepoCreate(BaseModel):
 
     full_name: str
     branch: str = Field(default="main", min_length=1)
-    suite_size: int = Field(default=50, ge=1)
+    # None means "defer to robotci.yaml scenarios.count". A concrete default
+    # here would silently override every repo's own declared suite size,
+    # because the webhook path forwards this value as ctx.suite_size and that
+    # wins over the checked-in config.
+    suite_size: int | None = Field(default=None, ge=1)
     branches: list[str] = Field(default_factory=list)
     #: Omit to leave unset (built-in defaults apply); send ``[]`` to configure
     #: "no patterns" — the two are stored distinguishably.

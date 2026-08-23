@@ -741,3 +741,53 @@ async def test_build_harness_without_code_is_a_pipeline_error(
 
     with pytest.raises(PipelineError, match="no harness_code"):
         await pipe.stage_build_harness()
+
+
+def test_suite_size_prefers_override_then_config_then_default() -> None:
+    """A repo-level override wins; otherwise robotci.yaml; otherwise the default.
+
+    The webhook path forwards the repo record as ctx.suite_size, so a default
+    that pretends to be a choice silently overrides every repo's own count.
+    """
+
+    def build(*, override, configured):
+        pipe = Pipeline.__new__(Pipeline)
+        pipe.ctx = SimpleNamespace(
+            config={"scenarios": {"count": configured}} if configured else {},
+            suite_size=override,
+            default_suite_size=50,
+        )
+        return pipe._suite_size()
+
+    assert build(override=7, configured=5) == 7
+    assert build(override=None, configured=5) == 5
+    assert build(override=None, configured=None) == 50
+
+
+async def test_stage_fix_surfaces_the_cluster_errors(tmp_path: Path) -> None:
+    """An unresolved run must name the real failure, e.g. an agent timeout."""
+    from orchestrator.pipeline import _ClusterWork
+    from orchestrator.schemas import Cluster
+
+    ctx = make_ctx(tmp_path)
+    pipe = Pipeline(ctx)
+    cluster = Cluster(
+        run_id=ctx.run.id,
+        id="cluster-1",
+        label="joint failure",
+        scenario_ids=["red"],
+        size=1,
+    )
+    work = _ClusterWork(cluster=cluster, original_seeds=[11])
+    work.phase = "unresolved"
+    work.outcome = "unresolved"
+    work.error = (
+        "AgentTimeout: session abc did not finish within 1800s (last status running)"
+    )
+    pipe._cluster_work[cluster.id] = work
+
+    stage = await pipe.stage_fix()
+
+    assert stage == Stage.FAILED_UNRESOLVED
+    assert "did not finish within 1800s" in (ctx.run.error or "")
+    assert "joint failure" in ctx.run.error

@@ -90,6 +90,13 @@ export default function AgentDesktop({
   const ref = useRef<HTMLDivElement>(null);
   useReportVisibility(ref, agent.id, onVisibilityChange);
 
+  // Pin the feed to the newest line so it reads like a terminal, not a log file.
+  const feedRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const node = feedRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [agent.activity_log?.length, agent.last_activity]);
+
   const frameHeight = size === "large" ? "h-[420px]" : "h-40";
 
   return (
@@ -147,10 +154,42 @@ export default function AgentDesktop({
         >
           {reason === "no_desktop" ? (
             <>
-              <p className="stub-label">Activity</p>
-              <p className="font-mono text-[11px] text-slate-300">
-                {agent.last_activity ?? "No transcript line yet."}
+              <p className="stub-label">
+                Live activity
+                {agent.status === "working" && (
+                  <span className="ml-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400 align-middle" />
+                )}
               </p>
+              {/* The whole transcript, newest last. A single overwritten line
+                  reads as a frozen screen while the agent is really working. */}
+              <div
+                ref={feedRef}
+                className="flex max-h-[8.5rem] flex-col gap-1 overflow-y-auto pr-1"
+              >
+                {(agent.activity_log?.length
+                  ? agent.activity_log
+                  : agent.last_activity
+                    ? [{ text: agent.last_activity, ts: agent.updated_at }]
+                    : []
+                ).map((line, index) => (
+                  <p
+                    key={`${line.ts}-${index}`}
+                    className="font-mono text-[11px] leading-snug text-slate-300"
+                  >
+                    <span className="mr-1.5 text-slate-600">
+                      {new Date(line.ts).toLocaleTimeString([], {
+                        hour12: false,
+                      })}
+                    </span>
+                    {line.text}
+                  </p>
+                ))}
+                {!agent.activity_log?.length && !agent.last_activity && (
+                  <p className="font-mono text-[11px] text-slate-500">
+                    Waiting for the first transcript line…
+                  </p>
+                )}
+              </div>
               {agent.step && (
                 <p className="font-mono text-[10px] text-slate-500">
                   step · {agent.step}

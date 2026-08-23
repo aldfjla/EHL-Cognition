@@ -41,9 +41,12 @@ import json
 import logging
 import os
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from simkit.live import live_frame_path
 
 from orchestrator import clustering, github
 from orchestrator import workspace as workspace_mod
@@ -138,6 +141,10 @@ HARNESS_FILENAME = "harness.py"
 #: (missing ``run_episode``, a smoke test that errors), so it is worth handing
 #: the reason to a fresh agent instead of ending the run.
 HARNESS_ATTEMPTS = 3
+
+#: Findings quoted into the team chat at a role handoff. Enough to explain the
+#: decision, few enough that the chat stays readable next to the agent grid.
+MAX_HANDOFF_FINDINGS = 3
 
 #: Root causes at or above this confidence are promoted to ``confirmed`` so FIX
 #: has something to fan out over. The Reviewer refutes them at VERIFY if the
@@ -236,6 +243,8 @@ class Pipeline:
         self._artifacts = Path(os.getenv("ARTIFACTS_DIR", "artifacts")) / ctx.run.id
         #: Suite results before any patch, and after the latest VERIFY, kept as
         #: raw simkit results so ``simkit.suite.compare`` can diff them.
+        #: Scenario Designer dispatched early and awaited in DESIGN_SCENARIOS.
+        self._designer_task: asyncio.Task[Any] | None = None
         self._before_results: list[Any] = []
         self._after_results: list[Any] = []
         self._after_videos: dict[str, dict[str, str]] = {}
@@ -461,6 +470,14 @@ class Pipeline:
         a real driver. Accepted only once a smoke scenario executes.
         """
         ctx = self.ctx
+        # The Scenario Designer reads only task, success criteria and suite
+        # size -- all known since the clone -- so making it wait for the
+        # harness costs a full agent turnaround for nothing. Start it now and
+        # collect it in DESIGN_SCENARIOS. The handoff relay below still
+        # reaches it, because relay() speaks into whatever session is live:
+        # the constraints arrive while it works, as they would on a real team.
+        if self._designer_task is None:
+            self._designer_task = asyncio.create_task(self._dispatch_designer())
         control = ctx.config.get("control", {})
         harness_path = self._artifacts / HARNESS_FILENAME
         rejection: str | None = None
@@ -476,6 +493,10 @@ class Pipeline:
             )
             rejection = await self._reject_harness(builder, agent, harness_path)
             if rejection is None:
+                # Speak the handoff so the dashboard reads as a team: the QA
+                # Lead is designing scenarios right now and these constraints
+                # shape them.
+                await self._relay_handoff(builder, Role.SCENARIO_DESIGNER)
                 return Stage.DESIGN_SCENARIOS
             await self._nonfatal(
                 f"harness attempt {attempt}/{HARNESS_ATTEMPTS}",
@@ -524,6 +545,7 @@ class Pipeline:
             seed=self._base_seed(),
             task=self.ctx.config.get("task", {}),
             record=False,
+            repo_dir=str(self.ctx.workspace.base),
         )
         if smoke.status == "error":
             return f"smoke test errored: {smoke.error}"
@@ -535,6 +557,33 @@ class Pipeline:
             )
         return None
 
+    def _suite_size(self) -> int:
+        """Scenario count: explicit override, else robotci.yaml, else default."""
+        ctx = self.ctx
+        configured = ctx.config.get("scenarios", {}).get("count")
+        return int(
+            ctx.suite_size
+            if ctx.suite_size is not None
+            else (configured if configured is not None else ctx.default_suite_size)
+        )
+
+    async def _dispatch_designer(self) -> Any:
+        """Run the Scenario Designer. Started early, awaited in DESIGN_SCENARIOS."""
+        ctx = self.ctx
+        task = ctx.config.get("task", {})
+        async with self._agent_gate:
+            return await ScenarioDesignerAgent(ctx).dispatch(
+                task_description=task.get("description", task.get("name", "")),
+                success_criteria=task.get("success", []),
+                suite_size=self._suite_size(),
+            )
+
+    async def _collect_designer(self) -> Any:
+        """Await the early dispatch, or run it now if it never started."""
+        if self._designer_task is None:
+            return await self._dispatch_designer()
+        return await self._designer_task
+
     async def stage_design_scenarios(self) -> Stage:
         """Design the randomized world matrix.
 
@@ -545,22 +594,8 @@ class Pipeline:
         from simkit import scenarios as scenario_gen
 
         ctx = self.ctx
-        task = ctx.config.get("task", {})
-        configured_size = ctx.config.get("scenarios", {}).get("count")
-        suite_size = int(
-            ctx.suite_size
-            if ctx.suite_size is not None
-            else (
-                configured_size
-                if configured_size is not None
-                else ctx.default_suite_size
-            )
-        )
-        agent = await ScenarioDesignerAgent(ctx).dispatch(
-            task_description=task.get("description", task.get("name", "")),
-            success_criteria=task.get("success", []),
-            suite_size=suite_size,
-        )
+        suite_size = self._suite_size()
+        agent = await self._collect_designer()
         axes = self._axes(agent)
         if not axes:
             raise PipelineError(
@@ -594,7 +629,9 @@ class Pipeline:
         No agents involved. Emits ``suite.progress`` as cells complete so the
         matrix fills in live. Returns ``PASSED_CLEAN`` when nothing failed.
         """
-        results = await self._execute_suite(self.ctx.scenarios)
+        results = await self._execute_suite(
+            self.ctx.scenarios, repo_dir=self.ctx.workspace.base
+        )
         self._before_results = results
         stats = self._apply_results(self.ctx.scenarios, results)
         self.ctx.run.suite = stats
@@ -654,7 +691,14 @@ class Pipeline:
             lambda work: work.phase in {"ready_to_verify", "verifying", "resolved"}
         ):
             return Stage.VERIFY
-        self.ctx.run.error = "every Fixer failed before producing a patch"
+        details = "; ".join(
+            f"{work.cluster.label}: {work.error}"
+            for work in self._cluster_work.values()
+            if work.error
+        )
+        self.ctx.run.error = "no cluster produced a verifiable patch" + (
+            f" — {details}" if details else ""
+        )
         return Stage.FAILED_UNRESOLVED
 
     async def stage_verify(self) -> Stage:
@@ -811,6 +855,9 @@ class Pipeline:
                 scenario_seeds=work.original_seeds,
                 iteration=ctx.fix_iteration,
                 parent_agent_id=parent_id,
+                # Fixers clone, reproduce every seed, patch and re-test; the
+                # default agent budget starves them mid-reproduction.
+                timeout_s=float(os.getenv("FIXER_TIMEOUT_S", "3600")),
             )
         work.agent_ids.append(agent.id)
         self._agent_tree.register_child(parent_id, agent.id)
@@ -850,6 +897,8 @@ class Pipeline:
                 or results_by_seed[scenario.seed].status != "passed"
             )
         ]
+        await self._relay_handoff(role, Role.REVIEWER)
+
         reviewer_error: str | None = None
         reviewer = ReviewerAgent(ctx)
         refusal = self._agent_tree.child_refusal(agent.id)
@@ -1277,6 +1326,10 @@ class Pipeline:
                 return
             scenario.status = ScenarioStatus.RUNNING
             scenario.worker_id = worker_id
+            # Published now, not on completion: the live routes serve
+            # scenario.live_frame_path, and a feed that only resolves once the
+            # episode is over is not a live feed.
+            scenario.live_frame_path = live_frame_path(scenario_id)
 
         async def on_result(result: Any) -> None:
             nonlocal completed, passed, failed
@@ -1383,6 +1436,26 @@ class Pipeline:
         scenario.criteria = [
             CriterionResult(**criterion) for criterion in result.criteria
         ]
+
+    @staticmethod
+    async def _relay_handoff(role: Any, to_role: Role) -> None:
+        """Speak a role's findings to the seat that picks up next.
+
+        Handoffs are what make the dashboard read as a team rather than a task
+        list. Best effort: chat is narration, so a relay that fails must not
+        fail the run, and a test double standing in for a role need not
+        implement it.
+        """
+        findings = getattr(role, "findings", None) or []
+        relay = getattr(role, "relay", None)
+        if not findings or relay is None:
+            return
+        for finding in findings[:MAX_HANDOFF_FINDINGS]:
+            try:
+                await relay(finding, to_role, "handoff")
+            except Exception:
+                log.exception("handoff relay to %s failed", to_role.value)
+                return
 
     @staticmethod
     def _stats(scenarios: list[Scenario]) -> SuiteStats:
@@ -1633,6 +1706,14 @@ class Pipeline:
 
     async def _finish(self) -> None:
         run = self.ctx.run
+        # A run that dies in BUILD_HARNESS leaves the early Scenario Designer
+        # dispatch in flight. Cancel it rather than orphan the task and let its
+        # Devin session keep burning ACUs with nobody reading the result.
+        task = self._designer_task
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
         if self._pool is not None:
             await self._pool.aclose()
         run.finished_at = _now()

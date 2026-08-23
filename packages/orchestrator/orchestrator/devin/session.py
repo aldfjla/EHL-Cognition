@@ -129,6 +129,7 @@ class AgentSession:
         task: str,
         client: Any,
         bus: Any,
+        idempotent: bool = True,
         **agent_fields: Any,
     ) -> AgentSession:
         """Create the Agent record, emit ``agent.created``, start the session.
@@ -154,6 +155,7 @@ class AgentSession:
                 prompt,
                 title=title,
                 tags=[f"run:{run_id}", f"role:{role.value}"],
+                idempotent=idempotent,
             )
         except Exception as exc:
             await session.set_status(AgentStatus.FAILED, str(exc))

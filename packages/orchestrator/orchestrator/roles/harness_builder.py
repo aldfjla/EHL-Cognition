@@ -35,6 +35,7 @@ class HarnessBuilderAgent(RoleAgent):
     role = Role.HARNESS_BUILDER
     prompt_file = "harness_builder.md"
     display_name = "Test Infrastructure Engineer"
+    fresh_session = True
     required_keys = ("harness_path", "harness_code", "interface_notes")
 
     def template_vars(self, **kwargs: Any) -> dict[str, Any]:
@@ -53,6 +54,24 @@ class HarnessBuilderAgent(RoleAgent):
             "rejection": kwargs.get("rejection")
             or "Nothing yet — you are the first attempt.",
         }
+
+    def validate_output(self, output: dict[str, Any]) -> dict[str, Any]:
+        """The deliverable is the module source, not a pointer to it.
+
+        Agents have returned the prompt's example placeholder or an attachment
+        URL in ``harness_code``; anything without a ``run_episode`` definition
+        cannot pass the smoke test, so reject it here and let the retry
+        reminder ask for the real source.
+        """
+        cleaned = super().validate_output(output)
+        code = str(cleaned.get("harness_code") or "")
+        if "def run_episode" not in code:
+            raise ValueError(
+                "harness_code must be the complete harness module source and "
+                "define `run_episode(model, data, params)`; placeholders, "
+                "paths, and attachments are not readable by the orchestrator"
+            )
+        return cleaned
 
     def to_findings(self, agent: Agent, output: dict[str, Any]) -> list[Finding]:
         """Convert structured output into blackboard findings."""

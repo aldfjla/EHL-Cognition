@@ -73,7 +73,10 @@ def test_watchdog_reports_error_not_failure(toy_arm, task, tmp_path) -> None:
     # Our timeout is never the customer's failure.
     assert result.status == "error"
     assert "watchdog" in (result.error or "")
-    assert result.criteria == []
+    # The cut-short episode is still scored so clustering has per-criterion
+    # evidence to work with.
+    assert result.criteria, "watchdog episodes must keep their partial scores"
+    assert any(not c["passed"] for c in result.criteria)
 
 
 def test_missing_harness_is_an_error(toy_arm, task, tmp_path) -> None:
@@ -116,3 +119,22 @@ def test_sim_time_limit_ends_the_episode(toy_arm, task, tmp_path) -> None:
 def test_load_harness_returns_the_callable(sweep_harness) -> None:
     harness = runner.load_harness(str(sweep_harness))
     assert callable(harness)
+
+
+def test_repo_dir_reaches_the_harness(toy_arm, task, tmp_path, monkeypatch) -> None:
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    (repo / "customer_mod.py").write_text("MARKER = 'from-checkout'\n")
+    probe = tmp_path / "probe_harness.py"
+    probe.write_text(
+        "import os\n"
+        "import customer_mod\n"
+        "def run_episode(model, data, params):\n"
+        "    assert customer_mod.MARKER == 'from-checkout'\n"
+        "    assert os.environ['ROBOTCI_REPO_DIR']\n"
+        "    params['step']()\n"
+    )
+    monkeypatch.delenv("ROBOTCI_REPO_DIR", raising=False)
+    result = _run(toy_arm, probe, task, repo_dir=str(repo))
+    assert result.status in {"passed", "failed"}, result.error
+    assert result.sim_time_s > 0
