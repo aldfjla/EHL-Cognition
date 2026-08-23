@@ -37,6 +37,7 @@ import LiveWall from "@/components/live/LiveWall";
 import { useLiveRun } from "@/components/live/useLiveRun";
 import PipelineTimeline from "@/components/PipelineTimeline";
 import ReportView from "@/components/ReportView";
+import RunTimer from "@/components/RunTimer";
 import ScenarioMatrix from "@/components/ScenarioMatrix";
 import TeamChat from "@/components/TeamChat";
 import VideoCompare from "@/components/VideoCompare";
@@ -194,6 +195,15 @@ export default function MissionControlPage({
           >
             {replay ? "scripted replay" : state.connection} · seq {state.seq}
           </span>
+          {state.run && (
+            <div className="mt-2">
+              <span className="stub-label text-slate-500">elapsed </span>
+              <RunTimer
+                createdAt={state.run.created_at}
+                finishedAt={state.run.finished_at}
+              />
+            </div>
+          )}
           {state.run?.pull_request_url ? (
             <div>
               <a
