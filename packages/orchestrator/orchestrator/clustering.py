@@ -31,6 +31,7 @@ sentence a human engineer recognises as real debugging.
 
 from __future__ import annotations
 
+import os
 import re
 
 from orchestrator.schemas import Cluster, Scenario, ScenarioStatus
@@ -52,24 +53,43 @@ _SPACE = re.compile(r"\s+")
 _FAILING = (ScenarioStatus.FAILED, ScenarioStatus.ERROR)
 
 
+def _per_criterion_default() -> bool:
+    value = os.environ.get("CLUSTER_PER_CRITERION", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 def cluster_failures(
     run_id: str,
     scenarios: list[Scenario],
     max_clusters: int = 6,
+    *,
+    per_criterion: bool | None = None,
 ) -> list[Cluster]:
     """Partition failing scenarios into at most ``max_clusters`` groups.
 
     ``max_clusters`` should be ``MAX_PARALLEL_AGENTS`` — the fan-out ceiling.
     When there are more distinct signatures than slots, the largest clusters
     win and the tail is merged into a catch-all so nothing is silently dropped.
+
+    With ``per_criterion`` (the default, overridable by CLUSTER_PER_CRITERION)
+    each failing criterion becomes its own cluster, so every distinct issue
+    gets its own Debugging Engineer and Fix Engineer. A scenario that fails
+    three criteria appears in three clusters and is worked three times, once
+    per issue. Grouping on the whole failed set instead spends one agent on a
+    scenario no matter how many separate things are wrong with it, which is
+    cheaper but leaves one engineer holding unrelated problems.
     """
     failures = [s for s in scenarios if s.status in _FAILING]
     if not failures or max_clusters < 1:
         return []
 
+    if per_criterion is None:
+        per_criterion = _per_criterion_default()
+
     groups: dict[str, list[Scenario]] = {}
     for scenario in failures:
-        groups.setdefault(failure_signature(scenario), []).append(scenario)
+        for key in _grouping_keys(scenario, per_criterion):
+            groups.setdefault(key, []).append(scenario)
 
     # Largest first, signature as the tie-break so a re-run clusters identically.
     ranked = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
@@ -96,6 +116,19 @@ def cluster_failures(
             )
         )
     return clusters
+
+
+def _grouping_keys(scenario: Scenario, per_criterion: bool) -> list[str]:
+    """Keys this scenario belongs under: one per issue, or one per signature."""
+    if not per_criterion:
+        return [failure_signature(scenario)]
+    failed = sorted(c.id for c in scenario.criteria if not c.passed)
+    if not failed:
+        # Nothing named to split on -- a sim error, or a scenario the oracle
+        # could not score. Fall back to the full signature so the diagnosis
+        # still separates unrelated infrastructure failures.
+        return [failure_signature(scenario)]
+    return failed
 
 
 def failure_signature(scenario: Scenario) -> str:
