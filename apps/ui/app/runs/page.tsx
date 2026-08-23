@@ -179,6 +179,18 @@ export default function RunsIndexPage() {
                   )}
                   <span
                     className={clsx(
+                      "rounded border px-2 py-0.5 font-mono text-[10px]",
+                      run.robot_model?.name
+                        ? "border-surface-border text-slate-400"
+                        : "border-surface-border/60 text-slate-600",
+                    )}
+                  >
+                    {run.robot_model?.name
+                      ? `robot ${run.robot_model.name}${run.robot_model.dof != null ? ` · ${run.robot_model.dof} dof` : ""}`
+                      : "model pending"}
+                  </span>
+                  <span
+                    className={clsx(
                       "font-mono text-[10px] uppercase tracking-widest",
                       STAGE_TONE[run.stage] ?? "text-status-running",
                     )}

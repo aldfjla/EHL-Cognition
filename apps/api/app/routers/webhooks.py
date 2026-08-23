@@ -124,6 +124,9 @@ async def _drive_pipeline(
     """
     with session_scope() as db:
         run = repo.get_run(db, run_id)
+        connected = (
+            repo.get_repo_by_full_name(db, run.repo) if run is not None else None
+        )
     if run is None:  # pragma: no cover - the caller just created it
         log.error("pipeline asked to drive unknown run %s", run_id)
         return
@@ -149,6 +152,9 @@ async def _drive_pipeline(
             sim_workers=settings.sim_workers,
             suite_size=suite_size,
             default_suite_size=settings.suite_size,
+            default_robot_menagerie=(
+                connected.robot_menagerie if connected is not None else None
+            ),
         )
         persistence = asyncio.create_task(_persist_run_events(run.id, bus))
         # Let persistence subscribe before a synchronously failing pipeline emits.
