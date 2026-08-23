@@ -51,6 +51,8 @@ class HarnessBuilderAgent(RoleAgent):
             or (model.model_path if model else ""),
             "harness_out_path": kwargs.get("harness_out_path")
             or (self.ctx.workspace.base / "robotci_harness.py"),
+            "rejection": kwargs.get("rejection")
+            or "Nothing yet — you are the first attempt.",
         }
 
     def validate_output(self, output: dict[str, Any]) -> dict[str, Any]:

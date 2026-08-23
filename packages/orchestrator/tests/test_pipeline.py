@@ -660,6 +660,48 @@ async def test_build_harness_materializes_returned_code(
     assert written.read_text(encoding="utf-8") == code
 
 
+async def test_build_harness_retries_a_builder_that_returned_no_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seen in practice: the agent echoes the output example's placeholder."""
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    ctx = _harness_ctx(tmp_path)
+    pipe = Pipeline(ctx)
+    code = "def run_episode(model, data, params):\n    return None\n"
+    outputs = [
+        {"harness_path": "harness.py", "harness_code": "# the module source"},
+        {"harness_path": "harness.py", "harness_code": code},
+    ]
+    rejections: list[str | None] = []
+
+    class StubBuilder:
+        def __init__(self, ctx: PipelineContext) -> None:
+            self.ctx = ctx
+            self.output: dict[str, object] = {}
+
+        async def dispatch(self, **kwargs: object) -> Agent:
+            rejections.append(kwargs.get("rejection"))  # type: ignore[arg-type]
+            self.output = outputs.pop(0)
+            return Agent(run_id=self.ctx.run.id, role=Role.HARNESS_BUILDER)
+
+    monkeypatch.setattr(pipeline_mod, "HarnessBuilderAgent", StubBuilder)
+
+    from simkit import runner
+
+    monkeypatch.setattr(
+        runner,
+        "run_scenario",
+        lambda **_kwargs: SimpleNamespace(status="passed", error=None, sim_time_s=2.5),
+    )
+
+    assert await pipe.stage_build_harness() is Stage.DESIGN_SCENARIOS
+    written = tmp_path / "artifacts" / ctx.run.id / "harness.py"
+    assert written.read_text(encoding="utf-8") == code
+    # The second builder is told why the first was rejected.
+    assert rejections[0] is None
+    assert "run_episode" in str(rejections[1])
+
+
 async def test_build_harness_rejects_a_harness_that_never_steps_the_sim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

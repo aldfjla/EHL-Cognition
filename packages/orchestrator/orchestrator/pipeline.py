@@ -136,6 +136,12 @@ MODEL_FILENAME = "robot.xml"
 #: Filename the Harness Builder writes its adapter to.
 HARNESS_FILENAME = "harness.py"
 
+#: How many Harness Builders to try before failing the run. The harness is a
+#: single point of failure for every later stage and the failure is legible
+#: (missing ``run_episode``, a smoke test that errors), so it is worth handing
+#: the reason to a fresh agent instead of ending the run.
+HARNESS_ATTEMPTS = 3
+
 #: Findings quoted into the team chat at a role handoff. Enough to explain the
 #: decision, few enough that the chat stays readable next to the agent grid.
 MAX_HANDOFF_FINDINGS = 3
@@ -463,8 +469,6 @@ class Pipeline:
         the customer's ``control.entrypoint`` drive MuJoCo actuators instead of
         a real driver. Accepted only once a smoke scenario executes.
         """
-        from simkit import runner
-
         ctx = self.ctx
         # The Scenario Designer reads only task, success criteria and suite
         # size -- all known since the clone -- so making it wait for the
@@ -476,30 +480,60 @@ class Pipeline:
             self._designer_task = asyncio.create_task(self._dispatch_designer())
         control = ctx.config.get("control", {})
         harness_path = self._artifacts / HARNESS_FILENAME
-        builder = HarnessBuilderAgent(ctx)
-        agent = await builder.dispatch(
-            entrypoint=control.get("entrypoint", ""),
-            interface=control.get("interface", ""),
-            rate_hz=control.get("rate_hz", 100),
-            model_path=self._model_path(),
-            harness_out_path=str(harness_path),
+        rejection: str | None = None
+        for attempt in range(1, HARNESS_ATTEMPTS + 1):
+            builder = HarnessBuilderAgent(ctx)
+            agent = await builder.dispatch(
+                entrypoint=control.get("entrypoint", ""),
+                interface=control.get("interface", ""),
+                rate_hz=control.get("rate_hz", 100),
+                model_path=self._model_path(),
+                harness_out_path=str(harness_path),
+                rejection=rejection,
+            )
+            rejection = await self._reject_harness(builder, agent, harness_path)
+            if rejection is None:
+                # Speak the handoff so the dashboard reads as a team: the QA
+                # Lead is designing scenarios right now and these constraints
+                # shape them.
+                await self._relay_handoff(builder, Role.SCENARIO_DESIGNER)
+                return Stage.DESIGN_SCENARIOS
+            await self._nonfatal(
+                f"harness attempt {attempt}/{HARNESS_ATTEMPTS}",
+                PipelineError(rejection),
+            )
+        raise PipelineError(
+            f"no usable harness after {HARNESS_ATTEMPTS} attempts: {rejection}"
         )
-        # Speak the handoff so the dashboard reads as a team: the QA Lead is
-        # designing scenarios right now and these constraints shape them.
-        await self._relay_handoff(builder, Role.SCENARIO_DESIGNER)
+
+    async def _reject_harness(
+        self, builder: HarnessBuilderAgent, agent: Agent, harness_path: Path
+    ) -> str | None:
+        """Write the returned harness and smoke-test it.
+
+        Returns ``None`` when the harness is usable, otherwise the reason to
+        hand to the next Harness Builder.
+        """
+        from simkit import runner
 
         # The agent works on its own machine: the harness arrives as source in
         # the structured output, not as a file on this disk.
         harness_code = str(builder.output.get("harness_code") or "")
-        if harness_code.strip():
-            harness_path.parent.mkdir(parents=True, exist_ok=True)
-            harness_path.write_text(harness_code, encoding="utf-8")
-        if not harness_path.exists():
-            raise PipelineError(
-                f"Harness Builder returned no harness_code and no file exists "
-                f"at {harness_path} (agent status {agent.status.value}, "
-                f"session {agent.session_url or 'unknown'})"
+        session = agent.session_url or "unknown"
+        if not harness_code.strip():
+            return (
+                f"returned no harness_code (agent status {agent.status.value}, "
+                f"session {session})"
             )
+        if "def run_episode" not in harness_code:
+            # Seen in practice: the agent echoes the output example's
+            # placeholder comment instead of its module source.
+            return (
+                f"harness_code defines no run_episode; it was {len(harness_code)} "
+                f"characters, not a module (session {session})"
+            )
+        harness_path.parent.mkdir(parents=True, exist_ok=True)
+        harness_path.write_text(harness_code, encoding="utf-8")
 
         # Prove the harness by executing it once. An `error` here is ours.
         smoke = await asyncio.to_thread(
@@ -509,19 +543,19 @@ class Pipeline:
             harness_path=str(harness_path),
             params={},
             seed=self._base_seed(),
-            task=ctx.config.get("task", {}),
+            task=self.ctx.config.get("task", {}),
             record=False,
-            repo_dir=str(ctx.workspace.base),
+            repo_dir=str(self.ctx.workspace.base),
         )
         if smoke.status == "error":
-            raise PipelineError(f"harness smoke test errored: {smoke.error}")
+            return f"smoke test errored: {smoke.error}"
         if smoke.sim_time_s <= 0.0:
-            raise PipelineError(
-                "harness smoke test never advanced the simulation "
+            return (
+                f"smoke test never advanced the simulation "
                 f"(sim_time_s={smoke.sim_time_s}); the harness must step MuJoCo "
-                f"(agent session {agent.session_url or 'unknown'})"
+                f"(session {session})"
             )
-        return Stage.DESIGN_SCENARIOS
+        return None
 
     def _suite_size(self) -> int:
         """Scenario count: explicit override, else robotci.yaml, else default."""

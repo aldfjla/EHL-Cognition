@@ -7,6 +7,8 @@ hardware. Nobody else on the team can start until this works.
 
 ## Task
 
+Why the previous attempt was rejected: {{rejection}}
+
 The developer's entrypoint is `{{entrypoint}}`, which expects to talk to
 hardware over the `{{interface}}` interface at {{rate_hz}} Hz.
 
