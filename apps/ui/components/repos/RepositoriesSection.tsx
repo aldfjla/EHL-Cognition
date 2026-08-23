@@ -15,7 +15,7 @@
 
 import clsx from "clsx";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import * as api from "@/lib/api";
@@ -55,6 +55,22 @@ function RepoCard({
   onDisconnect: (repo: ConnectedRepo) => void;
 }) {
   const running = repo.status === "running";
+  const router = useRouter();
+  const [runBusy, setRunBusy] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+
+  const runAnalysis = async (): Promise<void> => {
+    setRunBusy(true);
+    setRunError(null);
+    try {
+      const result = await api.triggerRun(repo.full_name, undefined, repo.branch);
+      router.push(`/runs/${result.run_id}`);
+    } catch (err) {
+      setRunError((err as Error).message);
+      setRunBusy(false);
+    }
+  };
+
   return (
     <div className="rounded-lg border border-surface-border bg-surface-raised p-4">
       <div className="flex items-center gap-3">
@@ -84,12 +100,23 @@ function RepoCard({
         </span>
         <button
           type="button"
+          onClick={() => void runAnalysis()}
+          disabled={runBusy}
+          className="ml-auto rounded border border-sky-700 px-2 py-1 font-mono text-[10px] text-sky-300 hover:border-sky-500 disabled:cursor-wait disabled:opacity-50"
+        >
+          {runBusy ? "Starting…" : "Run analysis"}
+        </button>
+        <button
+          type="button"
           onClick={() => onDisconnect(repo)}
-          className="ml-auto font-mono text-[10px] text-slate-600 hover:text-status-failed"
+          className="font-mono text-[10px] text-slate-600 hover:text-status-failed"
         >
           disconnect
         </button>
       </div>
+      {runError !== null && (
+        <p className="mt-2 text-[10px] text-status-failed">{runError}</p>
+      )}
 
       <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-xs text-slate-400 sm:grid-cols-4">
         <div>
