@@ -127,7 +127,11 @@ async def clone(repo: str, commit_sha: str, run_id: str, dest_root: Path) -> Wor
 
 async def create_worktree(ws: Workspace, name: str, branch: str) -> Path:
     """Add a ``git worktree`` so an agent can work in isolation."""
-    path = ws.worktree(name)
+    # git resolves a relative worktree path against its own cwd (ws.base), which
+    # would nest the checkout at base/workspaces/<run>/<name>; every other
+    # caller resolves ws.worktree(name) against the process cwd, so pin the
+    # absolute path here.
+    path = ws.worktree(name).resolve()
     if path.exists():
         await run_git(ws.base, "worktree", "remove", "--force", str(path), check=False)
         if path.exists():

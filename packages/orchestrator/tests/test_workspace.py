@@ -211,3 +211,38 @@ async def test_run_git_can_report_failure_without_raising(tmp_path: Path) -> Non
     assert await run_git(ws.base, "rev-parse", "nope", check=False) is not None
     with pytest.raises(GitError):
         await run_git(ws.base, "rev-parse", "nope")
+
+
+async def test_worktree_lands_at_ws_worktree_for_a_relative_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production API uses a relative workspaces root.
+
+    ``git worktree add`` resolves a relative path against its own cwd
+    (``ws.base``), which nested the checkout at
+    ``base/workspaces/<run>/fix-...`` while ``apply_patch`` looked at
+    ``workspaces/<run>/fix-...`` — ENOENT for every Fixer patch.
+    """
+    ws = await make_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    relative = Workspace(
+        run_id=ws.run_id,
+        repo=ws.repo,
+        commit_sha=ws.commit_sha,
+        root=Path("run_1"),
+    )
+    path = await ws_mod.create_worktree(relative, "fix-cls_9", "robotci/fix-cls_9")
+    assert path == relative.worktree("fix-cls_9").resolve()
+    assert relative.worktree("fix-cls_9").exists()
+    assert not (relative.base / "run_1").exists()
+    patch = (
+        "diff --git a/control.py b/control.py\n"
+        "--- a/control.py\n"
+        "+++ b/control.py\n"
+        "@@ -1 +1 @@\n"
+        "-grip_force = 1.0\n"
+        "+grip_force = 2.0\n"
+    )
+    await ws_mod.apply_patch(relative, "fix-cls_9", patch)
+    text = (relative.worktree("fix-cls_9") / "control.py").read_text()
+    assert "grip_force = 2.0" in text

@@ -837,6 +837,7 @@ class Pipeline:
             and "patched" in role.output
             and not role.output["patched"]
         ):
+            work.error = "Fixer returned no patch (patched: false)"
             work.outcome = "unresolved"
             self._set_cluster_phase(work, "unresolved")
             return
@@ -845,6 +846,7 @@ class Pipeline:
                 await workspace_mod.apply_patch(ctx.workspace, name, patch)
             except Exception as exc:  # noqa: BLE001 - a bad diff is agent error
                 await self._nonfatal(f"cluster {work.cluster.label} patch apply", exc)
+                work.error = f"patch apply failed: {type(exc).__name__}: {exc}"
                 work.outcome = "unresolved"
                 self._set_cluster_phase(work, "unresolved")
                 return
