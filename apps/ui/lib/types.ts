@@ -103,7 +103,7 @@ export interface ConnectedRepo {
   id: string;
   full_name: string;
   branch: string;
-  suite_size: number;
+  suite_size: number | null;
   robot_menagerie: string;
   created_at: string;
   last_push_at: string | null;
@@ -195,6 +195,8 @@ export interface Agent {
   parent_agent_id: string | null;
   finding_ids: string[];
   last_activity: string | null;
+  /** Bounded history of transcript lines, newest last. Drives the live feed. */
+  activity_log?: { text: string; ts: string }[];
   /** Embeddable live view of the agent's machine, when the session has one. */
   desktop_url: string | null;
   /** The failure being worked on, in the oracle's words. Not our instruction. */

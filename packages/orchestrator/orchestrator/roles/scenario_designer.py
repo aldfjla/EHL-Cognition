@@ -33,6 +33,7 @@ class ScenarioDesignerAgent(RoleAgent):
     role = Role.SCENARIO_DESIGNER
     prompt_file = "scenario_designer.md"
     display_name = "QA Lead"
+    fresh_session = True
     required_keys = ("axes",)
 
     #: Beyond this, SUITE_SIZE samples cover no axis densely enough to cluster.

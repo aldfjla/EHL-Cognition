@@ -289,6 +289,8 @@ def _persist_run_event(
                         update={
                             "status": ScenarioStatus.RUNNING,
                             "worker_id": data.get("worker_id"),
+                            "live_frame_path": data.get("live_frame_path")
+                            or scenario.live_frame_path,
                         }
                     ),
                 )

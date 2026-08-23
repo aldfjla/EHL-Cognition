@@ -34,6 +34,9 @@ import type {
   TypedRunEvent,
 } from "./types";
 
+/** How many transcript lines to keep per agent for the live feed. */
+const ACTIVITY_LOG_LIMIT = 200;
+
 export const WS_BASE = process.env.NEXT_PUBLIC_WS_BASE ?? "ws://localhost:8000";
 
 export type ConnectionState = "connecting" | "open" | "reconnecting" | "closed";
@@ -255,12 +258,21 @@ export function applyEvent(state: RunState, event: unknown): RunState {
       break;
     }
 
-    case "agent.activity":
+    case "agent.activity": {
+      // Keep the history, not just the newest line: a single overwritten field
+      // makes a working agent look frozen between transcript lines.
+      const activityTs = typed.data.ts ?? typed.ts;
+      const previous =
+        state.agents.find((item) => item.id === typed.data.agent_id)
+          ?.activity_log ?? [];
+      const appended = [...previous, { text: typed.data.text, ts: activityTs }];
       next.agents = patchById(state.agents, typed.data.agent_id, {
         last_activity: typed.data.text,
-        updated_at: typed.data.ts ?? typed.ts,
+        activity_log: appended.slice(-ACTIVITY_LOG_LIMIT),
+        updated_at: activityTs,
       });
       break;
+    }
     case "message.sent":
       next.messages = upsertById(state.messages, typed.data);
       break;
@@ -273,6 +285,10 @@ export function applyEvent(state: RunState, event: unknown): RunState {
     case "scenario.started":
       next.scenarios = patchById(state.scenarios, typed.data.scenario_id, {
         status: "running",
+        // Published at start so the live routes resolve while the episode runs.
+        ...(typed.data.live_frame_path
+          ? { live_frame_path: typed.data.live_frame_path }
+          : {}),
       });
       break;
 
