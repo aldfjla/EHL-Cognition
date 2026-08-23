@@ -14,6 +14,7 @@ import json
 from typing import Any
 
 from fastapi.testclient import TestClient
+from orchestrator import github
 from orchestrator.schemas import (
     Agent,
     AgentStatus,
@@ -26,6 +27,7 @@ from orchestrator.schemas import (
     Stage,
 )
 
+from app import config
 from app.routers.webhooks import _drive_pipeline, _persist_run_events, verify_signature
 from app.store import repo
 from app.store.db import session_scope
@@ -176,9 +178,51 @@ def test_manual_trigger_accepts_json_and_form(client: TestClient) -> None:
     assert from_json.json()["run_id"] != from_form.json()["run_id"]
 
 
-def test_manual_trigger_requires_a_sha(client: TestClient) -> None:
-    assert (
-        client.post("/webhooks/manual", json={"repo": "acme/robot"}).status_code == 422
+def test_manual_trigger_requires_a_repo(client: TestClient, monkeypatch: Any) -> None:
+    monkeypatch.setenv("TARGET_REPO", "")
+    config.get_settings.cache_clear()
+    assert client.post("/webhooks/manual", json={"sha": "c" * 40}).status_code == 422
+
+
+def test_manual_trigger_resolves_branch_head(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def fake_branch_head(repo_name: str, branch: str) -> str:
+        calls.append((repo_name, branch))
+        return "e" * 40
+
+    monkeypatch.setattr(github, "branch_head", fake_branch_head)
+    response = client.post(
+        "/webhooks/manual",
+        json={"repo": "acme/robot", "branch": "release"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [("acme/robot", "release")]
+    with session_scope() as db:
+        run = repo.get_run(db, response.json()["run_id"])
+    assert run is not None
+    assert run.commit_sha == "e" * 40
+    assert run.branch == "release"
+
+
+def test_manual_trigger_reports_unresolvable_branch_head(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    async def fail_branch_head(_repo_name: str, _branch: str) -> str:
+        raise github.GitHubError("gh failed")
+
+    monkeypatch.setattr(github, "branch_head", fail_branch_head)
+    response = client.post(
+        "/webhooks/manual",
+        json={"repo": "acme/robot", "branch": "release"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "could not resolve head of release — provide sha"
     )
 
 

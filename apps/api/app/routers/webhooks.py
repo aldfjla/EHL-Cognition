@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from orchestrator import triggers
+from orchestrator import github, triggers
 from orchestrator.blackboard import Blackboard
 from orchestrator.bus import EventBus
 from orchestrator.pipeline import Pipeline, PipelineContext
@@ -124,6 +124,9 @@ async def _drive_pipeline(
     """
     with session_scope() as db:
         run = repo.get_run(db, run_id)
+        connected = (
+            repo.get_repo_by_full_name(db, run.repo) if run is not None else None
+        )
     if run is None:  # pragma: no cover - the caller just created it
         log.error("pipeline asked to drive unknown run %s", run_id)
         return
@@ -149,6 +152,9 @@ async def _drive_pipeline(
             sim_workers=settings.sim_workers,
             suite_size=suite_size,
             default_suite_size=settings.suite_size,
+            default_robot_menagerie=(
+                connected.robot_menagerie if connected is not None else None
+            ),
         )
         persistence = asyncio.create_task(_persist_run_events(run.id, bus))
         # Let persistence subscribe before a synchronously failing pipeline emits.
@@ -544,14 +550,26 @@ async def manual_trigger(
     """
     fields = await _trigger_fields(request)
     repo_name = fields.get("repo") or settings.target_repo
+    if not repo_name:
+        raise HTTPException(status_code=422, detail="repo is required")
+    connected = repo.get_repo_by_full_name(db, repo_name)
+    branch = fields.get("branch") or (
+        connected.branch if connected is not None else settings.target_branch
+    )
     sha = fields.get("sha") or ""
-    if not repo_name or not sha:
-        raise HTTPException(status_code=422, detail="repo and sha are required")
+    if not sha:
+        try:
+            sha = await github.branch_head(repo_name, branch)
+        except github.GitHubError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"could not resolve head of {branch} — provide sha",
+            ) from exc
 
     return await _start_run(
         repo_name=repo_name,
         sha=sha,
-        branch=fields.get("branch") or settings.target_branch,
+        branch=branch,
         commit_message="manual trigger",
         pushed_by="manual",
         db=db,

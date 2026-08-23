@@ -43,6 +43,13 @@ def _validate_full_name(value: str) -> str:
     return value
 
 
+def _validate_non_empty(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("robot_menagerie must not be empty")
+    return value
+
+
 class RepoCreate(BaseModel):
     """Request body for connecting a repository."""
 
@@ -56,8 +63,10 @@ class RepoCreate(BaseModel):
     #: "no patterns" — the two are stored distinguishably.
     path_include: list[str] | None = None
     path_exclude: list[str] | None = None
+    robot_menagerie: str = Field(default="franka_emika_panda", min_length=1)
 
     _full_name = field_validator("full_name")(_validate_full_name)
+    _robot_menagerie = field_validator("robot_menagerie")(_validate_non_empty)
 
 
 class RepoPatch(BaseModel):
@@ -70,6 +79,7 @@ class RepoPatch(BaseModel):
     branches: list[str] | None = None
     path_include: list[str] | None = None
     path_exclude: list[str] | None = None
+    robot_menagerie: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def reject_null_updates(self) -> RepoPatch:
@@ -80,6 +90,10 @@ class RepoPatch(BaseModel):
         for name in _FILTER_FIELDS:
             if name in self.model_fields_set and getattr(self, name) is None:
                 raise ValueError(f"{name} cannot be null")
+        if "robot_menagerie" in self.model_fields_set:
+            if self.robot_menagerie is None:
+                raise ValueError("robot_menagerie cannot be null")
+            self.robot_menagerie = _validate_non_empty(self.robot_menagerie)
         if not self.model_fields_set:
             raise ValueError("at least one field is required")
         return self
@@ -136,6 +150,7 @@ async def connect_repo(
                 branches=payload.branches,
                 path_include=payload.path_include,
                 path_exclude=payload.path_exclude,
+                robot_menagerie=payload.robot_menagerie,
                 filters_source=(
                     "registry"
                     if payload.model_fields_set & set(_FILTER_FIELDS)

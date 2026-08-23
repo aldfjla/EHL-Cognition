@@ -15,12 +15,22 @@
 
 import clsx from "clsx";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import * as api from "@/lib/api";
 import { normalizeRepoInput } from "@/lib/repoInput";
-import type { ConnectedRepo, ConnectRepoResponse } from "@/lib/types";
+import type {
+  ConnectedRepo,
+  ConnectRepoResponse,
+  MenagerieModelInfo,
+} from "@/lib/types";
+
+const BASELINE_MODEL: MenagerieModelInfo = {
+  name: "franka_emika_panda",
+  dof: 9,
+  kind: "arm",
+};
 
 function since(iso: string | null): string {
   if (iso === null) return "never";
@@ -35,12 +45,32 @@ function since(iso: string | null): string {
 
 function RepoCard({
   repo,
+  models,
+  onModelUpdated,
   onDisconnect,
 }: {
   repo: ConnectedRepo;
+  models: MenagerieModelInfo[];
+  onModelUpdated: (updated: ConnectedRepo) => void;
   onDisconnect: (repo: ConnectedRepo) => void;
 }) {
   const running = repo.status === "running";
+  const router = useRouter();
+  const [runBusy, setRunBusy] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+
+  const runAnalysis = async (): Promise<void> => {
+    setRunBusy(true);
+    setRunError(null);
+    try {
+      const result = await api.triggerRun(repo.full_name, undefined, repo.branch);
+      router.push(`/runs/${result.run_id}`);
+    } catch (err) {
+      setRunError((err as Error).message);
+      setRunBusy(false);
+    }
+  };
+
   return (
     <div className="rounded-lg border border-surface-border bg-surface-raised p-4">
       <div className="flex items-center gap-3">
@@ -70,12 +100,23 @@ function RepoCard({
         </span>
         <button
           type="button"
+          onClick={() => void runAnalysis()}
+          disabled={runBusy}
+          className="ml-auto rounded border border-sky-700 px-2 py-1 font-mono text-[10px] text-sky-300 hover:border-sky-500 disabled:cursor-wait disabled:opacity-50"
+        >
+          {runBusy ? "Starting…" : "Run analysis"}
+        </button>
+        <button
+          type="button"
           onClick={() => onDisconnect(repo)}
-          className="ml-auto font-mono text-[10px] text-slate-600 hover:text-status-failed"
+          className="font-mono text-[10px] text-slate-600 hover:text-status-failed"
         >
           disconnect
         </button>
       </div>
+      {runError !== null && (
+        <p className="mt-2 text-[10px] text-status-failed">{runError}</p>
+      )}
 
       <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-xs text-slate-400 sm:grid-cols-4">
         <div>
@@ -114,6 +155,109 @@ function RepoCard({
           </dd>
         </div>
       </dl>
+      <RobotModelControl
+        repo={repo}
+        models={models}
+        onUpdated={onModelUpdated}
+      />
+    </div>
+  );
+}
+
+function RobotModelControl({
+  repo,
+  models,
+  onUpdated,
+}: {
+  repo: ConnectedRepo;
+  models: MenagerieModelInfo[];
+  onUpdated: (updated: ConnectedRepo) => void;
+}) {
+  const availableModels = models.length > 0 ? models : [BASELINE_MODEL];
+  const isKnownModel = availableModels.some(
+    (model) => model.name === repo.robot_menagerie,
+  );
+  const [selection, setSelection] = useState(isKnownModel ? repo.robot_menagerie : "custom");
+  const [customName, setCustomName] = useState(isKnownModel ? "" : repo.robot_menagerie);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const known = (models.length > 0 ? models : [BASELINE_MODEL]).some(
+      (model) => model.name === repo.robot_menagerie,
+    );
+    setSelection(known ? repo.robot_menagerie : "custom");
+    setCustomName(known ? "" : repo.robot_menagerie);
+  }, [models, repo.robot_menagerie]);
+
+  const save = async (name: string): Promise<void> => {
+    const value = name.trim();
+    if (!value) {
+      setError("Enter a model name.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await api.updateRepo(repo.id, { robot_menagerie: value });
+      onUpdated(updated);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 border-t border-surface-border pt-3">
+      <label className="block text-xs text-slate-400">
+        Robot model
+        <select
+          value={selection}
+          disabled={busy}
+          onChange={(event) => {
+            const value = event.target.value;
+            setSelection(value);
+            if (value !== "custom") void save(value);
+          }}
+          className="mt-1 w-full rounded border border-surface-border bg-surface px-2 py-1.5 font-mono text-xs text-slate-200 outline-none focus:border-sky-600"
+        >
+          {availableModels.map((model) => (
+            <option key={model.name} value={model.name}>
+              {model.name}
+              {model.dof != null ? ` · ${model.dof} dof` : ""}
+            </option>
+          ))}
+          <option value="custom">Custom…</option>
+        </select>
+      </label>
+      {selection === "custom" && (
+        <form
+          className="mt-2 flex gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save(customName);
+          }}
+        >
+          <input
+            value={customName}
+            onChange={(event) => setCustomName(event.target.value)}
+            placeholder="your_model_name"
+            className="min-w-0 flex-1 rounded border border-surface-border bg-surface px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:border-sky-600"
+          />
+          <button
+            type="submit"
+            disabled={busy}
+            className="rounded border border-sky-700 px-2 py-1 font-mono text-[10px] text-sky-300 hover:border-sky-500 disabled:opacity-50"
+          >
+            {busy ? "Saving…" : "Save"}
+          </button>
+        </form>
+      )}
+      {error !== null && <p className="mt-1 text-[10px] text-status-failed">{error}</p>}
+      <p className="mt-1 font-mono text-[10px] text-slate-500">
+        current: {repo.robot_menagerie}
+      </p>
     </div>
   );
 }
@@ -274,6 +418,7 @@ function WebhookNotice({
 function RepositoriesSection() {
   const params = useSearchParams();
   const [repos, setRepos] = useState<ConnectedRepo[]>([]);
+  const [models, setModels] = useState<MenagerieModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(params.get("connect") === "1");
@@ -297,6 +442,13 @@ function RepositoriesSection() {
     const timer = setInterval(() => void load(), 15_000);
     return () => clearInterval(timer);
   }, [load]);
+
+  useEffect(() => {
+    void api
+      .listModels()
+      .then(setModels)
+      .catch(() => setModels([BASELINE_MODEL]));
+  }, []);
 
   const disconnect = async (repo: ConnectedRepo): Promise<void> => {
     if (
@@ -364,6 +516,12 @@ function RepositoriesSection() {
             <RepoCard
               key={repo.id}
               repo={repo}
+              models={models}
+              onModelUpdated={(updated) =>
+                setRepos((current) =>
+                  current.map((item) => (item.id === updated.id ? updated : item)),
+                )
+              }
               onDisconnect={(r) => void disconnect(r)}
             />
           ))}

@@ -13,7 +13,12 @@ from app.store import repo
 def test_connect_list_update_and_delete_repo(client: TestClient, db: Any) -> None:
     response = client.post(
         "/repos",
-        json={"full_name": "acme/arm", "branch": "trunk", "suite_size": 12},
+        json={
+            "full_name": "acme/arm",
+            "branch": "trunk",
+            "suite_size": 12,
+            "robot_menagerie": "custom_arm",
+        },
     )
 
     assert response.status_code == 201
@@ -22,6 +27,7 @@ def test_connect_list_update_and_delete_repo(client: TestClient, db: Any) -> Non
     assert connected["full_name"] == "acme/arm"
     assert connected["branch"] == "trunk"
     assert connected["suite_size"] == 12
+    assert connected["robot_menagerie"] == "custom_arm"
     assert connected["status"] == "dormant"
     assert connected["latest_run"] is None
     assert body["webhook"] == {
@@ -41,6 +47,21 @@ def test_connect_list_update_and_delete_repo(client: TestClient, db: Any) -> Non
     assert updated.json()["branch"] == "main"
     assert updated.json()["suite_size"] == 50
 
+    updated_model = client.patch(
+        f"/repos/{connected['id']}",
+        json={"robot_menagerie": "franka_emika_panda"},
+    )
+    assert updated_model.status_code == 200
+    assert updated_model.json()["robot_menagerie"] == "franka_emika_panda"
+
+    assert (
+        client.patch(
+            f"/repos/{connected['id']}",
+            json={"robot_menagerie": None},
+        ).status_code
+        == 422
+    )
+
     deleted = client.delete(f"/repos/{connected['id']}")
     assert deleted.status_code == 204
     assert client.get("/repos").json() == []
@@ -52,6 +73,15 @@ def test_connect_repo_validates_shape_and_duplicates(client: TestClient) -> None
     assert client.post("/repos", json={"full_name": "acme/arm"}).status_code == 201
     duplicate = client.post("/repos", json={"full_name": "acme/arm"})
     assert duplicate.status_code == 409
+
+
+def test_models_endpoint_has_baseline_without_a_menagerie_checkout(
+    client: TestClient,
+) -> None:
+    response = client.get("/models")
+
+    assert response.status_code == 200
+    assert response.json() == [{"name": "franka_emika_panda", "dof": 9, "kind": "arm"}]
 
 
 def test_repo_status_and_latest_run_come_from_history(
