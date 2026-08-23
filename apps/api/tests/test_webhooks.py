@@ -14,7 +14,17 @@ import json
 from typing import Any
 
 from fastapi.testclient import TestClient
-from orchestrator.schemas import Agent, AgentStatus, EventType, Repo, Role, Run, Stage
+from orchestrator.schemas import (
+    Agent,
+    AgentStatus,
+    EventType,
+    Repo,
+    Role,
+    Run,
+    Scenario,
+    ScenarioStatus,
+    Stage,
+)
 
 from app.routers.webhooks import _drive_pipeline, _persist_run_events, verify_signature
 from app.store import repo
@@ -296,6 +306,46 @@ async def test_run_events_are_mirrored_into_rest_store(run: Run, bus: Any) -> No
     assert stored.step == "investigating"
     assert stored.last_activity == "reading the trace"
     assert stored.finished_at is not None
+
+
+async def test_scenario_progress_updates_live_artifact_state(
+    run: Run, bus: Any, db: Any
+) -> None:
+    scenario = repo.upsert_scenario(
+        db,
+        Scenario(
+            run_id=run.id,
+            id="scenario-1",
+            index=0,
+            seed=42,
+            status=ScenarioStatus.RUNNING,
+        ),
+    )
+    db.commit()
+
+    persistence = asyncio.create_task(_persist_run_events(run.id, bus))
+    await asyncio.sleep(0)
+    await bus.emit(
+        run.id,
+        EventType.SCENARIO_PROGRESS,
+        {
+            "scenario_id": scenario.id,
+            "progress": 0.4,
+            "sim_time_s": 1.2,
+            "live_frame_path": f"{run.id}/live/{scenario.id}.jpg",
+        },
+    )
+    await bus.close(run.id)
+    await asyncio.wait_for(persistence, timeout=1)
+
+    with session_scope() as check:
+        stored = repo.get_scenario(check, scenario.id)
+
+    assert stored is not None
+    assert stored.status is ScenarioStatus.RUNNING
+    assert stored.progress == 0.4
+    assert stored.sim_time_s == 1.2
+    assert stored.live_frame_path == f"{run.id}/live/{scenario.id}.jpg"
 
 
 def test_connected_repo_push_uses_branch_and_suite_size(

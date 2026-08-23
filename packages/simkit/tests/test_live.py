@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,6 +53,35 @@ def test_live_frame_is_atomic_and_removed_on_close(tmp_path, monkeypatch) -> Non
     writer.close()
     assert not path.exists()
     assert renderer.closed
+
+
+def test_explicit_live_destination_writes_progress_sidecar(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path))
+    destination = tmp_path / "run-1" / "live" / "scenario.jpg"
+    progress_path = tmp_path / "run-1" / "live" / "scenario.progress.json"
+    writer = live.LiveFrameWriter(
+        "scenario",
+        fps=10,
+        destination=destination,
+        progress_path=progress_path,
+    )
+    renderer = _FakeRenderer()
+    monkeypatch.setattr(writer, "_ensure_renderer", lambda scene: renderer)
+    writer.set_progress(0.25, 1.5)
+
+    assert writer.maybe_capture(SimpleNamespace(data=object()), force=True)
+    assert destination.exists()
+    assert json.loads(progress_path.read_text()) == {
+        "progress": 0.25,
+        "sim_time_s": 1.5,
+    }
+    assert writer.rel_path == "run-1/live/scenario.jpg"
+
+    writer.close()
+    assert not destination.exists()
+    assert not progress_path.exists()
 
 
 def test_live_frame_is_wall_clock_throttled(tmp_path, monkeypatch) -> None:

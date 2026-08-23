@@ -71,6 +71,7 @@ from orchestrator.schemas import (
     Role,
     Run,
     Scenario,
+    ScenarioErrorKind,
     ScenarioStatus,
     Stage,
     SuiteStats,
@@ -289,6 +290,16 @@ class Pipeline:
                 EventType.ERROR,
                 {"stage": run.stage.value, "message": run.error, "fatal": True},
             )
+            for scenario in self.ctx.scenarios:
+                if scenario.status in (ScenarioStatus.PENDING, ScenarioStatus.RUNNING):
+                    scenario.status = ScenarioStatus.ERROR
+                    scenario.error_kind = ScenarioErrorKind.INFRA
+                    scenario.error = f"run crashed: {run.error}"
+                    await self.ctx.bus.emit(
+                        run.id,
+                        EventType.SCENARIO_FINISHED,
+                        scenario.model_dump(mode="json"),
+                    )
             await self._force_failed()
         await self._finish()
         return run

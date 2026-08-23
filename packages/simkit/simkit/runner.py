@@ -99,6 +99,8 @@ def run_scenario(
     record: bool = False,
     max_wall_s: float = DEFAULT_SCENARIO_TIMEOUT_S,
     live: bool = False,
+    live_frame_path: str | None = None,
+    progress_path: str | None = None,
     on_observe: Callable[[dict[str, Any]], None] | None = None,
     observe_hz: float = 2.0,
     worker_id: str | None = None,
@@ -130,7 +132,15 @@ def run_scenario(
     sim_limit = _sim_limit(criteria)
 
     recorder = None
-    live_writer = LiveFrameWriter(scenario_id) if live else None
+    live_writer = (
+        LiveFrameWriter(
+            scenario_id,
+            destination=live_frame_path,
+            progress_path=progress_path,
+        )
+        if live or live_frame_path is not None
+        else None
+    )
     scene = None
     try:
         harness = load_harness(harness_path)
@@ -417,6 +427,7 @@ class _EpisodeLoop:
             self.recorder.overlay(self._caption())
             self.recorder.capture(self.scene)
         if self.live_writer is not None:
+            self.live_writer.set_progress(self._progress(), float(self.scene.data.time))
             self.live_writer.maybe_capture(self.scene, force=force)
 
     def _observe(self, force: bool = False) -> None:
@@ -428,11 +439,7 @@ class _EpisodeLoop:
         if not force and last is not None and now - last < interval:
             return
         self._last_observe = now
-        progress = 0.0
-        if self.sim_limit_s > 0:
-            progress = min(
-                max(float(self.scene.data.time) / self.sim_limit_s, 0.0), 1.0
-            )
+        progress = self._progress()
         try:
             self.on_observe(
                 {
@@ -451,6 +458,11 @@ class _EpisodeLoop:
             )
         except Exception:  # noqa: BLE001 - observer is an optional side channel
             return
+
+    def _progress(self) -> float | None:
+        if self.sim_limit_s <= 0:
+            return None
+        return min(max(float(self.scene.data.time) / self.sim_limit_s, 0.0), 1.0)
 
     def _caption(self) -> str:
         params = self.scene.spec.params or {}

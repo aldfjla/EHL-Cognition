@@ -13,9 +13,8 @@ Outputs: deterministic per-scenario results, worker lifecycle events, and
 artifact notifications. Physics execution remains in worker processes; live
 frames are only a filesystem side channel.
 
-The current simkit runner does not accept live-frame arguments, so no frames or
-progress events are produced by it today. The watcher is implemented against
-the documented paths and becomes active when simkit's renderer lands.
+The simkit runner receives explicit live-frame and progress paths, and the
+watcher announces newly published frames without putting bytes in events.
 """
 
 from __future__ import annotations
@@ -594,7 +593,8 @@ class SuitePool:
                         "progress": progress,
                         "sim_time_s": sim_time,
                         "live_frame_path": _relative_artifact(
-                            frame, self.artifacts_dir
+                            frame,
+                            Path(os.environ.get("ARTIFACTS_DIR", "artifacts")),
                         ),
                     },
                     key=f"scenario.progress:{scenario_id}",

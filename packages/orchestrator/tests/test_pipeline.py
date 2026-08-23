@@ -248,6 +248,59 @@ async def test_infrastructure_failure_lands_in_failed_unresolved(
     }
 
 
+async def test_fatal_failure_reconciles_created_scenarios(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = make_ctx(tmp_path)
+    ctx.scenarios = [
+        Scenario(
+            run_id=ctx.run.id,
+            id="pending",
+            index=0,
+            seed=1,
+            status=ScenarioStatus.PENDING,
+        ),
+        Scenario(
+            run_id=ctx.run.id,
+            id="running",
+            index=1,
+            seed=2,
+            status=ScenarioStatus.RUNNING,
+        ),
+        Scenario(
+            run_id=ctx.run.id,
+            id="passed",
+            index=2,
+            seed=3,
+            status=ScenarioStatus.PASSED,
+        ),
+    ]
+    pipe = Pipeline(ctx)
+
+    async def boom() -> Stage:
+        raise PipelineError("parent task crashed")
+
+    async def no_cleanup(ws: Workspace, keep_artifacts: bool = True) -> None:
+        return None
+
+    monkeypatch.setattr(pipe, "stage_triggered", boom)
+    monkeypatch.setattr(workspace_mod, "cleanup", no_cleanup)
+
+    run = await pipe.run()
+
+    assert run.stage is Stage.FAILED_UNRESOLVED
+    finished = [
+        event
+        for event in ctx.bus.history(run.id)
+        if event.type is EventType.SCENARIO_FINISHED
+    ]
+    assert [event.data["id"] for event in finished] == ["pending", "running"]
+    assert all(event.data["status"] == "error" for event in finished)
+    assert all(event.data["error_kind"] == "infra" for event in finished)
+    assert all(event.data["error"] == f"run crashed: {run.error}" for event in finished)
+    assert ctx.scenarios[2].status is ScenarioStatus.PASSED
+
+
 async def test_a_clean_suite_short_circuits_the_agents(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
