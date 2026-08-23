@@ -87,6 +87,10 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> config.Settings
     monkeypatch.setenv("TARGET_REPO", "acme/robot")
     monkeypatch.setenv("TARGET_BRANCH", "main")
     monkeypatch.setenv("DEVIN_API_KEY", "")
+    # Pin the origin the webhook URL is built from. Tests assert on it, so
+    # inheriting a developer's .env makes them fail whenever the local API
+    # runs on anything but the default port.
+    monkeypatch.setenv("API_ORIGIN", "http://localhost:8000")
 
     config.get_settings.cache_clear()
     store_db.reset_engine()

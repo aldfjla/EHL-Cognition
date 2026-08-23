@@ -425,6 +425,11 @@ class _EpisodeLoop:
         )
         self._frame_every = max(1, round(rate_hz / 30))
         self._last_observe: float | None = None
+        try:
+            self._realtime_factor = float(os.environ.get("SIMKIT_REALTIME_FACTOR", "0"))
+        except ValueError:
+            self._realtime_factor = 0.0
+        self._wall_start = time.monotonic()
         collect_trace(scene, 0, trace)
         self._capture(force=True)
         self._observe(force=True)
@@ -439,7 +444,27 @@ class _EpisodeLoop:
             collect_trace(self.scene, self.steps, self.trace)
             self._capture()
             self._observe()
+            self._pace()
         return float(self.scene.data.time)
+
+    def _pace(self) -> None:
+        """Hold the simulation near wall-clock speed when asked to.
+
+        Physics runs far faster than real time -- a 12s episode finishes in
+        well under a second -- which leaves the live frame writer with one or
+        two frames to publish and nothing for a viewer to watch. Setting
+        SIMKIT_REALTIME_FACTOR to 1 makes an episode take about as long as the
+        robot would; 2 runs at half speed. Unset or 0 keeps full speed, which
+        is what batch suites and tests want.
+        """
+        if self._realtime_factor <= 0.0:
+            return
+        target = self._wall_start + (
+            float(self.scene.data.time) * self._realtime_factor
+        )
+        remaining = target - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(remaining, 0.25))
 
     def on_step(self) -> float:
         """Record a step a harness took itself, and enforce the guards."""
