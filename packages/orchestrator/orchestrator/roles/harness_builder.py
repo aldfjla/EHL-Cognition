@@ -35,6 +35,7 @@ class HarnessBuilderAgent(RoleAgent):
     role = Role.HARNESS_BUILDER
     prompt_file = "harness_builder.md"
     display_name = "Test Infrastructure Engineer"
+    fresh_session = True
     required_keys = ("harness_path", "harness_code", "interface_notes")
 
     def template_vars(self, **kwargs: Any) -> dict[str, Any]:

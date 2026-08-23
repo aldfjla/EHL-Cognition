@@ -52,6 +52,7 @@ from orchestrator.devin.hierarchy import AgentTree
 from orchestrator.pool import SuitePool
 from orchestrator.roles.base import RoleAgent
 from orchestrator.roles.fixer import FixerAgent
+from simkit.live import live_frame_path
 from orchestrator.roles.harness_builder import HarnessBuilderAgent
 from orchestrator.roles.investigator import InvestigatorAgent
 from orchestrator.roles.modeler import ModelerAgent
@@ -133,6 +134,10 @@ MODEL_FILENAME = "robot.xml"
 
 #: Filename the Harness Builder writes its adapter to.
 HARNESS_FILENAME = "harness.py"
+
+#: Findings quoted into the team chat at a role handoff. Enough to explain the
+#: decision, few enough that the chat stays readable next to the agent grid.
+MAX_HANDOFF_FINDINGS = 3
 
 #: Root causes at or above this confidence are promoted to ``confirmed`` so FIX
 #: has something to fan out over. The Reviewer refutes them at VERIFY if the
@@ -478,6 +483,10 @@ class Pipeline:
             model_path=self._model_path(),
             harness_out_path=str(harness_path),
         )
+        # Speak the handoff so the dashboard reads as a team: the QA Lead is
+        # designing scenarios right now and these constraints shape them.
+        await self._relay_handoff(builder, Role.SCENARIO_DESIGNER)
+
         # The agent works on its own machine: the harness arrives as source in
         # the structured output, not as a file on this disk.
         harness_code = str(builder.output.get("harness_code") or "")
@@ -843,6 +852,8 @@ class Pipeline:
                 or results_by_seed[scenario.seed].status != "passed"
             )
         ]
+        await self._relay_handoff(role, Role.REVIEWER)
+
         reviewer_error: str | None = None
         reviewer = ReviewerAgent(ctx)
         refusal = self._agent_tree.child_refusal(agent.id)
@@ -1270,6 +1281,10 @@ class Pipeline:
                 return
             scenario.status = ScenarioStatus.RUNNING
             scenario.worker_id = worker_id
+            # Published now, not on completion: the live routes serve
+            # scenario.live_frame_path, and a feed that only resolves once the
+            # episode is over is not a live feed.
+            scenario.live_frame_path = live_frame_path(scenario_id)
 
         async def on_result(result: Any) -> None:
             nonlocal completed, passed, failed
@@ -1376,6 +1391,26 @@ class Pipeline:
         scenario.criteria = [
             CriterionResult(**criterion) for criterion in result.criteria
         ]
+
+    @staticmethod
+    async def _relay_handoff(role: Any, to_role: Role) -> None:
+        """Speak a role's findings to the seat that picks up next.
+
+        Handoffs are what make the dashboard read as a team rather than a task
+        list. Best effort: chat is narration, so a relay that fails must not
+        fail the run, and a test double standing in for a role need not
+        implement it.
+        """
+        findings = getattr(role, "findings", None) or []
+        relay = getattr(role, "relay", None)
+        if not findings or relay is None:
+            return
+        for finding in findings[:MAX_HANDOFF_FINDINGS]:
+            try:
+                await relay(finding, to_role, "handoff")
+            except Exception:  # noqa: BLE001 - narration, not control flow
+                log.exception("handoff relay to %s failed", to_role.value)
+                return
 
     @staticmethod
     def _stats(scenarios: list[Scenario]) -> SuiteStats:
