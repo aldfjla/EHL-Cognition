@@ -41,6 +41,7 @@ import json
 import logging
 import os
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -230,6 +231,8 @@ class Pipeline:
         self._artifacts = Path(os.getenv("ARTIFACTS_DIR", "artifacts")) / ctx.run.id
         #: Suite results before any patch, and after the latest VERIFY, kept as
         #: raw simkit results so ``simkit.suite.compare`` can diff them.
+        #: Scenario Designer dispatched early and awaited in DESIGN_SCENARIOS.
+        self._designer_task: asyncio.Task[Any] | None = None
         self._before_results: list[Any] = []
         self._after_results: list[Any] = []
         self._after_videos: dict[str, dict[str, str]] = {}
@@ -457,6 +460,14 @@ class Pipeline:
         from simkit import runner
 
         ctx = self.ctx
+        # The Scenario Designer reads only task, success criteria and suite
+        # size -- all known since the clone -- so making it wait for the
+        # harness costs a full agent turnaround for nothing. Start it now and
+        # collect it in DESIGN_SCENARIOS. The handoff relay below still
+        # reaches it, because relay() speaks into whatever session is live:
+        # the constraints arrive while it works, as they would on a real team.
+        if self._designer_task is None:
+            self._designer_task = asyncio.create_task(self._dispatch_designer())
         control = ctx.config.get("control", {})
         harness_path = self._artifacts / HARNESS_FILENAME
         builder = HarnessBuilderAgent(ctx)
@@ -502,6 +513,33 @@ class Pipeline:
             )
         return Stage.DESIGN_SCENARIOS
 
+    def _suite_size(self) -> int:
+        """Scenario count: explicit override, else robotci.yaml, else default."""
+        ctx = self.ctx
+        configured = ctx.config.get("scenarios", {}).get("count")
+        return int(
+            ctx.suite_size
+            if ctx.suite_size is not None
+            else (configured if configured is not None else ctx.default_suite_size)
+        )
+
+    async def _dispatch_designer(self) -> Any:
+        """Run the Scenario Designer. Started early, awaited in DESIGN_SCENARIOS."""
+        ctx = self.ctx
+        task = ctx.config.get("task", {})
+        async with self._agent_gate:
+            return await ScenarioDesignerAgent(ctx).dispatch(
+                task_description=task.get("description", task.get("name", "")),
+                success_criteria=task.get("success", []),
+                suite_size=self._suite_size(),
+            )
+
+    async def _collect_designer(self) -> Any:
+        """Await the early dispatch, or run it now if it never started."""
+        if self._designer_task is None:
+            return await self._dispatch_designer()
+        return await self._designer_task
+
     async def stage_design_scenarios(self) -> Stage:
         """Design the randomized world matrix.
 
@@ -512,22 +550,8 @@ class Pipeline:
         from simkit import scenarios as scenario_gen
 
         ctx = self.ctx
-        task = ctx.config.get("task", {})
-        configured_size = ctx.config.get("scenarios", {}).get("count")
-        suite_size = int(
-            ctx.suite_size
-            if ctx.suite_size is not None
-            else (
-                configured_size
-                if configured_size is not None
-                else ctx.default_suite_size
-            )
-        )
-        agent = await ScenarioDesignerAgent(ctx).dispatch(
-            task_description=task.get("description", task.get("name", "")),
-            success_criteria=task.get("success", []),
-            suite_size=suite_size,
-        )
+        suite_size = self._suite_size()
+        agent = await self._collect_designer()
         axes = self._axes(agent)
         if not axes:
             raise PipelineError(
@@ -1602,6 +1626,14 @@ class Pipeline:
 
     async def _finish(self) -> None:
         run = self.ctx.run
+        # A run that dies in BUILD_HARNESS leaves the early Scenario Designer
+        # dispatch in flight. Cancel it rather than orphan the task and let its
+        # Devin session keep burning ACUs with nobody reading the result.
+        task = self._designer_task
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
         if self._pool is not None:
             await self._pool.aclose()
         run.finished_at = _now()

@@ -83,7 +83,7 @@ STRUCTURED_OUTPUT_REMINDER = (
 )
 
 #: How long to keep polling after the reminder above before giving up.
-REMINDER_TIMEOUT_S = 120.0
+REMINDER_TIMEOUT_S = float(os.getenv("SESSION_REMINDER_TIMEOUT_S", "60"))
 
 #: Maximum number of transcript pages fetched for one poll or output scrape.
 MAX_TRANSCRIPT_PAGES = 100
