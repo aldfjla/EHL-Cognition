@@ -45,11 +45,41 @@ class GitHubError(RuntimeError):
 
 async def branch_head(repo: str, branch: str) -> str:
     """Resolve the current commit at ``branch`` from GitHub."""
-    sha = await _gh("api", f"repos/{repo}/commits/{branch}", "--jq", ".sha")
-    sha = sha.strip()
-    if not sha:
-        raise GitHubError(f"could not resolve head of {branch}")
-    return sha
+    token = os.getenv("GITHUB_TOKEN", "")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"https://api.github.com/repos/{repo}/commits/{branch}",
+                headers=headers,
+            )
+    except httpx.HTTPError as exc:
+        raise GitHubError(f"branch head request failed: {exc}") from exc
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    message = (
+        str(payload.get("message"))
+        if isinstance(payload, dict) and payload.get("message")
+        else response.text
+    )
+    if not 200 <= response.status_code < 300:
+        raise GitHubError(f"branch head failed ({response.status_code}): {message}")
+
+    sha = payload.get("sha") if isinstance(payload, dict) else None
+    if not isinstance(sha, str) or not sha.strip():
+        raise GitHubError(
+            f"branch head failed ({response.status_code}): response missing sha"
+        )
+    return sha.strip()
 
 
 def dry_run() -> bool:
