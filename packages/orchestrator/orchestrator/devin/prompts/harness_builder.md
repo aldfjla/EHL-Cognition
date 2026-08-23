@@ -7,6 +7,8 @@ hardware. Nobody else on the team can start until this works.
 
 ## Task
 
+Why the previous attempt was rejected: {{rejection}}
+
 The developer's entrypoint is `{{entrypoint}}`, which expects to talk to
 hardware over the `{{interface}}` interface at {{rate_hz}} Hz.
 
@@ -60,7 +62,7 @@ Paste the joint trajectory of your smoke test into your final message.
 ```json
 {
   "harness_path": "/abs/path/to/harness.py",
-  "harness_code": "# the complete harness module source, JSON-escaped",
+  "harness_code": "import mujoco\n\ndef run_episode(model, data, params):\n    ...  # <- your real module source, in full, JSON-escaped",
   "smoke_passed": true,
   "interface_notes": "How their commands map to actuators",
   "shims": ["Faked `arm_driver.ArmClient` with a MuJoCo-backed stub"],
@@ -71,4 +73,6 @@ Paste the joint trajectory of your smoke test into your final message.
 
 `constraints` becomes a blackboard entry every later agent must respect.
 `harness_code` is the deliverable: without it the stage fails, no matter how
-well the smoke test went on your machine.
+well the smoke test went on your machine. It must be the literal source text of
+the module you just ran — every import and every line of `run_episode`, not a
+summary, a path, or a placeholder describing it.
