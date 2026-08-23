@@ -55,6 +55,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from orchestrator import triggers
 from orchestrator.blackboard import Blackboard
 from orchestrator.bus import EventBus
+from orchestrator.github import GitHubError, resolve_branch_head
 from orchestrator.pipeline import Pipeline, PipelineContext
 from orchestrator.schemas import (
     Agent,
@@ -527,24 +528,47 @@ async def manual_trigger(
 
     ``repo``/``sha``/``branch`` are read from a JSON body, a form body or the
     query string, in that order — the README triggers this with a bare
-    ``curl -d`` (which sends form encoding) and the dashboard sends JSON.
+    ``curl -d`` (which sends form encoding) and the dashboard sends JSON. When
+    ``sha`` is absent, the connected repository's branch HEAD is resolved from
+    GitHub.
     """
     fields = await _trigger_fields(request)
     repo_name = fields.get("repo") or settings.target_repo
+    if not repo_name:
+        raise HTTPException(status_code=422, detail="repo is required")
+
+    connected = repo.get_repo_by_full_name(db, repo_name)
+    branch = (
+        fields.get("branch")
+        or (connected.branch if connected is not None else None)
+        or settings.target_branch
+    )
     sha = fields.get("sha") or ""
-    if not repo_name or not sha:
-        raise HTTPException(status_code=422, detail="repo and sha are required")
+    commit_message = "manual trigger"
+    if not sha:
+        try:
+            sha, commit_message = await resolve_branch_head(repo_name, branch)
+        except GitHubError as exc:
+            message = str(exc).lower()
+            if exc.status_code == 404 or "repository or branch not found" in message:
+                status_code = 404
+            elif "github_token unset" in message:
+                status_code = 422
+            else:
+                status_code = 502
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     return await _start_run(
         repo_name=repo_name,
         sha=sha,
-        branch=fields.get("branch") or settings.target_branch,
-        commit_message="manual trigger",
+        branch=branch,
+        commit_message=commit_message,
         pushed_by="manual",
         db=db,
         bus=bus,
         settings=settings,
         background=background,
+        suite_size=connected.suite_size if connected is not None else None,
     )
 
 

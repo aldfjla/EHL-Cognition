@@ -15,8 +15,8 @@
 
 import clsx from "clsx";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import * as api from "@/lib/api";
 import { normalizeRepoInput } from "@/lib/repoInput";
@@ -36,11 +36,31 @@ function since(iso: string | null): string {
 function RepoCard({
   repo,
   onDisconnect,
+  onTriggerRun,
 }: {
   repo: ConnectedRepo;
   onDisconnect: (repo: ConnectedRepo) => void;
+  onTriggerRun: (repo: ConnectedRepo) => Promise<void>;
 }) {
   const running = repo.status === "running";
+  const triggeringRef = useRef(false);
+  const [triggering, setTriggering] = useState(false);
+  const [triggerError, setTriggerError] = useState<string | null>(null);
+
+  const trigger = async (): Promise<void> => {
+    if (triggeringRef.current || running) return;
+    triggeringRef.current = true;
+    setTriggering(true);
+    setTriggerError(null);
+    try {
+      await onTriggerRun(repo);
+    } catch (err) {
+      setTriggerError((err as Error).message);
+      triggeringRef.current = false;
+      setTriggering(false);
+    }
+  };
+
   return (
     <div className="rounded-lg border border-surface-border bg-surface-raised p-4">
       <div className="flex items-center gap-3">
@@ -70,12 +90,24 @@ function RepoCard({
         </span>
         <button
           type="button"
+          onClick={() => void trigger()}
+          disabled={triggering || running}
+          className="ml-auto font-mono text-[10px] text-sky-500 hover:text-sky-300 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {triggering ? "triggering…" : "trigger run"}
+        </button>
+        <button
+          type="button"
           onClick={() => onDisconnect(repo)}
-          className="ml-auto font-mono text-[10px] text-slate-600 hover:text-status-failed"
+          className="font-mono text-[10px] text-slate-600 hover:text-status-failed"
         >
           disconnect
         </button>
       </div>
+
+      {triggerError !== null && (
+        <p className="mt-2 text-xs text-status-error">{triggerError}</p>
+      )}
 
       <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-xs text-slate-400 sm:grid-cols-4">
         <div>
@@ -273,6 +305,7 @@ function WebhookNotice({
 
 function RepositoriesSection() {
   const params = useSearchParams();
+  const router = useRouter();
   const [repos, setRepos] = useState<ConnectedRepo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -307,6 +340,12 @@ function RepositoriesSection() {
       return;
     await api.disconnectRepo(repo.id);
     void load();
+  };
+
+  const triggerRun = async (repo: ConnectedRepo): Promise<void> => {
+    const result = await api.triggerRun(repo.full_name);
+    void load();
+    router.push(`/runs/${result.run_id}`);
   };
 
   return (
@@ -365,6 +404,7 @@ function RepositoriesSection() {
               key={repo.id}
               repo={repo}
               onDisconnect={(r) => void disconnect(r)}
+              onTriggerRun={triggerRun}
             />
           ))}
         </div>

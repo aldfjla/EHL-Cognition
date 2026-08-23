@@ -1,14 +1,14 @@
-"""GitHub side effects: branches, pull requests and commit status checks.
+"""GitHub operations: branch metadata, branches, pull requests and statuses.
 
 Responsibility
 --------------
-Everything Robot CI writes back to the customer repo. Isolated in one module so
-the blast radius of a bug is one file, and so a dry-run mode can neuter every
-outbound write during rehearsal.
+Everything Robot CI reads from or writes back to the customer repo. Isolated in
+one module so the blast radius of a bug is one file, and so a dry-run mode can
+neuter every outbound write during rehearsal.
 
 Inputs:  a :class:`~orchestrator.workspace.Workspace`, a
          :class:`~orchestrator.schemas.Report`, ``GITHUB_TOKEN``.
-Outputs: a pushed branch, an open PR url, a commit status on the pushed SHA.
+Outputs: a branch HEAD, pushed branch, open PR url, or commit status.
 
 Implementation note: ``gh`` for anything with a CLI equivalent (auth is already
 solved), ``httpx`` against the REST API for status checks, which ``gh`` exposes
@@ -40,7 +40,11 @@ _VALID_STATES = ("pending", "success", "failure", "error")
 
 
 class GitHubError(RuntimeError):
-    """An outbound GitHub write failed. Infrastructure, not a robot failure."""
+    """A GitHub API operation failed. Infrastructure, not a robot failure."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def dry_run() -> bool:
@@ -176,6 +180,55 @@ async def set_commit_status(
         raise GitHubError(
             f"commit status failed ({response.status_code}): {response.text}"
         )
+
+
+async def resolve_branch_head(repo: str, branch: str) -> tuple[str, str]:
+    """Resolve a branch to its current commit SHA and subject line."""
+    token = os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        raise GitHubError(
+            "GITHUB_TOKEN unset; add GITHUB_TOKEN to .env to trigger a run"
+        )
+
+    url = f"https://api.github.com/repos/{repo}/commits/{branch}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+    except httpx.HTTPError as exc:
+        raise GitHubError(
+            f"could not reach GitHub while resolving {repo}@{branch}; "
+            "check the server network connection and try again"
+        ) from exc
+
+    if response.status_code == 404:
+        raise GitHubError(
+            f"GitHub repository or branch not found for {repo}@{branch}; "
+            "check the connected repository name and branch",
+            status_code=404,
+        )
+    if response.status_code >= 300:
+        raise GitHubError(
+            f"GitHub could not resolve {repo}@{branch} "
+            f"({response.status_code}); check GITHUB_TOKEN access and try again"
+        )
+
+    try:
+        payload = response.json()
+        sha = str(payload["sha"])
+        message = str(payload["commit"]["message"]).splitlines()[0]
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise GitHubError(
+            f"GitHub returned an invalid commit for {repo}@{branch}; "
+            "check repository access and try again"
+        ) from exc
+    return sha, message
 
 
 async def comment_on_commit(repo: str, sha: str, body: str) -> None:

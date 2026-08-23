@@ -24,6 +24,7 @@ import type {
   RunDetail,
   RunEvent,
   Scenario,
+  TriggerRunResponse,
 } from "./types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
@@ -220,11 +221,11 @@ export async function deleteInternalDbRow(
   );
 }
 
-/** Start a run without GitHub. The demo trigger. */
-export async function triggerRun(repo: string, sha: string): Promise<{ run_id: string }> {
-  return request<{ run_id: string }>("/webhooks/manual", {
+/** Start a run without GitHub. Resolves the connected branch HEAD server-side. */
+export async function triggerRun(repo: string): Promise<TriggerRunResponse> {
+  return request<TriggerRunResponse>("/webhooks/manual", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ repo, sha }),
+    body: JSON.stringify({ repo }),
   });
 }
