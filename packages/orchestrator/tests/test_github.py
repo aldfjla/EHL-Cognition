@@ -80,7 +80,7 @@ async def test_set_commit_status_rejects_unknown_states() -> None:
         await github.set_commit_status("acme/x", "a" * 40, "greenish", "ok")
 
 
-async def test_resolve_branch_head_returns_sha_and_subject(
+async def test_branch_head_returns_sha_and_subject(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     response = httpx.Response(
@@ -105,13 +105,13 @@ async def test_resolve_branch_head_returns_sha_and_subject(
     monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(github.httpx, "AsyncClient", lambda **kwargs: FakeClient())
 
-    assert await github.resolve_branch_head("acme/arm-control", "main") == (
+    assert await github.branch_head("acme/arm-control", "main") == (
         "b" * 40,
         "tune the grasp",
     )
 
 
-async def test_resolve_branch_head_maps_github_422_to_branch_not_found(
+async def test_branch_head_maps_github_422_to_branch_not_found(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     response = httpx.Response(
@@ -134,7 +134,7 @@ async def test_resolve_branch_head_maps_github_422_to_branch_not_found(
     monkeypatch.setattr(github.httpx, "AsyncClient", lambda **kwargs: FakeClient())
 
     with pytest.raises(github.GitHubError) as caught:
-        await github.resolve_branch_head("acme/arm-control", "missing-branch")
+        await github.branch_head("acme/arm-control", "missing-branch")
 
     assert caught.value.status_code == 404
     assert str(caught.value) == (

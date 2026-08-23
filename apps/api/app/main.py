@@ -32,7 +32,17 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import deps
 from app.config import get_settings, validate_paths
-from app.routers import agents, artifacts, internal, live, repos, runs, stream, webhooks
+from app.routers import (
+    agents,
+    artifacts,
+    internal,
+    live,
+    models,
+    repos,
+    runs,
+    stream,
+    webhooks,
+)
 from app.store.db import get_engine
 
 
@@ -81,7 +91,17 @@ def create_app() -> FastAPI:
         }
         return {"status": "ok" if checks["database"] else "degraded", "checks": checks}
 
-    for module in (repos, webhooks, runs, agents, artifacts, live, stream, internal):
+    for module in (
+        repos,
+        models,
+        webhooks,
+        runs,
+        agents,
+        artifacts,
+        live,
+        stream,
+        internal,
+    ):
         app.include_router(module.router)
 
     return app

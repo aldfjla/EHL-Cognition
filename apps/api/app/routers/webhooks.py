@@ -52,10 +52,9 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from orchestrator import triggers
+from orchestrator import github, triggers
 from orchestrator.blackboard import Blackboard
 from orchestrator.bus import EventBus
-from orchestrator.github import GitHubError, resolve_branch_head
 from orchestrator.pipeline import Pipeline, PipelineContext
 from orchestrator.schemas import (
     Agent,
@@ -125,6 +124,9 @@ async def _drive_pipeline(
     """
     with session_scope() as db:
         run = repo.get_run(db, run_id)
+        connected = (
+            repo.get_repo_by_full_name(db, run.repo) if run is not None else None
+        )
     if run is None:  # pragma: no cover - the caller just created it
         log.error("pipeline asked to drive unknown run %s", run_id)
         return
@@ -150,6 +152,9 @@ async def _drive_pipeline(
             sim_workers=settings.sim_workers,
             suite_size=suite_size,
             default_suite_size=settings.suite_size,
+            default_robot_menagerie=(
+                connected.robot_menagerie if connected is not None else None
+            ),
         )
         persistence = asyncio.create_task(_persist_run_events(run.id, bus))
         # Let persistence subscribe before a synchronously failing pipeline emits.
@@ -536,19 +541,16 @@ async def manual_trigger(
     repo_name = fields.get("repo") or settings.target_repo
     if not repo_name:
         raise HTTPException(status_code=422, detail="repo is required")
-
     connected = repo.get_repo_by_full_name(db, repo_name)
-    branch = (
-        fields.get("branch")
-        or (connected.branch if connected is not None else None)
-        or settings.target_branch
+    branch = fields.get("branch") or (
+        connected.branch if connected is not None else settings.target_branch
     )
     sha = fields.get("sha") or ""
     commit_message = "manual trigger"
     if not sha:
         try:
-            sha, commit_message = await resolve_branch_head(repo_name, branch)
-        except GitHubError as exc:
+            sha, commit_message = await github.branch_head(repo_name, branch)
+        except github.GitHubError as exc:
             status_code = exc.status_code or 502
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 

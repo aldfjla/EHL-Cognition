@@ -211,6 +211,46 @@ async def test_advance_to_the_current_stage_is_a_no_op(tmp_path: Path) -> None:
     assert ctx.bus.history(ctx.run.id) == []
 
 
+@pytest.mark.parametrize(
+    ("config", "expected_robot"),
+    [
+        ({}, {"menagerie": "custom_arm"}),
+        ({"robot": {"menagerie": "committed_arm"}}, {"menagerie": "committed_arm"}),
+        ({"robot": {"model_path": "robot.xml"}}, {"model_path": "robot.xml"}),
+    ],
+)
+async def test_registry_robot_model_is_only_a_config_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config: dict,
+    expected_robot: dict,
+) -> None:
+    ctx = make_ctx(tmp_path)
+    ctx.default_robot_menagerie = "custom_arm"
+    monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    ctx.workspace.base.mkdir(parents=True)
+    (ctx.workspace.base / "main.py").write_text("")
+
+    async def fake_clone(*_args: object, **_kwargs: object) -> Workspace:
+        return ctx.workspace
+
+    async def fake_read_config(_workspace: Workspace) -> dict:
+        config.setdefault("control", {"entrypoint": "main.py"})
+        return config
+
+    async def fake_set_commit_status(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(workspace_mod, "clone", fake_clone)
+    monkeypatch.setattr(workspace_mod, "read_config", fake_read_config)
+    monkeypatch.setattr(
+        pipeline_mod.github, "set_commit_status", fake_set_commit_status
+    )
+
+    assert await Pipeline(ctx).stage_triggered() is Stage.RESOLVE_MODEL
+    assert ctx.config["robot"] == expected_robot
+
+
 # -- run() ------------------------------------------------------------------ #
 
 

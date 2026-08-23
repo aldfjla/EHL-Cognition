@@ -230,6 +230,7 @@ def _repo_to_row(repository: Repo) -> RepoRow:
         branches_json=json.dumps(repository.branches),
         path_include_json=json.dumps(repository.path_include),
         path_exclude_json=json.dumps(repository.path_exclude),
+        robot_menagerie=repository.robot_menagerie,
         filters_source=repository.filters_source,
         created_at=repository.created_at,
         last_push_at=repository.last_push_at,
@@ -247,6 +248,7 @@ def _row_to_repo(row: RepoRow) -> Repo:
         # ``or "null"`` covers a legacy empty string, not a configured ``[]``.
         "path_include": json.loads(row.path_include_json or "null"),
         "path_exclude": json.loads(row.path_exclude_json or "null"),
+        "robot_menagerie": row.robot_menagerie,
         "filters_source": row.filters_source,
         "created_at": row.created_at,
         "last_push_at": row.last_push_at,
@@ -296,6 +298,7 @@ def update_repo(db: Session, repository: Repo) -> Repo:
     row.branches_json = json.dumps(repository.branches)
     row.path_include_json = json.dumps(repository.path_include)
     row.path_exclude_json = json.dumps(repository.path_exclude)
+    row.robot_menagerie = repository.robot_menagerie
     row.filters_source = repository.filters_source
     row.created_at = repository.created_at
     row.last_push_at = repository.last_push_at

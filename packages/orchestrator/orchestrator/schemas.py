@@ -341,6 +341,9 @@ class Repo(_Base):
     #: the round-trip through storage.
     path_include: list[str] | None = None
     path_exclude: list[str] | None = None
+    #: Menagerie model used as the registry default when a checkout does not
+    #: name its own ``robot.menagerie`` or ``robot.model_path``.
+    robot_menagerie: str = "franka_emika_panda"
     #: Where the filters above came from: ``"default"`` until a checkout has
     #: been read, then ``"robotci.yaml"`` or ``"registry"`` when set by API.
     filters_source: Literal["default", "registry", "robotci.yaml"] = "default"

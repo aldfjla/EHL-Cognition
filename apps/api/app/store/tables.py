@@ -69,6 +69,7 @@ class RepoRow(SQLModel, table=True):
     branches_json: str = "[]"
     path_include_json: str = "null"
     path_exclude_json: str = "null"
+    robot_menagerie: str = "franka_emika_panda"
     filters_source: str = "default"
     created_at: datetime
     last_push_at: datetime | None = None
