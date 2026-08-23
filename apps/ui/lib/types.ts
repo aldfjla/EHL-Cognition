@@ -398,7 +398,11 @@ export interface EventPayloads {
   "agent.activity": { agent_id: string; text: string; ts: string };
   "message.sent": Message;
   "scenario.created": Scenario;
-  "scenario.started": { scenario_id: string; worker_id?: string | null };
+  "scenario.started": {
+    scenario_id: string;
+    worker_id?: string | null;
+    live_frame_path?: string | null;
+  };
   "scenario.progress": {
     scenario_id: string;
     progress: number;

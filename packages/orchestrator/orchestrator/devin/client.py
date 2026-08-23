@@ -149,13 +149,22 @@ def _coerce_structured(value: Any) -> dict[str, Any] | None:
     return None
 
 
-def transcript_lines(payload: dict[str, Any]) -> list[str]:
-    """Flatten a session payload's messages into transcript lines."""
+def transcript_lines(
+    payload: dict[str, Any], *, exclude_sources: tuple[str, ...] = ()
+) -> list[str]:
+    """Flatten a session payload's messages into transcript lines.
+
+    ``exclude_sources`` drops messages by their ``source`` field ("user" for
+    everything we sent, "devin" for the agent). Entries without a source are
+    always kept, since older payload shapes carry plain strings.
+    """
     lines: list[str] = []
     for entry in payload.get("messages") or []:
         if isinstance(entry, str):
             text = entry
         elif isinstance(entry, dict):
+            if exclude_sources and str(entry.get("source") or "") in exclude_sources:
+                continue
             text = str(entry.get("message") or entry.get("text") or "")
         else:
             text = str(entry)
@@ -171,7 +180,10 @@ def extract_structured_output(payload: dict[str, Any]) -> dict[str, Any] | None:
         parsed = _coerce_structured(payload.get(key))
         if parsed is not None:
             return parsed
-    for line in reversed(transcript_lines(payload)):
+    # Never scrape messages we sent: the role prompt embeds the output schema
+    # as a fenced json example, so an agent whose real answer is unparseable
+    # would otherwise "succeed" with the template's placeholder values.
+    for line in reversed(transcript_lines(payload, exclude_sources=("user",))):
         parsed = _scrape_json_block(line)
         if parsed is not None:
             return parsed
