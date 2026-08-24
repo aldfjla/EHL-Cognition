@@ -7,6 +7,7 @@
  * `/runs`.
  */
 
+import type { Metadata } from "next";
 import Link from "next/link";
 
 import Reveal from "@/components/landing/Reveal";
@@ -14,6 +15,12 @@ import ScrollProgress from "@/components/landing/ScrollProgress";
 import SimStack from "@/components/landing/SimStack";
 import SmoothScroll from "@/components/landing/SmoothScroll";
 import { MOCK_RUN_ID } from "@/lib/mockRun";
+
+export const metadata: Metadata = {
+  title: { absolute: "Robot CI" },
+  description:
+    "The front door to autonomous CI for robot control code, tested in simulation and fixed by agents.",
+};
 
 const STAGES: { id: string; title: string; detail: string }[] = [
   {
